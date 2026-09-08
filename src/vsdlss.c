@@ -17,6 +17,7 @@
  */
 
 #include "vsdlss.h"
+#include "vsdlss_internal.h"
 
 static csi vsdlss_tdfs(csi j, csi k, csi *head, const csi *next, csi *post, csi *stack);
 csi vsdlss_leaf(csi i, csi j, const csi *first, csi *maxfirst,
@@ -25,16 +26,29 @@ csi vsdlss_leaf(csi i, csi j, const csi *first, csi *maxfirst,
 /* ------------------------------------------------------------------------
  * memory wrappers
  * --------------------------------------------------------------------- */
-void *vsdlss_malloc(csi n, size_t size) { return malloc(size ? (size_t)n * size : 1); }
-void *vsdlss_calloc(csi n, size_t size) { return calloc(size ? (size_t)n : 1, size); }
+void *vsdlss_malloc(csi n, size_t size)
+{
+    if (n < 0 || (size && (uint64_t)n > SIZE_MAX / size)) return NULL;
+    return malloc(size && n ? (size_t)n * size : 1);
+}
+void *vsdlss_calloc(csi n, size_t size)
+{
+    if (n < 0 || (size && (uint64_t)n > SIZE_MAX / size)) return NULL;
+    return calloc(n > 0 ? (size_t)n : 1, size);
+}
 void *vsdlss_free(void *p) { if (p) free(p); return NULL; }
 void *vsdlss_realloc(void *p, csi n, size_t size, csi *ok)
 {
     void *pnew;
-    if (!p) { pnew = malloc((size_t)n * size); *ok = (pnew != NULL); return pnew; }
-    pnew = realloc(p, size ? (size_t)n * size : 1);
-    *ok = (pnew != NULL);
-    return ((*ok) ? pnew : p);
+    if (!ok || n < 0 || (size && (uint64_t)n > SIZE_MAX / size)) {
+        if (ok) *ok = 0;
+        return p;
+    }
+    if (!p) { pnew = malloc(size && n ? (size_t)n * size : 1); *ok = (pnew != NULL); return pnew; }
+    pnew = realloc(p, size && n ? (size_t)n * size : 1);
+    if (!pnew) { *ok = 0; return p; }
+    *ok = 1;
+    return pnew;
 }
 
 /* ------------------------------------------------------------------------
@@ -43,7 +57,7 @@ void *vsdlss_realloc(void *p, csi n, size_t size, csi *ok)
 vsdlss *vsdlss_spalloc(csi m, csi n, csi nzmax, csi values, csi triplet)
 {
     vsdlss *A = (vsdlss *)vsdlss_calloc(1, sizeof(vsdlss));
-    if (!A) return NULL;
+    if (!A || m < 0 || n < 0 || nzmax < 0 || n == INT64_MAX) { free(A); return NULL; }
     A->m = m; A->n = n;
     A->nzmax = (nzmax > 1) ? nzmax : 1;
     A->nz = triplet ? 0 : -1;
@@ -332,12 +346,15 @@ vsdlss *vsdlss_symperm(const vsdlss *A, const csi *pinv, csi values)
 /* ------------------------------------------------------------------------
  * sparse Cholesky: L*L' = C where C = A(p,p)
  * --------------------------------------------------------------------- */
-vsdlss_num *vsdlss_chol(const vsdlss *A, const vsdlss_sym *S)
+static vsdlss_num *vsdlss_chol_checked(const vsdlss *A, const vsdlss_sym *S,
+                                       vsdlss_status *status)
 {
     double d, lki, *Lx, *x, *Cx;
     csi top, i, p, k, n, *Li, *Lp, *cp, *pinv, *s, *c, *parent, *Cp, *Ci;
     vsdlss *L, *C, *E;
     vsdlss_num *N;
+    if (!status) return NULL;
+    *status = VSDLSS_ERR_INVALID;
     if (!A || !S || !S->cp || !S->parent) return NULL;
     n = A->n;
     N = (vsdlss_num *)vsdlss_calloc(1, sizeof(vsdlss_num));
@@ -346,11 +363,11 @@ vsdlss_num *vsdlss_chol(const vsdlss *A, const vsdlss_sym *S)
     cp = S->cp; pinv = S->pinv; parent = S->parent;
     C = pinv ? vsdlss_symperm(A, pinv, 1) : (vsdlss *)A;
     E = pinv ? C : NULL;
-    if (!N || !c || !x || !C) return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0);
+    if (!N || !c || !x || !C) { *status=VSDLSS_ERR_OOM; return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0); }
     s = c + n;
     Cp = C->p; Ci = C->i; Cx = C->x;
     N->L = L = vsdlss_spalloc(n, n, cp[n], 1, 0);
-    if (!L) return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0);
+    if (!L) { *status=VSDLSS_ERR_OOM; return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0); }
     Lp = L->p; Li = L->i; Lx = L->x;
     for (k = 0; k < n; k++) Lp[k] = c[k] = cp[k];
     for (k = 0; k < n; k++) {
@@ -360,18 +377,22 @@ vsdlss_num *vsdlss_chol(const vsdlss *A, const vsdlss_sym *S)
         d = x[k]; x[k] = 0;
         for (; top < n; top++) {
             i = s[top];
+            if (!isfinite(Lx[Lp[i]]) || Lx[Lp[i]] == 0.0) { *status=VSDLSS_ERR_NONFINITE; return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0); }
             lki = x[i] / Lx[Lp[i]];
+            if (!isfinite(lki)) { *status=VSDLSS_ERR_NONFINITE; return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0); }
             x[i] = 0;
             for (p = Lp[i] + 1; p < c[i]; p++) x[Li[p]] -= Lx[p] * lki;
             d -= lki * lki;
             p = c[i]++;
             Li[p] = k; Lx[p] = lki;
         }
-        if (d <= 0) return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0);
+        if (!isfinite(d)) { *status=VSDLSS_ERR_NONFINITE; return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0); }
+        if (d <= 0) { *status=VSDLSS_ERR_NOT_POSDEF; return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 0); }
         p = c[k]++;
         Li[p] = k; Lx[p] = sqrt(d);
     }
     Lp[n] = cp[n];
+    *status=VSDLSS_OK;
     return (vsdlss_num *)vsdlss_ndone(N, E, c, x, 1);
 }
 
@@ -385,6 +406,7 @@ int vsdlss_lsolve(const vsdlss *L, double *x)
     if (!L || !x) return 0;
     n = L->n; Lp = L->p; Li = L->i; Lx = L->x;
     for (j = 0; j < n; j++) {
+        if (!isfinite(Lx[Lp[j]]) || Lx[Lp[j]] == 0.0 || !isfinite(x[j])) return 0;
         x[j] /= Lx[Lp[j]];
         for (p = Lp[j] + 1; p < Lp[j + 1]; p++) x[Li[p]] -= Lx[p] * x[j];
     }
@@ -398,6 +420,7 @@ int vsdlss_ltsolve(const vsdlss *L, double *x)
     n = L->n; Lp = L->p; Li = L->i; Lx = L->x;
     for (j = n - 1; j >= 0; j--) {
         for (p = Lp[j] + 1; p < Lp[j + 1]; p++) x[j] -= Lx[p] * x[Li[p]];
+        if (!isfinite(Lx[Lp[j]]) || Lx[Lp[j]] == 0.0 || !isfinite(x[j])) return 0;
         x[j] /= Lx[Lp[j]];
     }
     return 1;
@@ -454,194 +477,38 @@ static csi *vsdlss_cholcounts(const vsdlss *A, const csi *parent)
     return colcount;
 }
 
-/* ------------------------------------------------------------------------
- * high-level solve: A x = b, A symmetric positive definite (upper CSC)
- * --------------------------------------------------------------------- */
-/* Build the sparse Cholesky factor of A (fill-reducing order if requested).
- * Returns the numeric factor (vsdlss_num) with N->pinv = ordering, or NULL.
- * The factor is on the permuted C = A(p,p); use N->pinv to permute b.      */
-vsdlss_num *vsdlss_chol_factor(const vsdlss *A, int order)
+vsdlss_status vsdlss_numeric_factorize(const vsdlss *A, int order,
+                                       vsdlss_num **out)
 {
-    csi n, *pinv = NULL, *parent, *cp, *q = NULL, *colcount;
-    vsdlss_sym *S;
-    vsdlss_num *N;
-    vsdlss *C;
-    if (!A || !A->x) return NULL;
-    n = A->n;
-
-    if (order == 1) q = vsdlss_rcm(A->p, A->i, n);
-    else if (order == 2) q = vsdlss_identity_perm(n);
-    else { q = vsdlss_rcm(A->p, A->i, n); }
-    pinv = (q) ? vsdlss_pinv(q, n) : NULL;
-    vsdlss_free(q);
-
-    C = pinv ? vsdlss_symperm(A, pinv, 1) : (vsdlss *)A;
-
-    parent = vsdlss_etree(C, 0);
-    colcount = vsdlss_cholcounts(C, parent);
-    if (!colcount) return NULL;
-    cp = (csi *)vsdlss_malloc(n + 1, sizeof(csi));
-    vsdlss_cumsum(cp, colcount, n);
-    vsdlss_free(colcount);
-
-    S = (vsdlss_sym *)vsdlss_calloc(1, sizeof(vsdlss_sym));
-    if (!S) { vsdlss_free(cp); vsdlss_free(parent); vsdlss_free(pinv); return NULL; }
-    S->pinv = NULL;
-    S->parent = parent;
-    S->cp = cp;
-
-    N = vsdlss_chol(C, S);
-    vsdlss_sfree(S);
-    if (!N) { if (C != A) vsdlss_spfree(C); vsdlss_free(pinv); return NULL; }
-    N->pinv = pinv;                 /* ordering for the caller */
-    if (C != A) vsdlss_spfree(C);
-    return N;
-}
-
-int vsdlss_cholsolve(int order, const vsdlss *A, double *b)
-{
-    csi n, *pinv = NULL, *parent, *cp, *q = NULL, *colcount;
-    vsdlss_sym *S;
-    vsdlss_num *N;
-    vsdlss *C;
-    double *x;
-    if (!A || !A->x) return 0;
-    n = A->n;
-
-    /* --- ordering --- */
-    if (order == 1) q = vsdlss_rcm(A->p, A->i, n);
-    else if (order == 2) q = vsdlss_identity_perm(n);
-    pinv = (q) ? vsdlss_pinv(q, n) : NULL;   /* pinv = inverse ordering */
-    vsdlss_free(q);
-
-    /* --- permuted matrix C = A(p,p) --- */
-    C = pinv ? vsdlss_symperm(A, pinv, 1) : (vsdlss *)A;
-
-    /* --- symbolic (on C) --- */
-    parent = vsdlss_etree(C, 0);
-    colcount = vsdlss_cholcounts(C, parent);
-    if (!colcount) { return 0; }
-    cp = (csi *)vsdlss_malloc(n + 1, sizeof(csi));
-    vsdlss_cumsum(cp, colcount, n);
-    vsdlss_free(colcount);
-
-    S = (vsdlss_sym *)vsdlss_calloc(1, sizeof(vsdlss_sym));
-    if (!S) { vsdlss_free(cp); vsdlss_free(parent); vsdlss_free(pinv); return 0; }
-    S->pinv = NULL;           /* C already permuted */
-    S->parent = parent;
-    S->cp = cp;
-
-    /* --- numeric on C --- */
-    N = vsdlss_chol(C, S);
-    vsdlss_sfree(S);
-    if (!N) { if (C != A) vsdlss_spfree(C); vsdlss_free(pinv); return 0; }
-
-    /* --- solve: C z = b(p), then x = z(pinv) --- */
-    x = (double *)vsdlss_malloc(n, sizeof(double));
-    if (!x) { vsdlss_nfree(N); if (C != A) vsdlss_spfree(C); vsdlss_free(pinv); return 0; }
-    vsdlss_ipvec(pinv, b, x, n);
-    vsdlss_lsolve(N->L, x);
-    vsdlss_ltsolve(N->L, x);
-    vsdlss_pvec(pinv, x, b, n);
-
-    vsdlss_free(x);
-    vsdlss_nfree(N);
-    if (C != A) vsdlss_spfree(C);
-    vsdlss_free(pinv);
-    return 1;
-}
-
-/* ------------------------------------------------------------------------
- * orderings
- * --------------------------------------------------------------------- */
-csi *vsdlss_identity_perm(csi n)
-{
-    csi *q = (csi *)vsdlss_malloc(n, sizeof(csi)), k;
-    if (!q) return NULL;
-    for (k = 0; k < n; k++) q[k] = k;
-    return q;
-}
-
-/* Reverse Cuthill-McKee ordering of the symmetric graph (upper CSC given).
- * Returns permi such that the new index of node i is permi[i]; NULL on OOM. */
-csi *vsdlss_rcm(const csi *Ap, const csi *Ai, csi n)
-{
-    csi *degree, *perm, *adjstart, *adj, *adjpos, *visited, *queue, *order;
-    csi i, j, k, p, deg, e, v, u, start, cnt, q, tmp, a, b;
-    if (!Ap || !Ai || n <= 0) return NULL;
-
-    degree = (csi *)vsdlss_calloc(n, sizeof(csi));
-    adjstart = (csi *)vsdlss_malloc(n + 1, sizeof(csi));
-    perm = (csi *)vsdlss_malloc(n, sizeof(csi));
-    visited = (csi *)vsdlss_calloc(n, sizeof(csi));
-    if (!degree || !adjstart || !perm || !visited) {
-        vsdlss_free(degree); vsdlss_free(adjstart); vsdlss_free(perm);
-        vsdlss_free(visited); return NULL;
-    }
-
-    /* degree of the undirected graph, using the upper-triangular pattern */
-    for (j = 0; j < n; j++)
-        for (p = Ap[j]; p < Ap[j + 1]; p++) {
-            i = Ai[p];
-            if (i < j) { degree[i]++; degree[j]++; }
-        }
-    adjstart[0] = 0;
-    for (i = 0; i < n; i++) adjstart[i + 1] = adjstart[i] + degree[i];
-    deg = adjstart[n];
-    adj = (csi *)vsdlss_malloc(deg > 0 ? deg : 1, sizeof(csi));
-    adjpos = (csi *)vsdlss_malloc(n, sizeof(csi));
-    if (!adj || !adjpos) {
-        vsdlss_free(degree); vsdlss_free(adjstart); vsdlss_free(perm);
-        vsdlss_free(visited); vsdlss_free(adj); vsdlss_free(adjpos);
-        return NULL;
-    }
-    for (i = 0; i < n; i++) adjpos[i] = adjstart[i];
-    for (j = 0; j < n; j++)
-        for (p = Ap[j]; p < Ap[j + 1]; p++) {
-            i = Ai[p];
-            if (i < j) { adj[adjpos[j]++] = i; adj[adjpos[i]++] = j; }
-        }
-    vsdlss_free(adjpos);
-
-    queue = (csi *)vsdlss_malloc((n > 0 ? n : 1), sizeof(csi));
-    order = (csi *)vsdlss_malloc((n > 0 ? n : 1), sizeof(csi));
-    if (!queue || !order) {
-        vsdlss_free(degree); vsdlss_free(adjstart); vsdlss_free(perm);
-        vsdlss_free(visited); vsdlss_free(adj); vsdlss_free(queue);
-        vsdlss_free(order);
-        return NULL;
-    }
-
-    cnt = 0;
-    for (start = 0; start < n; start++) {
-        if (visited[start]) continue;
-        /* pseudo-peripheral start: unvisited minimum-degree node (approx) */
-        v = -1; deg = 0;
-        for (i = 0; i < n; i++)
-            if (!visited[i] && (v == -1 || degree[i] < deg)) { v = i; deg = degree[i]; }
-        if (v == -1) break;
-        /* BFS, ordering neighbors within a level by increasing degree */
-        q = 0;
-        queue[q++] = v; visited[v] = 1;
-        for (k = 0; k < q; k++) {
-            u = queue[k];
-            csi nb[512], nn = 0;
-            for (e = adjstart[u]; e < adjstart[u + 1]; e++) {
-                csi cand = adj[e];
-                if (!visited[cand]) { visited[cand] = 1; if (nn < 512) nb[nn++] = cand; }
-            }
-            for (a = 0; a < nn; a++)
-                for (b = a + 1; b < nn; b++)
-                    if (degree[nb[b]] < degree[nb[a]]) { tmp = nb[a]; nb[a] = nb[b]; nb[b] = tmp; }
-            for (a = 0; a < nn; a++) queue[q++] = nb[a];
-        }
-        /* append BFS order for this component to the global order */
-        for (k = 0; k < q; k++) order[cnt + k] = queue[k];
-        cnt += q;
-    }
-    /* Reverse-Cuthill-McKee: numbering is the reverse of the BFS order */
-    for (k = 0; k < cnt; k++) perm[order[k]] = cnt - 1 - k;
-    vsdlss_free(degree); vsdlss_free(visited); vsdlss_free(queue);
-    vsdlss_free(order); vsdlss_free(adj); vsdlss_free(adjstart);
-    return perm;
+    csi n, *q=NULL, *pinv=NULL, *parent=NULL, *cp=NULL, *colcount=NULL;
+    vsdlss_sym *S=NULL;
+    vsdlss_num *N=NULL;
+    vsdlss *C=NULL;
+    vsdlss_status status;
+    if(!out)return VSDLSS_ERR_INVALID;
+    *out=NULL;
+    status=vsdlss_order(A,order,&q,&pinv);
+    if(status!=VSDLSS_OK)goto cleanup;
+    n=A->n;
+    C=vsdlss_symperm(A,pinv,1);
+    if(!C){status=VSDLSS_ERR_OOM;goto cleanup;}
+    parent=vsdlss_etree(C,0);
+    if(!parent){status=VSDLSS_ERR_OOM;goto cleanup;}
+    colcount=vsdlss_cholcounts(C,parent);
+    if(!colcount){status=VSDLSS_ERR_OOM;goto cleanup;}
+    cp=(csi*)vsdlss_malloc(n+1,sizeof(csi));
+    if(!cp){status=VSDLSS_ERR_OOM;goto cleanup;}
+    if(vsdlss_cumsum(cp,colcount,n)<0){status=VSDLSS_ERR_INVALID;goto cleanup;}
+    S=(vsdlss_sym*)vsdlss_calloc(1,sizeof(vsdlss_sym));
+    if(!S){status=VSDLSS_ERR_OOM;goto cleanup;}
+    S->parent=parent;parent=NULL;
+    S->cp=cp;cp=NULL;
+    N=vsdlss_chol_checked(C,S,&status);
+    if(!N)goto cleanup;
+    N->pinv=pinv;pinv=NULL;
+    *out=N;N=NULL;
+cleanup:
+    free(q);free(pinv);free(parent);free(cp);free(colcount);
+    vsdlss_sfree(S);vsdlss_nfree(N);vsdlss_spfree(C);
+    return status;
 }

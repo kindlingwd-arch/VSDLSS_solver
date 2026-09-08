@@ -47,22 +47,6 @@ static double maxabs_diff(int n, const double *x, const double *ref)
     return r;
 }
 
-/* y = A*x for a symmetric matrix stored upper-CSC */
-static void matvec(const vsdlss *A, const double *x, double *y)
-{
-    csi n = A->n, p, j;
-    for (j = 0; j < n; j++) y[j] = 0.0;
-    for (j = 0; j < n; j++) {
-        double xj = x[j];
-        for (p = A->p[j]; p < A->p[j + 1]; p++) {
-            csi i = A->i[p];
-            double v = A->x[p];
-            y[i] += v * xj;
-            if (i != j) y[j] += v * x[i];
-        }
-    }
-}
-
 int main(int argc, char **argv)
 {
     int m = 30;
@@ -77,30 +61,42 @@ int main(int argc, char **argv)
     double *ones   = (double *)malloc((size_t)n * sizeof(double));
     double *rhs    = (double *)malloc((size_t)n * sizeof(double));
     int k;
+    if (!x || !ones || !rhs) {
+        fprintf(stderr, "vector allocation failed\n");
+        vsdlss_spfree(A); free(x); free(ones); free(rhs);
+        return 1;
+    }
     for (k = 0; k < n; k++) ones[k] = 1.0;
-    matvec(A, ones, rhs);                     /* b = A*ones  =>  x = ones */
+    if (vsdlss_spmv_sym_upper(A, ones, rhs) != VSDLSS_OK) {
+        fprintf(stderr, "matrix-vector product failed\n");
+        vsdlss_spfree(A); free(x); free(ones); free(rhs);
+        return 1;
+    }
 
     printf("VSDLSS-style sparse direct solver test\n");
     printf("dimension n = %d, nnz(A upper) = %lld, grid = %dx%d\n",
            n, (long long)A->p[n], m, m);
 
     /* order 2 = natural / identity */
-    memcpy(x, rhs, (size_t)n * sizeof(double));
     clock_t t0 = clock();
-    int ok1 = vsdlss_cholsolve(2, A, x);
-    double e1 = maxabs_diff(n, x, ones);
+    vsdlss_factor *factor=NULL;
+    int ok1 = vsdlss_factorize(A,2,&factor)==VSDLSS_OK &&
+              vsdlss_factor_solve(factor,rhs,x)==VSDLSS_OK;
+    vsdlss_factor_free(factor);factor=NULL;
+    double e1 = ok1 ? maxabs_diff(n, x, ones) : INFINITY;
     printf("[natural] ok=%d  max|solution-1| = %.3e  time=%.3fs\n",
            ok1, e1, (double)(clock() - t0) / CLOCKS_PER_SEC);
 
     /* order 1 = RCM */
-    memcpy(x, rhs, (size_t)n * sizeof(double));
     t0 = clock();
-    int ok2 = vsdlss_cholsolve(1, A, x);
-    double e2 = maxabs_diff(n, x, ones);
+    int ok2 = vsdlss_factorize(A,1,&factor)==VSDLSS_OK &&
+              vsdlss_factor_solve(factor,rhs,x)==VSDLSS_OK;
+    vsdlss_factor_free(factor);
+    double e2 = ok2 ? maxabs_diff(n, x, ones) : INFINITY;
     printf("[RCM    ] ok=%d  max|solution-1| = %.3e  time=%.3fs\n",
            ok2, e2, (double)(clock() - t0) / CLOCKS_PER_SEC);
 
     vsdlss_spfree(A);
     free(x); free(ones); free(rhs);
-    return 0;
+    return (ok1 && ok2 && e1 <= 1e-10 && e2 <= 1e-10) ? 0 : 1;
 }

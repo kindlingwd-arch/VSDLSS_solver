@@ -1,56 +1,45 @@
-# VSDLSS-style Very Sparse Direct Linear System Solver
-CC      ?= gcc
-CFLAGS  ?= -O2 -Wall -Wextra -Iinclude -std=gnu11
-LDLIBS  ?= -lm
+CC ?= gcc
+CFLAGS ?= -O2 -Wall -Wextra -Iinclude -std=c11
+LDLIBS ?= -lm
 
-TARGET  := vsdlss_solve
-SOLVER  := vsdlss_solver      # catalog-based reproduced solver (file entry)
-HARNESS := vsdlss_harness     # checks .hdr/.mat*/.rhs
-DSTEST  := vsdlss_ds_test
-SRCS    := src/main.c src/vsdlss.c
-APISRCS := src/main_vsdlss.c src/vsdlss_catalog.c src/vsdlss_ds.c src/vsdlss.c
-HSRCS   := src/vsdlss_harness.c src/vsdlss.c
-DSSRCS  := src/ds_test.c src/vsdlss_ds.c
-HDRS    := include/vsdlss.h include/vsdlss_api.h include/vsdlss_catalog.h include/vsdlss_ds.h
-OBJS    := $(SRCS:.c=.o)
-AOBJS   := $(APISRCS:.c=.o)
-HOBJS   := $(HSRCS:.c=.o)
-DSOBJS  := $(DSSRCS:.c=.o)
+LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
+           src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c
+LIBOBJS := $(LIBSRCS:.c=.o)
 
-.PHONY: all solver harness ds test clean run
+.PHONY: all test test-unit test-io sanitizers clean
 
-all: $(TARGET)
+all: vsdlss_solve vsdlss_solver
 
-solver: $(SOLVER)
+vsdlss_solve: src/main.o $(LIBOBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-harness: $(HARNESS)
+vsdlss_solver: src/main_vsdlss.o $(LIBOBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(TARGET): $(OBJS) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
+test_solver: test/test_solver.c $(LIBSRCS) include/vsdlss.h
+	$(CC) $(CFLAGS) -o $@ test/test_solver.c $(LIBSRCS) $(LDLIBS)
 
-$(SOLVER): $(AOBJS) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDLIBS)
+test_io: test/test_io.c $(LIBSRCS) include/vsdlss.h
+	$(CC) $(CFLAGS) -o $@ test/test_io.c $(LIBSRCS) $(LDLIBS)
 
-$(HARNESS): $(HOBJS) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(HOBJS) $(LDLIBS)
+test-unit: test_solver
+	./test_solver
 
-$(DSTEST): $(DSOBJS) $(HDRS)
-	$(CC) $(CFLAGS) -o $@ $(DSOBJS) $(LDLIBS)
+test-io: test_io
+	./test_io
 
-src/%.o: src/%.c $(HDRS)
+test: all test-unit test-io
+	python3 test/gen_sparse.py test_sparse 10
+	./vsdlss_solver test_sparse
+
+sanitizers:
+	$(MAKE) clean
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
+	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
+	  LDLIBS='-lm -fsanitize=address,undefined' test-unit test-io
+
+src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-ds: $(DSTEST)
-	./$(DSTEST)
-
-test: $(SOLVER)
-	python3 test/gen_sparse.py test_sparse 10
-	./$(SOLVER) test_sparse
-	./$(HARNESS) test_sparse 1
-
-run: $(TARGET)
-	./$(TARGET)
-
 clean:
-	rm -f $(TARGET) $(SOLVER) $(HARNESS) $(OBJS) $(AOBJS) $(HOBJS) \
-	      test_sparse.* test_sparse500.* test_sparse2k.*
+	rm -f vsdlss_solve vsdlss_solver test_solver test_io src/*.o test_sparse.*

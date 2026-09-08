@@ -8,6 +8,19 @@
 #include <math.h>
 
 typedef int64_t csi;          /* index type */
+
+typedef enum vsdlss_status
+{
+    VSDLSS_OK = 0,
+    VSDLSS_ERR_INVALID,
+    VSDLSS_ERR_OOM,
+    VSDLSS_ERR_NOT_POSDEF,
+    VSDLSS_ERR_NONFINITE,
+    VSDLSS_ERR_IO,
+    VSDLSS_ERR_UNSUPPORTED
+} vsdlss_status;
+
+const char *vsdlss_status_string(vsdlss_status status);
 typedef struct vsdlss_sp /* matrix in compressed-column form */
 {
     csi nzmax;                /* max entries                            */
@@ -39,6 +52,29 @@ typedef struct vsdlss_num /* numeric Cholesky factorization */
     double *B;                /* for QR, unused here                    */
 } vsdlss_num;
 
+typedef struct vsdlss_factor vsdlss_factor;
+
+vsdlss_status vsdlss_factorize(const vsdlss *A, int order, vsdlss_factor **out);
+vsdlss_status vsdlss_factor_solve(const vsdlss_factor *factor,
+                                  const double *rhs, double *solution);
+void vsdlss_factor_free(vsdlss_factor *factor);
+const vsdlss *vsdlss_factor_L(const vsdlss_factor *factor);
+const csi *vsdlss_factor_q(const vsdlss_factor *factor);
+const csi *vsdlss_factor_pinv(const vsdlss_factor *factor);
+csi vsdlss_factor_dimension(const vsdlss_factor *factor);
+
+vsdlss_status vsdlss_load_job(const char *job, int allow_missing_rhs,
+                              vsdlss **A, double **rhs);
+vsdlss_status vsdlss_write_solution(const char *job, const double *solution, csi n);
+
+vsdlss_status vsdlss_validate_upper_csc(const vsdlss *A);
+vsdlss_status vsdlss_normalize_upper(const vsdlss *A, vsdlss **out);
+vsdlss_status vsdlss_spmv_sym_upper(const vsdlss *A, const double *x, double *y);
+vsdlss_status vsdlss_backward_error(const vsdlss *A, const double *x,
+                                    const double *b, double *eta);
+vsdlss_status vsdlss_validate_permutation(const csi *q, const csi *pinv, csi n);
+vsdlss_status vsdlss_order(const vsdlss *A, int order, csi **q, csi **pinv);
+
 /* utilities */
 void *vsdlss_malloc(csi n, size_t size);
 void *vsdlss_calloc(csi n, size_t size);
@@ -59,7 +95,6 @@ csi *vsdlss_etree(const vsdlss *A, csi ata);
 csi vsdlss_ereach(const vsdlss *A, csi k, const csi *parent, csi *s, csi *w);
 csi *vsdlss_counts(const vsdlss *A, const csi *parent, const csi *post, csi ata);
 vsdlss *vsdlss_symperm(const vsdlss *A, const csi *pinv, csi values);
-vsdlss_num *vsdlss_chol(const vsdlss *A, const vsdlss_sym *S);
 int vsdlss_lsolve(const vsdlss *L, double *x);
 int vsdlss_ltsolve(const vsdlss *L, double *x);
 int vsdlss_pvec(const csi *p, const double *b, double *x, csi n);
@@ -70,16 +105,5 @@ csi *vsdlss_post(const csi *parent, csi n);
 csi vsdlss_leaf(csi i, csi j, const csi *first, csi *maxfirst,
                 csi *prevleaf, csi *ancestor, csi *jleaf);
 vsdlss *vsdlss_transpose(const vsdlss *A, csi values);
-
-/* high-level convenience: solve A x = b for symmetric positive definite A.
-   A is supplied in upper-triangular compressed-column form (rows i<=j).
-   Returns 1 on success, 0 on failure. */
-int vsdlss_cholsolve(int order, const vsdlss *A, double *b);
-/* Build the sparse chol factor (with ordering); caller owns it. */
-vsdlss_num *vsdlss_chol_factor(const vsdlss *A, int order);
-
-/* reorderings (fill-reducing) */
-csi *vsdlss_rcm(const csi *Ap, const csi *Ai, csi n); /* returns permi */
-csi *vsdlss_identity_perm(csi n);
 
 #endif

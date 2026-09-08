@@ -1,0 +1,6 @@
+/src/*.o
+/vsdlss_solve
+/vsdlss_solver
+/test_solver
+/test_io
+/test_sparse.*
