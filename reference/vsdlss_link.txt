@@ -1,0 +1,50 @@
+VSDLSS external shared-library dependencies (from DT_NEEDED)
+These must be present on the system to *run* the original solver.
+For the reference build, provide stubs via vsdlss_stub.c.
+
+DT_NEEDED libraries:
+  libaclanci.so
+  librt.so.1
+  libcrypto.so.1.1
+  libssl.so.1.1
+  libtcl8.6.so
+  libz.so.1
+  libpthread.so.0
+  libdl.so.2
+  libnffr.so
+  libnsys.so
+  libnffw.so
+  libmkl_intel_lp64.so
+  libmkl_sequential.so
+  libmkl_core.so
+  libifcoremt.so.5
+  libimf.so
+  libiomp5.so
+  libirc.so
+  libintlc.so.5
+  libsvml.so
+  libcublas.so.10
+  libcublasLt.so.10
+  libcudart.so.10.2
+  libmkl_intel_ilp64.so
+  libmkl_vml_avx.so
+  libmkl_vml_avx2.so
+  libmkl_vml_avx512.so
+  libmkl_vml_mc.so
+  libmkl_vml_mc2.so
+  libmkl_vml_mc3.so
+  libansmf.so
+  libngcore.so
+  libstdc++.so.6
+  libm.so.6
+  libc.so.6
+  ld-linux-x86-64.so.2
+
+Suggested link flags (when the real libraries are installed):
+  -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lmkl_vml_avx -lmkl_vml_avx2
+  -lmkl_vml_avx512 -lmkl_vml_mc -lmkl_vml_mc2 -lmkl_vml_mc3 -lmkl_vml_mc3
+  -lifcore -limf -liomp5 -lirc -lintlc  -lsvml
+  -lcublas -lcublasLt -lcudart
+  -laclanci -lnffr -lnsys -lnffw -lansmf -lngcore
+  -lssl -lcrypto -ltcl -lz -lrt -lpthread -ldl -lstdc++ -lm
+  -ltcmalloc (optional)

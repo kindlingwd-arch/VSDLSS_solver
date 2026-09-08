@@ -1,0 +1,43 @@
+/* VSDLSS function (decompiled by Ghidra) */
+/* name: checkResults_vsdlss  addr: 009e6360  size: 16e */
+#include "vsdlss_ref.h"
+
+/* signature: void checkResults_vsdlss(undefined4 param_1,undefined8 param_2,undefined8 param_3); */
+
+void checkResults_vsdlss(undefined4 param_1,undefined8 param_2,undefined8 param_3)
+
+{
+  FILE *__s;
+  char *pcVar1;
+  double dVar2;
+  double dVar3;
+  time_t local_30 [2];
+  
+  dVar2 = (double)twoNorm_vsdlss(param_3,param_1);
+  __s = (FILE *)openFileA_vsdlss(0xe);
+  subVectors_vsdlss(param_2,param_3,param_1,param_3);
+  dVar3 = (double)twoNorm_vsdlss(param_3,param_1);
+  fwrite("******************************************************************************\n",1,0x4f,
+         __s);
+  fwrite("(C) Copyright 1992-2011 Computational Applications and System Integration Inc.\n    All rights Reserved.\n"
+         ,1,0x68,__s);
+  fwrite("******************************************************************************\n",1,0x4f,
+         __s);
+  fputc(10,__s);
+  local_30[0] = time((time_t *)0x0);
+  pcVar1 = ctime(local_30);
+  fprintf(__s,"Job:%s\tat:%s\n",jobName_vsdlss,pcVar1);
+  fputc(10,__s);
+  if (dVar2 <= DAT_00ab71f0) {
+    fwrite("\t*** Dense Solve Result is Zero ***\n",1,0x24,__s);
+    fprintf(__s,"\tTwo Norm of dense solve result: %g\n",dVar2);
+    fprintf(__s,"\tTwo Norm of error vector: %g\n",dVar3);
+  }
+  else {
+    fprintf(__s,"\tRelative Error between dense and sparse results: %g\n",dVar3 / dVar2);
+  }
+  casiFClose_vsdlss(0xe);
+  return;
+}
+
+
