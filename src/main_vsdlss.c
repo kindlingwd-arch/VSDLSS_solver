@@ -6,12 +6,12 @@
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s [-p 0|1|2] [--demo-rhs] <job>\n", program);
+    fprintf(stderr, "usage: %s [-p 0|1|2|3|4] [--demo-rhs] <job>\n", program);
 }
 
 int main(int argc, char **argv)
 {
-    int order=1, allow_missing_rhs=0, arg;
+    int order=0, allow_missing_rhs=0, arg;
     const char *job=NULL;
     vsdlss *A=NULL;
     vsdlss_factor *factor=NULL;
@@ -44,7 +44,7 @@ int main(int argc, char **argv)
     status=vsdlss_write_solution(job,solution,A->n);
 done:
     if(status==VSDLSS_OK)
-        printf("VSDLSS M1: n=%lld order=%d backward_error=%.3e\n",
+        printf("VSDLSS M2: n=%lld order=%d backward_error=%.3e\n",
                (long long)A->n,order,eta);
     else fprintf(stderr,"vsdlss: %s\n",vsdlss_status_string(status));
     vsdlss_factor_free(factor);vsdlss_spfree(A);free(rhs);free(solution);

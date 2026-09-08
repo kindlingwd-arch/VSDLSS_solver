@@ -54,6 +54,14 @@ typedef struct vsdlss_num /* numeric Cholesky factorization */
 
 typedef struct vsdlss_factor vsdlss_factor;
 
+typedef struct vsdlss_order_stats
+{
+    csi predicted_nnz_l;
+    csi fill_edges_added;
+    csi elimination_tree_height;
+    csi separator_count;
+} vsdlss_order_stats;
+
 vsdlss_status vsdlss_factorize(const vsdlss *A, int order, vsdlss_factor **out);
 vsdlss_status vsdlss_factor_solve(const vsdlss_factor *factor,
                                   const double *rhs, double *solution);
@@ -73,6 +81,9 @@ vsdlss_status vsdlss_spmv_sym_upper(const vsdlss *A, const double *x, double *y)
 vsdlss_status vsdlss_backward_error(const vsdlss *A, const double *x,
                                     const double *b, double *eta);
 vsdlss_status vsdlss_validate_permutation(const csi *q, const csi *pinv, csi n);
+vsdlss_status vsdlss_order_analyze(const vsdlss *A, int order,
+                                   csi **q, csi **pinv,
+                                   vsdlss_order_stats *stats);
 vsdlss_status vsdlss_order(const vsdlss *A, int order, csi **q, csi **pinv);
 
 /* utilities */

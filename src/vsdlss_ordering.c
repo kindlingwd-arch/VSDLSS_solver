@@ -1,4 +1,5 @@
 #include "vsdlss.h"
+#include "vsdlss_internal.h"
 
 #include <string.h>
 
@@ -114,16 +115,54 @@ oom:
     return NULL;
 }
 
-vsdlss_status vsdlss_order(const vsdlss *A, int order, csi **q, csi **pinv)
+static vsdlss_status analyze_elimination(const vsdlss *A, const csi *q,
+                                         vsdlss_order_stats *stats)
 {
-    csi *local_q = NULL, *local_pinv = NULL, k;
+    vsdlss_graph *graph = NULL;
+    vsdlss_status status;
+    csi k, predicted = A->n;
+    status = vsdlss_graph_build(A, &graph);
+    if (status != VSDLSS_OK) return status;
+    for (k = 0; k < A->n; ++k) {
+        csi degree = vsdlss_graph_degree(graph, q[k]);
+        csi *neighbors = NULL, count = 0;
+        if (predicted > INT64_MAX - degree) {
+            vsdlss_graph_free(graph);
+            return VSDLSS_ERR_OOM;
+        }
+        predicted += degree;
+        status = vsdlss_graph_eliminate(graph, q[k], &neighbors, &count);
+        free(neighbors);
+        if (status != VSDLSS_OK) { vsdlss_graph_free(graph); return status; }
+    }
+    stats->predicted_nnz_l = predicted;
+    stats->fill_edges_added = vsdlss_graph_fill_edges(graph);
+    vsdlss_graph_free(graph);
+    return VSDLSS_OK;
+}
+
+vsdlss_status vsdlss_order_analyze(const vsdlss *A, int order,
+                                   csi **q, csi **pinv,
+                                   vsdlss_order_stats *stats)
+{
+    csi *local_q = NULL, *local_pinv = NULL, *parent = NULL, k;
+    vsdlss *permuted = NULL;
+    vsdlss_order_stats local_stats = {0, 0, 0, 0};
     vsdlss_status status;
     if (!q || !pinv) return VSDLSS_ERR_INVALID;
     *q = NULL; *pinv = NULL;
     status = vsdlss_validate_upper_csc(A);
     if (status != VSDLSS_OK) return status;
-    if (order == 0 || order == 1) local_q = vsdlss_rcm(A->p, A->i, A->n);
+    if (order == 1) local_q = vsdlss_rcm(A->p, A->i, A->n);
     else if (order == 2) local_q = vsdlss_identity_perm(A->n);
+    else if (order == 3) {
+        status = vsdlss_min_degree_order(A, &local_q, &local_stats);
+        if (status != VSDLSS_OK) return status;
+    }
+    else if (order == 0 || order == 4) {
+        status = vsdlss_mld_order(A, &local_q, &local_stats);
+        if (status != VSDLSS_OK) return status;
+    }
     else return VSDLSS_ERR_UNSUPPORTED;
     if (!local_q) return VSDLSS_ERR_OOM;
     local_pinv = (csi *)malloc((size_t)A->n * sizeof(csi));
@@ -131,6 +170,38 @@ vsdlss_status vsdlss_order(const vsdlss *A, int order, csi **q, csi **pinv)
     for (k = 0; k < A->n; ++k) local_pinv[local_q[k]] = k;
     status = vsdlss_validate_permutation(local_q, local_pinv, A->n);
     if (status != VSDLSS_OK) { free(local_q); free(local_pinv); return status; }
+    if (!stats) {
+        *q = local_q;
+        *pinv = local_pinv;
+        return VSDLSS_OK;
+    }
+    status = analyze_elimination(A, local_q, &local_stats);
+    if (status != VSDLSS_OK) { free(local_q); free(local_pinv); return status; }
+    permuted = vsdlss_symperm(A, local_pinv, 0);
+    if (!permuted) { free(local_q); free(local_pinv); return VSDLSS_ERR_OOM; }
+    parent = vsdlss_etree(permuted, 0);
+    vsdlss_spfree(permuted);
+    if (!parent) { free(local_q); free(local_pinv); return VSDLSS_ERR_OOM; }
+    for (k = 0; k < A->n; ++k) {
+        csi node = k, depth = 1;
+        while (parent[node] >= 0) {
+            node = parent[node];
+            if (depth == INT64_MAX || depth > A->n) {
+                free(parent); free(local_q); free(local_pinv);
+                return VSDLSS_ERR_INVALID;
+            }
+            depth++;
+        }
+        if (depth > local_stats.elimination_tree_height)
+            local_stats.elimination_tree_height = depth;
+    }
+    free(parent);
     *q = local_q; *pinv = local_pinv;
+    if (stats) *stats = local_stats;
     return VSDLSS_OK;
+}
+
+vsdlss_status vsdlss_order(const vsdlss *A, int order, csi **q, csi **pinv)
+{
+    return vsdlss_order_analyze(A, order, q, pinv, NULL);
 }

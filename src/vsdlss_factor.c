@@ -20,7 +20,8 @@ vsdlss_status vsdlss_factorize(const vsdlss *A, int order, vsdlss_factor **out)
     vsdlss_status status;
     if (!out) return VSDLSS_ERR_INVALID;
     *out = NULL;
-    if (order != 0 && order != 1 && order != 2) return VSDLSS_ERR_UNSUPPORTED;
+    if (order != 0 && order != 1 && order != 2 && order != 3 && order != 4)
+        return VSDLSS_ERR_UNSUPPORTED;
     status = vsdlss_normalize_upper(A, &normalized);
     if (status != VSDLSS_OK) return status;
     status = vsdlss_numeric_factorize(normalized, order, &numeric);
