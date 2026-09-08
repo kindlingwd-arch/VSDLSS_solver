@@ -137,9 +137,53 @@ static vsdlss_status partition_connected(mld_context *ctx, const csi *v, csi n,
                                          signed char *side, csi *left,
                                          csi *right, csi *separator)
 {
-    csi k, ecc, middle;
+    csi k, ecc, middle, depth = 0, allocated_depth = 0;
+    vsdlss_mld_level **level = NULL;
+    signed char *part = NULL;
     vsdlss_status status = mark_subset(ctx, v, n);
     if (status != VSDLSS_OK) return status;
+    *left = *right = *separator = 0;
+    level = (vsdlss_mld_level **)calloc((size_t)n + 1, sizeof(*level));
+    if (!level) return VSDLSS_ERR_OOM;
+    status = vsdlss_mld_level_build(ctx->A, v, n, &level[0]);
+    if (status != VSDLSS_OK) goto multilevel_done;
+    while (vsdlss_mld_level_vertices(level[depth]) > 32) {
+        csi fine_n = vsdlss_mld_level_vertices(level[depth]);
+        csi edges = vsdlss_mld_level_edges(level[depth]);
+        double density = fine_n > 1 ? (2.0 * (double)edges) /
+                         ((double)fine_n * (double)(fine_n - 1)) : 0.0;
+        if (density > 0.20) break;
+        status = vsdlss_mld_coarsen_one(level[depth], &level[depth + 1]);
+        if (status != VSDLSS_OK) goto multilevel_done;
+        if (vsdlss_mld_level_vertices(level[depth + 1]) * 100 > fine_n * 85) {
+            vsdlss_mld_level_free(level[depth + 1]); level[depth + 1] = NULL; break;
+        }
+        depth++;
+        allocated_depth = depth;
+    }
+    part = (signed char *)malloc((size_t)vsdlss_mld_level_vertices(level[depth]));
+    if (!part) { status = VSDLSS_ERR_OOM; goto multilevel_done; }
+    status = vsdlss_mld_partition_level(level[depth], part, NULL, NULL);
+    while (status == VSDLSS_OK && depth > 0) {
+        signed char *fine_part = (signed char *)malloc(
+            (size_t)vsdlss_mld_level_vertices(level[depth - 1]));
+        if (!fine_part) { status = VSDLSS_ERR_OOM; break; }
+        status = vsdlss_mld_project_refine(level[depth - 1], part, fine_part);
+        free(part); part = fine_part; depth--;
+    }
+    if (status == VSDLSS_OK)
+        status = vsdlss_mld_node_separator(level[0], part, left, right, separator);
+    if (status == VSDLSS_OK) {
+        for (k = 0; k < n; ++k) side[v[k]] = part[k];
+        goto multilevel_done;
+    }
+    /* A degenerate cover retains the verified BFS separator as a safe fallback. */
+    status = VSDLSS_OK;
+multilevel_done:
+    free(part);
+    if (level) { for (k = 0; k <= allocated_depth; ++k) vsdlss_mld_level_free(level[k]); free(level); }
+    if (status != VSDLSS_OK) return status;
+    if (*left > 0 && *right > 0 && *separator > 0) return VSDLSS_OK;
     status = pseudo_peripheral_bfs(ctx, v, n, &ecc);
     if (status != VSDLSS_OK) return status;
     middle = ecc / 2;
@@ -152,6 +196,31 @@ static vsdlss_status partition_connected(mld_context *ctx, const csi *v, csi n,
     }
     return unbalanced(*left, *right)
         ? balanced_fallback(ctx, v, n, side, left, right, separator) : VSDLSS_OK;
+}
+
+vsdlss_status vsdlss_mld_hierarchy_analyze(const vsdlss *A, csi *levels)
+{
+    vsdlss_mld_level *fine = NULL, *coarse = NULL;
+    vsdlss_status status;
+    if (!A || !levels) return VSDLSS_ERR_INVALID;
+    *levels = 0;
+    status = vsdlss_mld_level_build(A, NULL, A->n, &fine);
+    if (status != VSDLSS_OK) return status;
+    *levels = 1;
+    while (vsdlss_mld_level_vertices(fine) > 32) {
+        csi old_n = vsdlss_mld_level_vertices(fine);
+        double density = old_n > 1 ? 2.0 * (double)vsdlss_mld_level_edges(fine) /
+                         ((double)old_n * (double)(old_n - 1)) : 0.0;
+        if (density > 0.20) break;
+        status = vsdlss_mld_coarsen_one(fine, &coarse);
+        if (status != VSDLSS_OK) break;
+        if (vsdlss_mld_level_vertices(coarse) * 100 > old_n * 85) {
+            vsdlss_mld_level_free(coarse); coarse = NULL; break;
+        }
+        vsdlss_mld_level_free(fine); fine = coarse; coarse = NULL; (*levels)++;
+    }
+    vsdlss_mld_level_free(coarse); vsdlss_mld_level_free(fine);
+    return status;
 }
 
 static vsdlss_status order_set(mld_context *, const csi *, csi, csi *, csi *);

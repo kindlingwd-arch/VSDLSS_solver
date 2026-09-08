@@ -3,11 +3,12 @@ CFLAGS ?= -O2 -Wall -Wextra -Iinclude -std=c11
 LDLIBS ?= -lm
 
 LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
-           src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_mld.c src/vsdlss_ordering.c \
+           src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_mld_graph.c \
+           src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
            src/vsdlss_factor.c src/vsdlss_io.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
-.PHONY: all test test-unit test-io test-ordering sanitizers clean
+.PHONY: all test test-unit test-io test-ordering test-mld sanitizers clean
 
 all: vsdlss_solve vsdlss_solver
 
@@ -35,7 +36,13 @@ test-io: test_io
 test-ordering: test_ordering
 	./test_ordering
 
-test: all test-unit test-io test-ordering
+test-mld: test_mld
+	./test_mld
+
+test_mld: test/test_mld.c $(LIBSRCS) include/vsdlss.h src/vsdlss_internal.h
+	$(CC) $(CFLAGS) -o $@ test/test_mld.c $(LIBSRCS) $(LDLIBS)
+
+test: all test-unit test-io test-ordering test-mld
 	python3 test/gen_sparse.py test_sparse 10
 	./vsdlss_solver test_sparse
 
@@ -43,10 +50,10 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='-lm -fsanitize=address,undefined' test-unit test-io test-ordering
+	  LDLIBS='-lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld
 
 src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering src/*.o test_sparse.*
+	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld src/*.o test_sparse.*
