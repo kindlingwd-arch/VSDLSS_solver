@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <float.h>
+#include <math.h>
+#include <string.h>
 
 #define CHECK(e) do { if (!(e)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #e); return 1; } } while (0)
 
@@ -223,6 +225,95 @@ static int test_reduction_large_sparse_path(void)
     vsdlss_reduction_free(r); free(p); free(i); free(x); return 0;
 }
 
+static int test_reduction_rhs_hand_fixture_and_aliases(void)
+{
+    csi p[]={0,1,3,5}, i[]={0,0,1,1,2};
+    double a[]={4,2,5,1,3}, b[]={0,-5,7}, saved[3], solution[3];
+    vsdlss A={5,3,3,p,i,a,-1}; vsdlss_reduction *r=NULL;
+    vsdlss_elim_record before[3];
+    CHECK(vsdlss_reduce(&A,&r)==VSDLSS_OK);
+    memcpy(before,r->records,sizeof(before));
+    CHECK(vsdlss_reduce_rhs(r,b,NULL,saved)==VSDLSS_OK);
+    CHECK(saved[0]==0 && saved[1]==-5 && saved[2]==8.25);
+    CHECK(vsdlss_reduce_recover(r,saved,NULL,solution)==VSDLSS_OK);
+    CHECK(fabs(solution[0]-1)<1e-12 && fabs(solution[1]+2)<1e-12 &&
+          fabs(solution[2]-3)<1e-12);
+    CHECK(memcmp(before,r->records,sizeof(before))==0);
+
+    b[0]=10; b[1]=8; b[2]=-2;
+    CHECK(vsdlss_reduce_rhs(r,b,NULL,b)==VSDLSS_OK);
+    CHECK(vsdlss_reduce_recover(r,b,NULL,b)==VSDLSS_OK);
+    CHECK(fabs(b[0]-2)<1e-12 && fabs(b[1]-1)<1e-12 &&
+          fabs(b[2]+1)<1e-12);
+    CHECK(vsdlss_reduce_rhs(r,b,NULL,NULL)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_reduce_recover(r,NULL,NULL,solution)==VSDLSS_ERR_INVALID);
+    vsdlss_reduction_free(r); return 0;
+}
+
+static int test_reduction_rhs_nonempty_core_and_transactions(void)
+{
+    csi p[7], i[22], at=0, col,row; double a[22];
+    double b[]={15,14,14,14,14,11}, core[5], saved[1], solution[6];
+    double aliased[]={15,14,14,14,14,11};
+    vsdlss_reduction *r=NULL; vsdlss_elim_record before;
+    p[0]=0;
+    for(col=0;col<6;col++) { for(row=0;row<=col;row++) {
+        if ((col<5) || (col==5 && row==0) || row==col) {
+            i[at]=row; a[at++]=(row==col?10.0:1.0);
+        }
+    } p[col+1]=at; }
+    { vsdlss A={at,6,6,p,i,a,-1}; CHECK(vsdlss_reduce(&A,&r)==VSDLSS_OK); }
+    before=r->records[0];
+    CHECK(vsdlss_reduce_rhs(r,b,core,saved)==VSDLSS_OK);
+    CHECK(saved[0]==11 && fabs(core[0]-13.9)<1e-12);
+    for(col=1;col<5;col++) CHECK(core[col]==14);
+    for(col=0;col<5;col++) core[col]=1;
+    CHECK(vsdlss_reduce_recover(r,saved,core,solution)==VSDLSS_OK);
+    for(col=0;col<6;col++) CHECK(fabs(solution[col]-1)<1e-12);
+    CHECK(memcmp(&before,r->records,sizeof(before))==0);
+
+    for(col=0;col<6;col++) aliased[col]=1;
+    CHECK(vsdlss_reduce_recover(r,saved,aliased,aliased)==VSDLSS_OK);
+    for(col=0;col<6;col++) CHECK(fabs(aliased[col]-1)<1e-12);
+
+    memcpy(aliased,b,sizeof(b));
+    CHECK(vsdlss_reduce_rhs(r,aliased,aliased,aliased+5)==VSDLSS_OK);
+    CHECK(fabs(aliased[0]-13.9)<1e-12 && aliased[5]==11);
+    CHECK(vsdlss_reduce_rhs(r,b,NULL,saved)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_reduce_recover(r,saved,NULL,solution)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_reduce_rhs(r,NULL,core,saved)==VSDLSS_ERR_INVALID);
+
+    { double badb[]={15,14,14,14,14,INFINITY}, outc[]={2,2,2,2,2}, outs[]={3};
+      CHECK(vsdlss_reduce_rhs(r,badb,outc,outs)==VSDLSS_ERR_NONFINITE);
+      for(col=0;col<5;col++) CHECK(outc[col]==2);
+      CHECK(outs[0]==3); }
+    { double badsaved[]={INFINITY}, coresol[]={1,1,1,1,1};
+      double out[]={7,7,7,7,7,7};
+      CHECK(vsdlss_reduce_recover(r,badsaved,coresol,out)==VSDLSS_ERR_NONFINITE);
+      for(col=0;col<6;col++) CHECK(out[col]==7); }
+    { double goodsaved[]={11}, badcore[]={1,1,NAN,1,1};
+      double out[]={7,7,7,7,7,7};
+      CHECK(vsdlss_reduce_recover(r,goodsaved,badcore,out)==VSDLSS_ERR_NONFINITE);
+      for(col=0;col<6;col++) CHECK(out[col]==7); }
+    vsdlss_reduction_free(r);
+
+    { vsdlss_elim_record record={0,1,{1,0,0},1,{2,0,0}};
+      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL};
+      double huge[]={DBL_MAX,DBL_MAX}, outcore[]={8}, outsaved[]={9};
+      CHECK(vsdlss_reduce_rhs(&fake,huge,outcore,outsaved)==VSDLSS_ERR_NONFINITE);
+      CHECK(outcore[0]==8 && outsaved[0]==9); }
+    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL};
+      double rhs[]={3,4}, core_only[2], recovered[2];
+      CHECK(vsdlss_reduce_rhs(&no_elimination,rhs,core_only,NULL)==VSDLSS_OK);
+      CHECK(core_only[0]==3 && core_only[1]==4);
+      CHECK(vsdlss_reduce_recover(&no_elimination,NULL,core_only,recovered)==VSDLSS_OK);
+      CHECK(recovered[0]==3 && recovered[1]==4); }
+    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL};
+      CHECK(vsdlss_reduce_rhs(&empty,NULL,NULL,NULL)==VSDLSS_OK);
+      CHECK(vsdlss_reduce_recover(&empty,NULL,NULL,NULL)==VSDLSS_OK); }
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
@@ -235,6 +326,8 @@ int main(void)
     CHECK(test_reduction_core_and_degree_three()==0);
     CHECK(test_reduction_failures_are_transactional()==0);
     CHECK(test_reduction_large_sparse_path()==0);
-    puts("m3 component and reduction tests passed");
+    CHECK(test_reduction_rhs_hand_fixture_and_aliases()==0);
+    CHECK(test_reduction_rhs_nonempty_core_and_transactions()==0);
+    puts("m3 component, reduction, and RHS tests passed");
     return 0;
 }

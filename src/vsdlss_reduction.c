@@ -104,6 +104,110 @@ void vsdlss_reduction_free(vsdlss_reduction *reduction)
     vsdlss_spfree(reduction->core); free(reduction);
 }
 
+static int valid_reduction_shape(const vsdlss_reduction *r)
+{
+    return r && r->n>=0 && r->count>=0 && r->core_n>=0 &&
+           r->count<=r->n && r->core_n==r->n-r->count &&
+           (!r->count || r->records) && (!r->core_n || r->core_vertices);
+}
+
+vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *r, const double *b,
+                                double *core_rhs, double *saved)
+{
+    double *work=NULL, *next_core=NULL, *next_saved=NULL;
+    csi k,j; vsdlss_status status=VSDLSS_OK;
+    if(!valid_reduction_shape(r) || (!b && r->n) || (!core_rhs && r->core_n) ||
+       (!saved && r->count)) return VSDLSS_ERR_INVALID;
+    if(!checked_count(r->n,sizeof(*work)) ||
+       !checked_count(r->core_n,sizeof(*next_core)) ||
+       !checked_count(r->count,sizeof(*next_saved))) return VSDLSS_ERR_OOM;
+    if(r->n) work=(double *)malloc((size_t)r->n*sizeof(*work));
+    if(r->core_n) next_core=(double *)malloc((size_t)r->core_n*sizeof(*next_core));
+    if(r->count) next_saved=(double *)malloc((size_t)r->count*sizeof(*next_saved));
+    if((r->n&&!work)||(r->core_n&&!next_core)||(r->count&&!next_saved)) {
+        status=VSDLSS_ERR_OOM; goto done;
+    }
+    for(k=0;k<r->n;k++) {
+        if(!isfinite(b[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        work[k]=b[k];
+    }
+    for(k=0;k<r->count;k++) {
+        const vsdlss_elim_record *record=r->records+k;
+        if(record->vertex<0 || record->vertex>=r->n || record->degree<0 ||
+           record->degree>3) {status=VSDLSS_ERR_INVALID;goto done;}
+        next_saved[k]=work[record->vertex];
+        if(!isfinite(next_saved[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        for(j=0;j<record->degree;j++) {
+            csi neighbor=record->neighbor[j]; double update;
+            if(neighbor<0 || neighbor>=r->n) {status=VSDLSS_ERR_INVALID;goto done;}
+            update=record->multiplier[j]*next_saved[k];
+            if(!isfinite(record->multiplier[j]) || !isfinite(update) ||
+               !isfinite(work[neighbor]-update)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+            work[neighbor]-=update;
+        }
+    }
+    for(k=0;k<r->core_n;k++) {
+        csi vertex=r->core_vertices[k];
+        if(vertex<0 || vertex>=r->n) {status=VSDLSS_ERR_INVALID;goto done;}
+        next_core[k]=work[vertex];
+        if(!isfinite(next_core[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+    }
+    if(r->core_n) memcpy(core_rhs,next_core,(size_t)r->core_n*sizeof(*core_rhs));
+    if(r->count) memcpy(saved,next_saved,(size_t)r->count*sizeof(*saved));
+done:
+    free(work); free(next_core); free(next_saved); return status;
+}
+
+vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *r,
+                                    const double *saved,
+                                    const double *core_solution, double *x)
+{
+    double *next_x=NULL, *saved_copy=NULL, *core_copy=NULL;
+    csi k,j; vsdlss_status status=VSDLSS_OK;
+    if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count) ||
+       (!core_solution && r->core_n)) return VSDLSS_ERR_INVALID;
+    if(!checked_count(r->n,sizeof(*next_x)) ||
+       !checked_count(r->count,sizeof(*saved_copy)) ||
+       !checked_count(r->core_n,sizeof(*core_copy))) return VSDLSS_ERR_OOM;
+    if(r->n) next_x=(double *)calloc((size_t)r->n,sizeof(*next_x));
+    if(r->count) saved_copy=(double *)malloc((size_t)r->count*sizeof(*saved_copy));
+    if(r->core_n) core_copy=(double *)malloc((size_t)r->core_n*sizeof(*core_copy));
+    if((r->n&&!next_x)||(r->count&&!saved_copy)||(r->core_n&&!core_copy)) {
+        status=VSDLSS_ERR_OOM; goto done;
+    }
+    for(k=0;k<r->count;k++) {
+        if(!isfinite(saved[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        saved_copy[k]=saved[k];
+    }
+    for(k=0;k<r->core_n;k++) {
+        csi vertex=r->core_vertices[k];
+        if(vertex<0 || vertex>=r->n) {status=VSDLSS_ERR_INVALID;goto done;}
+        if(!isfinite(core_solution[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        core_copy[k]=core_solution[k]; next_x[vertex]=core_copy[k];
+    }
+    for(k=r->count;k>0;k--) {
+        const vsdlss_elim_record *record=r->records+(k-1); double value;
+        if(record->vertex<0 || record->vertex>=r->n || record->degree<0 ||
+           record->degree>3) {status=VSDLSS_ERR_INVALID;goto done;}
+        if(!isfinite(record->pivot)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        if(record->pivot==0.0) {status=VSDLSS_ERR_INVALID;goto done;}
+        value=saved_copy[k-1]/record->pivot;
+        if(!isfinite(value)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        for(j=0;j<record->degree;j++) {
+            csi neighbor=record->neighbor[j]; double update;
+            if(neighbor<0 || neighbor>=r->n) {status=VSDLSS_ERR_INVALID;goto done;}
+            update=record->multiplier[j]*next_x[neighbor];
+            if(!isfinite(record->multiplier[j]) || !isfinite(update) ||
+               !isfinite(value-update)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+            value-=update;
+        }
+        next_x[record->vertex]=value;
+    }
+    if(r->n) memcpy(x,next_x,(size_t)r->n*sizeof(*x));
+done:
+    free(next_x); free(saved_copy); free(core_copy); return status;
+}
+
 vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
 {
     vsdlss_reduction *r=NULL; numeric_list *adj=NULL; double *diag=NULL;
