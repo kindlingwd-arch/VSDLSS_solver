@@ -413,6 +413,138 @@ static int test_symbolic_single_shared_updates_and_failures(void)
     return 0;
 }
 
+static int dense_from_csc(const vsdlss *L, double *d)
+{
+    csi j,k; memset(d,0,(size_t)L->n*(size_t)L->n*sizeof(*d));
+    for(j=0;j<L->n;j++) for(k=L->p[j];k<L->p[j+1];k++)
+        d[L->i[k]*L->n+j]=L->x[k];
+    return 0;
+}
+
+static int test_numeric_hand_factor_ownership_and_solve(void)
+{
+    csi p[]={0,1,3,5}, i[]={0,0,1,1,2};
+    double a[]={4,2,5,2,5}, expected[]={2,0,0,1,2,0,0,1,2};
+    double rhs[]={8,18,19}, alias[]={8,18,19}, x[3], dense[9];
+    vsdlss A={5,3,3,p,i,a,-1}, *L=NULL; vsdlss_sn_symbolic *s=NULL;
+    vsdlss_sn_factor *f=NULL; double before[5]; csi k;
+    memcpy(before,a,sizeof(a));
+    CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK);
+    CHECK(vsdlss_sn_factorize(&A,s,&f)==VSDLSS_OK && f);
+    vsdlss_sn_symbolic_free(s); /* factor owns every retained layout array */
+    CHECK(memcmp(before,a,sizeof(a))==0);
+    CHECK(vsdlss_sn_export_L(f,&L)==VSDLSS_OK);
+    dense_from_csc(L,dense);
+    for(k=0;k<9;k++) CHECK(fabs(dense[k]-expected[k])<1e-12);
+    CHECK(vsdlss_sn_solve(f,rhs,x)==VSDLSS_OK);
+    CHECK(fabs(x[0]-1)<1e-12&&fabs(x[1]-2)<1e-12&&fabs(x[2]-3)<1e-12);
+    CHECK(vsdlss_sn_solve(f,alias,alias)==VSDLSS_OK);
+    for(k=0;k<3;k++) CHECK(fabs(alias[k]-(double)(k+1))<1e-12);
+    rhs[0]=2;rhs[1]=4;rhs[2]=6;
+    CHECK(vsdlss_sn_solve(f,rhs,x)==VSDLSS_OK); /* reusable immutable factor */
+    { double bad[]={1,NAN,3}, unchanged[]={7,8,9};
+      CHECK(vsdlss_sn_solve(f,bad,unchanged)==VSDLSS_ERR_NONFINITE);
+      CHECK(unchanged[0]==7&&unchanged[1]==8&&unchanged[2]==9); }
+    vsdlss_spfree(L); vsdlss_sn_factor_free(f); return 0;
+}
+
+static int test_numeric_heterogeneous_shared_updates_and_reconstruction(void)
+{
+    csi p[]={0,1,3,5,8,11}, i[]={0,0,1,0,2,1,2,3,1,3,4};
+    double a[]={8,1,8,1,8,1,1,8,1,1,8}, dense[25], sum, want;
+    vsdlss A={11,5,5,p,i,a,-1}, *L=NULL; vsdlss_sn_symbolic *s=NULL;
+    vsdlss_sn_factor *f=NULL; vsdlss_factor *m1=NULL; csi r,c,t,k;
+    CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK && s->count==2);
+    CHECK(vsdlss_sn_factorize(&A,s,&f)==VSDLSS_OK);
+    CHECK(vsdlss_sn_export_L(f,&L)==VSDLSS_OK); dense_from_csc(L,dense);
+    CHECK(vsdlss_factorize(&A,2,&m1)==VSDLSS_OK);
+    { const vsdlss *M=vsdlss_factor_L(m1); CHECK(M&&M->p[5]==L->p[5]);
+      for(k=0;k<=5;k++) CHECK(M->p[k]==L->p[k]);
+      for(k=0;k<L->p[5];k++) CHECK(M->i[k]==L->i[k]&&fabs(M->x[k]-L->x[k])<1e-12); }
+    for(r=0;r<5;r++) for(c=0;c<5;c++) {
+        sum=0; for(t=0;t<5;t++) sum+=dense[r*5+t]*dense[c*5+t];
+        want=0; for(k=p[c];k<p[c+1];k++) if(i[k]==r) want=a[k];
+        if(r>c) { for(k=p[r];k<p[r+1];k++) if(i[k]==c) want=a[k]; }
+        CHECK(fabs(sum-want)<1e-11);
+    }
+    vsdlss_factor_free(m1); vsdlss_spfree(L); vsdlss_sn_factor_free(f); vsdlss_sn_symbolic_free(s);
+    return 0;
+}
+
+static csi panel_owner(const vsdlss_sn_symbolic *s, csi slot)
+{
+    csi sn;
+    for(sn=0;sn<s->count;sn++)
+        if(slot>=s->panel_offset[sn]&&slot<s->panel_offset[sn+1]) return sn;
+    return -1;
+}
+
+static int test_numeric_multiple_destinations_and_shared_target(void)
+{
+    csi p[]={0,1,2,4,5,7,8}, i[]={0,1,0,2,3,0,4,5};
+    double a[]={8,8,1,8,8,1,8,8}, dense[36], sum, want;
+    vsdlss A={8,6,6,p,i,a,-1}, *L=NULL; vsdlss_sn_symbolic *s=NULL;
+    vsdlss_sn_factor *f=NULL; vsdlss_factor *m1=NULL; csi r,c,t,k;
+    CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK && s->count>2);
+    /* Source panel 0 scatters to panels 2 and 4.  Panels 0 and 2 both
+       contribute to the diagonal slot in the later panel 4. */
+    CHECK(panel_owner(s,s->update_target[0])==2);
+    CHECK(panel_owner(s,s->update_target[2])==4);
+    CHECK(s->update_target[2]==s->update_target[s->update_ptr[2]]);
+    CHECK(vsdlss_sn_factorize(&A,s,&f)==VSDLSS_OK);
+    CHECK(vsdlss_sn_export_L(f,&L)==VSDLSS_OK); dense_from_csc(L,dense);
+    CHECK(vsdlss_factorize(&A,2,&m1)==VSDLSS_OK);
+    { const vsdlss *M=vsdlss_factor_L(m1); CHECK(M&&M->p[6]==L->p[6]);
+      for(k=0;k<=6;k++) CHECK(M->p[k]==L->p[k]);
+      for(k=0;k<L->p[6];k++) CHECK(M->i[k]==L->i[k]&&fabs(M->x[k]-L->x[k])<1e-12); }
+    for(r=0;r<6;r++) for(c=0;c<6;c++) {
+        sum=0; for(t=0;t<6;t++) sum+=dense[r*6+t]*dense[c*6+t];
+        want=0; for(k=p[c];k<p[c+1];k++) if(i[k]==r) want=a[k];
+        if(r>c) for(k=p[r];k<p[r+1];k++) if(i[k]==c) want=a[k];
+        CHECK(fabs(sum-want)<1e-11);
+    }
+    vsdlss_factor_free(m1); vsdlss_spfree(L); vsdlss_sn_factor_free(f);
+    vsdlss_sn_symbolic_free(s); return 0;
+}
+
+static int test_numeric_errors_are_transactional(void)
+{
+    csi p[]={0,1,3}, i[]={0,0,1}; double a[]={1,2,1};
+    vsdlss A={3,2,2,p,i,a,-1}; vsdlss_sn_symbolic *s=NULL;
+    vsdlss_sn_factor *f=(vsdlss_sn_factor*)1; vsdlss *L=(vsdlss*)1;
+    double rhs[]={1,NAN}, out[]={7,8};
+    CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK);
+    CHECK(vsdlss_sn_factorize(&A,s,&f)==VSDLSS_ERR_NOT_POSDEF&&f==NULL);
+    a[2]=INFINITY; f=(vsdlss_sn_factor*)1;
+    CHECK(vsdlss_sn_factorize(&A,s,&f)==VSDLSS_ERR_NONFINITE&&f==NULL);
+    a[2]=1;
+    CHECK(vsdlss_sn_factorize(NULL,s,&f)==VSDLSS_ERR_INVALID&&f==NULL);
+    CHECK(vsdlss_sn_factorize(&A,NULL,&f)==VSDLSS_ERR_INVALID&&f==NULL);
+    CHECK(vsdlss_sn_factorize(&A,s,NULL)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_sn_solve(NULL,rhs,out)==VSDLSS_ERR_INVALID);
+    CHECK(out[0]==7&&out[1]==8);
+    CHECK(vsdlss_sn_export_L(NULL,&L)==VSDLSS_ERR_INVALID&&L==NULL);
+    { csi tiny_p[]={0}, tiny_i[]={0}; double tiny_x[]={1};
+      vsdlss huge={INT64_MAX,INT64_MAX,INT64_MAX,tiny_p,tiny_i,tiny_x,-1};
+      vsdlss_sn_symbolic huge_s={0};
+      huge_s.n=INT64_MAX; huge_s.count=1; huge_s.l_nnz=1;
+      f=(vsdlss_sn_factor*)1;
+      CHECK(vsdlss_sn_factorize(&huge,&huge_s,&f)==VSDLSS_ERR_OOM&&f==NULL); }
+    { csi one_p[]={0,1}, one_i[]={0}; double one_x[]={1};
+      csi one[]={0}; vsdlss one_A={1,1,1,one_p,one_i,one_x,-1};
+      vsdlss_sn_symbolic huge_count={0};
+      huge_count.n=1; huge_count.count=INT64_MAX; huge_count.l_nnz=1;
+      huge_count.l_col_ptr=one; huge_count.l_row_index=one;
+      huge_count.l_panel_slot=one; huge_count.column_start=one;
+      huge_count.row_ptr=one; huge_count.panel_offset=one;
+      huge_count.update_ptr=one; f=(vsdlss_sn_factor*)1;
+      CHECK(vsdlss_sn_factorize(&one_A,&huge_count,&f)==VSDLSS_ERR_OOM&&f==NULL); }
+    { vsdlss_sn_symbolic malformed={0}; f=(vsdlss_sn_factor*)1;
+      malformed.n=2; malformed.count=1; malformed.l_nnz=1;
+      CHECK(vsdlss_sn_factorize(&A,&malformed,&f)==VSDLSS_ERR_INVALID&&f==NULL); }
+    vsdlss_sn_symbolic_free(s); return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
@@ -429,6 +561,10 @@ int main(void)
     CHECK(test_reduction_rhs_nonempty_core_and_transactions()==0);
     CHECK(test_symbolic_dense4_and_tridiagonal4()==0);
     CHECK(test_symbolic_single_shared_updates_and_failures()==0);
-    puts("m3 component, reduction, RHS, and symbolic tests passed");
+    CHECK(test_numeric_hand_factor_ownership_and_solve()==0);
+    CHECK(test_numeric_heterogeneous_shared_updates_and_reconstruction()==0);
+    CHECK(test_numeric_multiple_destinations_and_shared_target()==0);
+    CHECK(test_numeric_errors_are_transactional()==0);
+    puts("m3 component, reduction, RHS, symbolic, and numeric tests passed");
     return 0;
 }

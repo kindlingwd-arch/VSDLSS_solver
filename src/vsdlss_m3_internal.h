@@ -45,7 +45,12 @@ typedef struct vsdlss_sn_symbolic {
     csi *update_ptr;      /* count+1 */
     csi *update_target;   /* update_ptr[count], absolute panel slots */
 } vsdlss_sn_symbolic;
-typedef struct vsdlss_sn_factor vsdlss_sn_factor;
+typedef struct vsdlss_sn_factor {
+    csi n, count, l_nnz;
+    csi *l_col_ptr, *l_row_index, *l_panel_slot;
+    csi *column_start, *row_ptr, *row_index, *panel_offset;
+    double *panel;
+} vsdlss_sn_factor;
 
 vsdlss_status vsdlss_components_build(const vsdlss *, vsdlss_components **);
 vsdlss_status vsdlss_component_extract(const vsdlss *, const vsdlss_components *,

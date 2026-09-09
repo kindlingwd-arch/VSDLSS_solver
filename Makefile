@@ -6,7 +6,8 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_mld_graph.c \
            src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
            src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_components.c \
-           src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c
+           src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
+           src/vsdlss_supernodal_numeric.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
 .PHONY: all test test-unit test-io test-ordering test-mld test-m3 sanitizers clean
