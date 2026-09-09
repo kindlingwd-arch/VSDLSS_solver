@@ -67,25 +67,14 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
     for(sn=0;sn<f->count;sn++){
         csi begin=f->column_start[sn],w=f->column_start[sn+1]-begin;
         csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext,base=f->panel_offset[sn];
-        csi col,row,t,u=0;
+        csi col,row,u=0;
         if(w<1||ext<0||rows<1){st=VSDLSS_ERR_INVALID;goto fail;}
-        for(col=0;col<w;col++){
-            double d=f->panel[base+col*rows+col];
-            for(t=0;t<col;t++){double v=f->panel[base+t*rows+col];d-=v*v;}
-            if(!isfinite(d)){st=VSDLSS_ERR_NONFINITE;goto fail;}
-            if(d<=0){st=VSDLSS_ERR_NOT_POSDEF;goto fail;}
-            d=sqrt(d);f->panel[base+col*rows+col]=d;
-            for(row=col+1;row<rows;row++){
-                double v=f->panel[base+col*rows+row];
-                for(t=0;t<col;t++)v-=f->panel[base+t*rows+row]*f->panel[base+t*rows+col];
-                v/=d;if(!isfinite(v)){st=VSDLSS_ERR_NONFINITE;goto fail;}
-                f->panel[base+col*rows+row]=v;
-            }
-        }
+        st=vsdlss_panel_factor(f->panel+base,rows,w);
+        if(st!=VSDLSS_OK)goto fail;
         for(col=0;col<ext;col++)for(row=col;row<ext;row++){
             csi target=s->update_target[s->update_ptr[sn]+u++]; double v=0;
             if(target<0||target>=f->panel_offset[f->count]){st=VSDLSS_ERR_INVALID;goto fail;}
-            for(t=0;t<w;t++)v+=f->panel[base+t*rows+w+row]*f->panel[base+t*rows+w+col];
+            v=vsdlss_panel_dot(f->panel+base,rows,w,w+row,w+col);
             f->panel[target]-=v;if(!isfinite(f->panel[target])){st=VSDLSS_ERR_NONFINITE;goto fail;}
         }
     }
@@ -95,27 +84,17 @@ fail:vsdlss_sn_factor_free(f);return st;
 
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *f,const double *rhs,double *out)
 {
-    double *x; csi sn,j,r;
+    double *x; csi sn,j;
     if(!f||!rhs||!out||f->n<1||!bytes_ok(f->n,sizeof(double)))return VSDLSS_ERR_INVALID;
     x=malloc((size_t)f->n*sizeof(*x));if(!x)return VSDLSS_ERR_OOM;
     for(j=0;j<f->n;j++){if(!isfinite(rhs[j])){free(x);return VSDLSS_ERR_NONFINITE;}x[j]=rhs[j];}
-    for(sn=0;sn<f->count;sn++){
+    for(int back=0;back<2;back++)for(csi t=0;t<f->count;t++){
+        sn=back?f->count-1-t:t;
         csi b=f->column_start[sn],w=f->column_start[sn+1]-b;
-        csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext,base=f->panel_offset[sn];
-        for(j=0;j<w;j++){
-            csi gj=b+j;x[gj]/=f->panel[base+j*rows+j];
-            for(r=j+1;r<w;r++)x[b+r]-=f->panel[base+j*rows+r]*x[gj];
-            for(r=0;r<ext;r++)x[f->row_index[f->row_ptr[sn]+r]]-=f->panel[base+j*rows+w+r]*x[gj];
-        }
-    }
-    for(sn=f->count;sn-- >0;){
-        csi b=f->column_start[sn],w=f->column_start[sn+1]-b;
-        csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext,base=f->panel_offset[sn];
-        for(j=w;j-- >0;){double v=x[b+j];
-            for(r=j+1;r<w;r++)v-=f->panel[base+j*rows+r]*x[b+r];
-            for(r=0;r<ext;r++)v-=f->panel[base+j*rows+w+r]*x[f->row_index[f->row_ptr[sn]+r]];
-            x[b+j]=v/f->panel[base+j*rows+j];
-        }
+        csi ext=f->row_ptr[sn+1]-f->row_ptr[sn];
+        vsdlss_status st=vsdlss_panel_solve(f->panel+f->panel_offset[sn],b,w,ext,
+            ext?f->row_index+f->row_ptr[sn]:NULL,x,back);
+        if(st!=VSDLSS_OK){free(x);return st;}
     }
     for(j=0;j<f->n;j++)if(!isfinite(x[j])){free(x);return VSDLSS_ERR_NONFINITE;}
     memcpy(out,x,(size_t)f->n*sizeof(*x));free(x);return VSDLSS_OK;

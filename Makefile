@@ -7,10 +7,11 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
            src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_components.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
-           src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m4.c
+           src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m4.c \
+           src/vsdlss_panel.c src/vsdlss_m4_panel.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
-.PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 sanitizers clean
+.PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 sanitizers clean
 
 all: vsdlss_solve vsdlss_solver
 
@@ -50,7 +51,7 @@ test_m3: test/test_m3.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 test-m3: test_m3
 	./test_m3
 
-test: all test-unit test-io test-ordering test-mld test-m3 test-m4
+test: all test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5
 	python3 test/gen_sparse.py test_sparse 10
 	./vsdlss_solver test_sparse
 	./vsdlss_solver --disk-budget 8192 test_sparse
@@ -59,16 +60,25 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='-lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4
+	  LDLIBS='-lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels
 
 src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 src/*.o test_sparse.*
+	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h
 	$(CC) $(CFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
 
 test-m4: test_m4
 	./test_m4
+
+test_m4_panels: test/test_m4_panels.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h
+	$(CC) $(CFLAGS) -o $@ test/test_m4_panels.c $(LIBSRCS) $(LDLIBS)
+
+test-m4-panels: test_m4_panels
+	./test_m4_panels
+
+test-m5: vsdlss_solver
+	python3 test/test_m5.py

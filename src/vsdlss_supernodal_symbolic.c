@@ -40,7 +40,7 @@ void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *s)
     free(s->update_ptr); free(s->update_target); free(s);
 }
 
-vsdlss_status vsdlss_sn_analyze(const vsdlss *A, vsdlss_sn_symbolic **out)
+static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int compact)
 {
     vsdlss_sn_symbolic *z = NULL;
     csi *stack = NULL, *mark = NULL, *count = NULL, *cursor = NULL;
@@ -123,7 +123,7 @@ vsdlss_status vsdlss_sn_analyze(const vsdlss *A, vsdlss_sn_symbolic **out)
         if (!checked_add(external_total, ext, &external_total) ||
             !checked_add(width, ext, &rows) || !checked_mul(rows, width, &panel_size) ||
             !checked_add(panel_total, panel_size, &panel_total) ||
-            ext == INT64_MAX || !checked_mul(ext, ext + 1, &triangle)) {
+            ext == INT64_MAX || !checked_mul(compact?0:ext, ext + 1, &triangle)) {
             status = VSDLSS_ERR_OOM; goto fail;
         }
         triangle /= 2;
@@ -172,7 +172,7 @@ vsdlss_status vsdlss_sn_analyze(const vsdlss *A, vsdlss_sn_symbolic **out)
         }
     }
     total = 0;
-    for (sn = 0; sn < z->count; ++sn) {
+    for (sn = 0; !compact && sn < z->count; ++sn) {
         csi ext = z->row_ptr[sn + 1] - z->row_ptr[sn], q, r;
         for (q = 0; q < ext; ++q) for (r = q; r < ext; ++r) {
             csi col = z->row_index[z->row_ptr[sn] + q];
@@ -188,3 +188,8 @@ fail:
     free(stack); free(mark); free(count); free(cursor);
     vsdlss_sn_symbolic_free(z); return status;
 }
+
+vsdlss_status vsdlss_sn_analyze(const vsdlss *A, vsdlss_sn_symbolic **out)
+{ return analyze(A,out,0); }
+vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *A, vsdlss_sn_symbolic **out)
+{ return analyze(A,out,1); }

@@ -60,13 +60,13 @@ void vsdlss_m4_factor_free(vsdlss_m4_factor *f)
 {
     if (!f) return;
     if (f->file) fclose(f->file);
-    free(f->q); free(f->offset); free(f->count); free(f);
+    free(f->q); free(f->offset); free(f->count); free(f->blocks); free(f);
 }
 size_t vsdlss_m4_workspace_bytes(const vsdlss_m4_factor *f)
 {
     return f?f->workspace_bytes:0;
 }
-vsdlss_status vsdlss_factorize_m4(const vsdlss *A, int order,
+vsdlss_status vsdlss_factorize_m4_scalar(const vsdlss *A, int order,
     size_t budget, const char *directory, vsdlss_m4_factor **out)
 {
     vsdlss_m4_factor *f=NULL;
@@ -167,6 +167,7 @@ vsdlss_status vsdlss_m4_solve(vsdlss_m4_factor *f,
     double *w;
     vsdlss_status st=VSDLSS_ERR_IO;
     if (!f||!f->file||!rhs||!solution) return VSDLSS_ERR_INVALID;
+    if (f->format_version==2) return vsdlss_m4_panel_solve(f,rhs,solution);
     for (csi i=0;i<f->n;i++) if (!isfinite(rhs[i])) return VSDLSS_ERR_NONFINITE;
     clearerr(f->file);
     if (!metadata(f,0)) return st;

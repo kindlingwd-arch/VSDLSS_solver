@@ -72,9 +72,11 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
 vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
                               const double *rhs, double *solution);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
-/* M4: private temporary disk factor; no original-format compatibility.
+/* M4: panel mode (width cap 8), scalar fallback for very small budgets.
+ * Private temporary disk factor; no original-format compatibility.
  * budget bounds numeric/solve workspace and resident metadata, excluding
- * normalized input, ordering, temporary path, stack, libc FILE bookkeeping
+ * normalized input, ordering/symbolic preparation, temporary path, stack,
+ * libc FILE bookkeeping
  * and allocator overhead. This is not a process RSS limit.
  * temp_directory must exist; NULL uses /tmp. Not concurrently callable.
  */
@@ -85,6 +87,23 @@ vsdlss_status vsdlss_m4_solve(vsdlss_m4_factor *factor,
     const double *rhs, double *solution);
 size_t vsdlss_m4_workspace_bytes(const vsdlss_m4_factor *factor);
 void vsdlss_m4_factor_free(vsdlss_m4_factor *factor);
+
+/* Force panel mode; max_columns is a cap, split further to fit budget.
+ * Numeric-stage heap is bounded; normalization/ordering/symbolic preparation
+ * remain in memory. Save/open use the reconstruction's v2 format, not M5 ABI.
+ */
+typedef struct vsdlss_m4_stats {
+    uint64_t blocks, multi_column_blocks, max_columns;
+    uint64_t block_reads, block_writes, bytes_read, bytes_written;
+    size_t numeric_workspace_bytes;
+    int format_version;
+} vsdlss_m4_stats;
+vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *, int order, size_t budget,
+    const char *temp_directory, csi max_columns, vsdlss_m4_factor **);
+vsdlss_status vsdlss_m4_get_stats(const vsdlss_m4_factor *, vsdlss_m4_stats *);
+vsdlss_status vsdlss_m4_save(vsdlss_m4_factor *, const char *path);
+vsdlss_status vsdlss_m4_open(const char *path, size_t budget, vsdlss_m4_factor **);
+csi vsdlss_m4_dimension(const vsdlss_m4_factor *);
 
 const vsdlss *vsdlss_factor_L(const vsdlss_factor *factor);
 const csi *vsdlss_factor_q(const vsdlss_factor *factor);

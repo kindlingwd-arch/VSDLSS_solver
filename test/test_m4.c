@@ -32,7 +32,7 @@ static int accuracy(void)
     for (int order=0;order<=4;order++) {
         vsdlss_m4_factor *f=NULL;
         vsdlss_factor *m1=NULL;
-        CHECK(vsdlss_factorize_m4(A,order,8192,NULL,&f)==VSDLSS_OK);
+        CHECK(vsdlss_factorize_m4_scalar(A,order,8192,NULL,&f)==VSDLSS_OK);
         CHECK(vsdlss_m4_workspace_bytes(f)<=8192);
         CHECK(vsdlss_factorize(A,order,&m1)==VSDLSS_OK);
         memset(L,0,sizeof(L));
@@ -69,16 +69,16 @@ static int failures(void)
     csi p[]={0,1,3},i[]={0,0,1}; double a[]={4,1,3};
     vsdlss A={3,2,2,p,i,a,-1}; vsdlss_m4_factor *f=NULL;
     double rhs[]={7,-1},x[]={91,92};
-    CHECK(vsdlss_factorize_m4(&A,2,1,NULL,&f)==VSDLSS_ERR_OOM&&f==NULL);
-    CHECK(vsdlss_factorize_m4(&A,7,8192,NULL,&f)==VSDLSS_ERR_UNSUPPORTED&&f==NULL);
-    CHECK(vsdlss_factorize_m4(&A,2,8192,"/no-such-m4-dir/child",&f)==VSDLSS_ERR_IO&&f==NULL);
-    CHECK(vsdlss_factorize_m4(NULL,2,8192,NULL,&f)==VSDLSS_ERR_INVALID&&f==NULL);
+    CHECK(vsdlss_factorize_m4_scalar(&A,2,1,NULL,&f)==VSDLSS_ERR_OOM&&f==NULL);
+    CHECK(vsdlss_factorize_m4_scalar(&A,7,8192,NULL,&f)==VSDLSS_ERR_UNSUPPORTED&&f==NULL);
+    CHECK(vsdlss_factorize_m4_scalar(&A,2,8192,"/no-such-m4-dir/child",&f)==VSDLSS_ERR_IO&&f==NULL);
+    CHECK(vsdlss_factorize_m4_scalar(NULL,2,8192,NULL,&f)==VSDLSS_ERR_INVALID&&f==NULL);
     vsdlss huge={0,INT64_MAX,INT64_MAX,p,i,a,-1};
-    CHECK(vsdlss_factorize_m4(&huge,2,SIZE_MAX,NULL,&f)==VSDLSS_ERR_OOM&&f==NULL);
-    a[2]=0; CHECK(vsdlss_factorize_m4(&A,2,8192,NULL,&f)==VSDLSS_ERR_NOT_POSDEF&&f==NULL);
-    a[2]=NAN; CHECK(vsdlss_factorize_m4(&A,2,8192,NULL,&f)==VSDLSS_ERR_NONFINITE&&f==NULL); a[2]=3;
+    CHECK(vsdlss_factorize_m4_scalar(&huge,2,SIZE_MAX,NULL,&f)==VSDLSS_ERR_OOM&&f==NULL);
+    a[2]=0; CHECK(vsdlss_factorize_m4_scalar(&A,2,8192,NULL,&f)==VSDLSS_ERR_NOT_POSDEF&&f==NULL);
+    a[2]=NAN; CHECK(vsdlss_factorize_m4_scalar(&A,2,8192,NULL,&f)==VSDLSS_ERR_NONFINITE&&f==NULL); a[2]=3;
     for (int damage=0;damage<6;damage++) {
-        CHECK(vsdlss_factorize_m4(&A,2,8192,NULL,&f)==VSDLSS_OK);
+        CHECK(vsdlss_factorize_m4_scalar(&A,2,8192,NULL,&f)==VSDLSS_OK);
         rhs[0]=INFINITY;
         CHECK(vsdlss_m4_solve(f,rhs,x)==VSDLSS_ERR_NONFINITE&&x[0]==91&&x[1]==92); rhs[0]=7;
         if (damage==0) CHECK(ftruncate(fileno(f->file),10)==0);
@@ -96,7 +96,7 @@ static int failures(void)
         struct rlimit lim={110,110};
         signal(SIGXFSZ,SIG_IGN);
         if (setrlimit(RLIMIT_FSIZE,&lim)!=0) _exit(2);
-        vsdlss_status st=vsdlss_factorize_m4(&A,2,8192,NULL,&f);
+        vsdlss_status st=vsdlss_factorize_m4_scalar(&A,2,8192,NULL,&f);
         _exit(st==VSDLSS_ERR_IO&&f==NULL?0:1);
     }
     int result; CHECK(waitpid(pid,&result,0)==pid&&WIFEXITED(result)&&WEXITSTATUS(result)==0);
@@ -111,7 +111,7 @@ static int edges_and_cleanup(void)
     vsdlss_m4_factor *f=NULL;
     double rhs[]={7,-1,6},x[]={0,0,0};
     CHECK(mkdtemp(directory));
-    CHECK(vsdlss_factorize_m4(&A,1,8192,directory,&f)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m4_scalar(&A,1,8192,directory,&f)==VSDLSS_OK);
     size_t need=vsdlss_m4_workspace_bytes(f);
     CHECK(vsdlss_m4_solve(f,rhs,x)==VSDLSS_OK);
     CHECK(fabs(x[0]-2)<1e-12&&fabs(x[1]+1)<1e-12&&fabs(x[2]-3)<1e-12);
@@ -120,15 +120,15 @@ static int edges_and_cleanup(void)
     while ((entry=readdir(dir))) CHECK(!strcmp(entry->d_name,".")||!strcmp(entry->d_name,".."));
     CHECK(closedir(dir)==0);
     vsdlss_m4_factor_free(f); f=NULL;
-    CHECK(vsdlss_factorize_m4(&A,1,need-1,directory,&f)==VSDLSS_ERR_OOM&&f==NULL);
-    CHECK(vsdlss_factorize_m4(&A,1,need,directory,&f)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m4_scalar(&A,1,need-1,directory,&f)==VSDLSS_ERR_OOM&&f==NULL);
+    CHECK(vsdlss_factorize_m4_scalar(&A,1,need,directory,&f)==VSDLSS_OK);
     vsdlss_m4_factor_free(f); f=NULL;
     a[5]=-2;
-    CHECK(vsdlss_factorize_m4(&A,1,8192,directory,&f)==VSDLSS_ERR_NOT_POSDEF&&f==NULL);
+    CHECK(vsdlss_factorize_m4_scalar(&A,1,8192,directory,&f)==VSDLSS_ERR_NOT_POSDEF&&f==NULL);
     CHECK(rmdir(directory)==0);
     csi sp[]={0,1},si[]={0}; double sa[]={9};
     vsdlss single={1,1,1,sp,si,sa,-1}; rhs[0]=18;
-    CHECK(vsdlss_factorize_m4(&single,2,8192,NULL,&f)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m4_scalar(&single,2,8192,NULL,&f)==VSDLSS_OK);
     CHECK(vsdlss_m4_solve(f,rhs,x)==VSDLSS_OK&&fabs(x[0]-2)<1e-12);
     vsdlss_m4_factor_free(f);
     return 0;

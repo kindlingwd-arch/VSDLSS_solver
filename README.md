@@ -17,9 +17,9 @@
 - RedHawk 风格 `.hdr/.matd/.matf/.matt/.mato/.rhs` 文件适配。
 
 - M3：按连通分量分解、低度预消元与超节点数值分解，独立可重用 API。
-- M4：逐列磁盘稀疏 Cholesky、流式前代/回代、显式工作区预算、版本化 little-endian 私有临时格式和失败清理。
+- M4：与 M3 共用多列面板内核，预算驱动的超节点拆块、块级磁盘更新与求解、v2 因子保存/打开、完整性校验。
 
-暂不支持一般 LU、不定 LDLT、原版私有数据布局/块文件、GPU、并行和原版 37 参数 ABI。M4 尚未接入 M3 多列超节点内核。
+暂不支持一般 LU、不定 LDLT、原版私有数据布局/块文件、GPU、并行和原版 37 参数 ABI。M5 原版文件/API 兼容尚需原始程序和真实样本验收。
 
 ## 与反编译原理的对应
 
@@ -86,20 +86,31 @@ make CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
 
 更详细的证据边界、审计和路线见 `docs/reconstruction/`。
 
-## M4 磁盘求解
+## M4 多列磁盘求解
 
 ```bash
-./vsdlss_solver --disk-budget 8192 --temp-dir /tmp -p 2 jobname
+./vsdlss_solver --disk-budget 1048576 --block-cols 8 --save-factor job.factor jobname
+./vsdlss_solver --disk-budget 1048576 --load-factor job.factor jobname
+./vsdlss_solver --m3 jobname
 ```
 
-`--disk-budget` 为字节数，限制 M4 数值工作区及因子元数据；不足时明确返回内存不足。
-输入/规范化矩阵、排序、临时路径及运行库开销不属于该预算，故它不是进程总内存上限。
-数值分解直接写磁盘，内存不保存完整 L。私有文件在创建后立即 unlink，因子释放时关闭。
+`--block-cols` 限制面板宽度，实际根据超节点边界及预算进一步拆分。数值阶段只保留源块和目标块两个缓冲，按目标块分组执行 M3 共用更新内核。省略块宽时优先使用最大宽度 8 的面板路径；极低预算保留 v1 单列回退。保存和显式块宽强制 v2，预算不足明确报错。
 
-API：`vsdlss_factorize_m4(A, order, budget, temp_directory, &factor)`、
-`vsdlss_m4_solve(factor, rhs, solution)`、`vsdlss_m4_workspace_bytes(factor)`、
-`vsdlss_m4_factor_free(factor)`。同一因子支持多 RHS 和原地求解，失败保留输出。
+`--disk-budget` 为数值阶段显式堆工作区及因子元数据的字节上限。输入规范化、排序和符号准备仍在内存进行，不受此预算约束；它不是全进程 RSS 上限。准备阶段矩阵/符号布局在磁盘数值更新前释放。
 
-目前每列为一个磁盘块，I/O 尚未优化，不承诺大型生产算例性能。
-格式、原符号映射、内存口径及验收见
+v2 文件具有块及元数据完整性摘要，保存失败保留原目标文件；成功保存后可跨进程重新打开。格式是本项目重建格式，不兼容原版私有块文件。默认临时因子仍在创建后立即 unlink，释放时关闭。
+
+API：`vsdlss_factorize_m4_ex(A, order, budget, temp_directory, max_columns, &factor)`、
+`vsdlss_m4_solve`、`vsdlss_m4_save`、`vsdlss_m4_open`、`vsdlss_m4_get_stats`、
+`vsdlss_m4_dimension`、`vsdlss_m4_workspace_bytes`、`vsdlss_m4_factor_free`。
+
+在 24 阶稠密回归中，列宽 1 与 8 的数值块读取次数分别为 300 和 6；该结果不是通用运行时间或生产规模性能承诺。
+
+## M5 对照验收
+
+`tools/validate_m5.py` 根据 manifest 在隔离目录运行 M1/M3/M4，并用独立残差和跨进程因子复用检查数值行为。原版对照需提供哈希锁定的可执行程序/适配器及真实样本；缺少原版时 `--require-original` 返回 3，不能登记为 M5 通过。原版 37 参数 ABI、一般 LU/不定系统、部分分解和并行尚未验收或实现。
+
+实现细节、格式及 manifest 说明见
+[07-m4-panels-m5.md](docs/reconstruction/07-m4-panels-m5.md)。
+旧 v1 证据及格式保留于
 [06-m4-disk-evidence.md](docs/reconstruction/06-m4-disk-evidence.md)。

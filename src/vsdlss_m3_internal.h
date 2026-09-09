@@ -88,4 +88,10 @@ vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *
 vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *, vsdlss **);
 void vsdlss_sn_factor_free(vsdlss_sn_factor *);
 
+/* Shared in-memory/disk panel kernels. Layout is column major. */
+vsdlss_status vsdlss_panel_factor(double *, csi rows, csi width);
+double vsdlss_panel_dot(const double *, csi rows, csi width, csi i, csi j);
+vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
+                                csi ext, const csi *index, double *, int back);
+vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *, vsdlss_sn_symbolic **);
 #endif
