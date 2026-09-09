@@ -72,6 +72,20 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
 vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
                               const double *rhs, double *solution);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
+/* M4: private temporary disk factor; no original-format compatibility.
+ * budget bounds numeric/solve workspace and resident metadata, excluding
+ * normalized input, ordering, temporary path, stack, libc FILE bookkeeping
+ * and allocator overhead. This is not a process RSS limit.
+ * temp_directory must exist; NULL uses /tmp. Not concurrently callable.
+ */
+typedef struct vsdlss_m4_factor vsdlss_m4_factor;
+vsdlss_status vsdlss_factorize_m4(const vsdlss *A, int order,
+    size_t budget, const char *temp_directory, vsdlss_m4_factor **out);
+vsdlss_status vsdlss_m4_solve(vsdlss_m4_factor *factor,
+    const double *rhs, double *solution);
+size_t vsdlss_m4_workspace_bytes(const vsdlss_m4_factor *factor);
+void vsdlss_m4_factor_free(vsdlss_m4_factor *factor);
+
 const vsdlss *vsdlss_factor_L(const vsdlss_factor *factor);
 const csi *vsdlss_factor_q(const vsdlss_factor *factor);
 const csi *vsdlss_factor_pinv(const vsdlss_factor *factor);

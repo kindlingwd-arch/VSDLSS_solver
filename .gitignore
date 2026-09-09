@@ -4,3 +4,8 @@
 /test_solver
 /test_io
 /test_sparse.*
+
+/test_ordering
+/test_mld
+/test_m3
+/test_m4

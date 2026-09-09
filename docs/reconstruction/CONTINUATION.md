@@ -1,6 +1,6 @@
 # 开发续接记录
 
-最后更新：2026-09-08。
+最后更新：2026-09-09。
 
 ## 当前决定
 
@@ -50,8 +50,38 @@ LeakSanitizer 在当前受 ptrace 管理的环境无法读取 `/proc/<pid>/task`
 - 新增 `test/test_mld.c`，独立验证粗化权重、确定性分区、割权不增、节点分隔无跨边，以及 30×30 网格确实建立多层层级。
 - 排序统计通过按最终排列重放消元得到，预测 `nnz(L)` 与实际因子交叉验证。
 
-## 下一阶段
+## M3 基线与 M4 本次交付
 
-M3 依据 `factorDeg1Deg2Pf_vsdlss`、`factorDeg3Pf_vsdlss`、缩减 RHS 和结果恢复证据，实现 1/2/3 度节点预消元与 Schur 更新。之后再依据块结构生产者/消费者实现超节点或小块专门内核；M4 才进入磁盘分块。
+拉取基线为 `codex/m1-spd-reimplementation` 的 `d7b2db5`。该提交已经实现独立 M3 API、分量求解、低度缩减和超节点符号/数值内核；原续接记录的“下一步实现 M3”已过时。本次新分支为 `codex/m4-disk-blocks`。
 
-所有新增算法必须先建立独立失败测试，并与 M1 解、因子重构及后向误差交叉验证。
+- 新增 `src/vsdlss_m4.c` 和内部头，提供直接写盘的稀疏左看式 Cholesky、逐列磁盘前代/回代、重复 RHS 和失败输出保护。
+- 公共接口位于 `include/vsdlss.h`；CLI 新增 `--disk-budget bytes` 和 `--temp-dir path`，严格校验参数。
+- 明确重建格式 v1 的头、版本、端序、64 位置换/偏移/计数和 binary64 数值，不宣称原版格式兼容。
+- 独占临时文件立即 unlink，因子拥有句柄；数值/写入失败和释放均关闭，不留下命名文件。
+- `test/test_m4.c` 在 8 KiB 工作区下与 M1、稠密因子重构和已知解交叉验证；覆盖短读、内核强制短写、元数据损坏、尾随数据、清理、输入及预算边界。
+- Makefile 默认测试补入此前遗漏的 M3，并加入 M4；sanitizers 同样包含两者。README 和 `06-m4-disk-evidence.md` 已更新。
+
+### 本次验证
+
+环境：Linux x86-64，GCC，GNU Make，POSIX 文件 API。
+
+```text
+make CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
+exit 0; solver/io/ordering/mld/m3/m4 均通过
+文件样例：内存及 M4 backward_error=8.882e-17
+
+make sanitizers
+exit 0; AddressSanitizer + UndefinedBehaviorSanitizer 所有测试通过
+ASAN_OPTIONS=detect_leaks=0（沿用仓库既有设置，未宣称 LeakSanitizer 验证）
+```
+
+100 阶网格的五种 order 值在 8192 字节预算下均通过：文件大于预算，稠密重构每元素误差低于 `1e-12`，三个非恒定 RHS 的解误差低于 `1e-11`、后向误差低于 `1e-12`。
+
+### 明确边界与下一步
+
+M4 提供最小逐列磁盘块数值闭环，并非原版块文件或 M3 多列超节点磁盘化。
+预算为 `sizeof(factor)+128+40*n`，约束数值堆工作区与因子元数据；不含驻留的规范化输入、排序、路径、运行库和调用栈，不是全进程内存上限。当前逐列扫描输入/历史列且逐记录 I/O，尚未优化大规模性能。格式无校验和，不支持持久导出、重新打开或崩溃恢复。
+
+后续最小动作：在不改变失败/预算契约下，建立有界多列缓存和列依赖索引的独立性能/数值测试，再考虑接入 M3 超节点更新。若要求整个流程的硬内存上限，需要另行将输入规范化与排序外存化。M5 原版兼容仍需真实原版程序与样本证据。
+
+所有新增算法应建立独立失败测试，并与 M1 解、因子重构及后向误差交叉验证。
