@@ -52,9 +52,27 @@ typedef struct vsdlss_sn_factor {
     double *panel;
 } vsdlss_sn_factor;
 
+typedef struct vsdlss_m3_component_factor {
+    csi n;
+    vsdlss_reduction *reduction; /* owns local reduction and core matrix */
+    csi *q;                      /* q[new] = old for the reduced core */
+    vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
+} vsdlss_m3_component_factor;
+
+struct vsdlss_m3_factor {
+    csi n, count;
+    vsdlss_components *components;       /* owns global/local maps */
+    vsdlss_m3_component_factor *component; /* count owned entries */
+};
+
 vsdlss_status vsdlss_components_build(const vsdlss *, vsdlss_components **);
+vsdlss_status vsdlss_components_build_normalized(const vsdlss *,
+                                                 vsdlss_components **);
 vsdlss_status vsdlss_component_extract(const vsdlss *, const vsdlss_components *,
                                        csi, vsdlss **);
+vsdlss_status vsdlss_component_extract_normalized(const vsdlss *,
+                                                  const vsdlss_components *,
+                                                  csi, vsdlss **);
 void vsdlss_components_free(vsdlss_components *);
 vsdlss_status vsdlss_reduce(const vsdlss *, vsdlss_reduction **);
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *, const double *,

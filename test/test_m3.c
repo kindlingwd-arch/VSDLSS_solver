@@ -545,6 +545,78 @@ static int test_numeric_errors_are_transactional(void)
     vsdlss_sn_symbolic_free(s); return 0;
 }
 
+static vsdlss *make_facade_fixture(csi n, int mixed)
+{
+    csi col,row,nz=0,capacity=mixed?n*(n+1)/2:n;
+    vsdlss *A=vsdlss_spalloc(n,n,capacity,1,0);
+    if(!A) return NULL;
+    A->p[0]=0;
+    for(col=0;col<n;col++) {
+        for(row=0;row<=col;row++) {
+            int same=(row%2)==(col%2), edge=0;
+            if(row==col) edge=1;
+            else if(mixed && same && (col%2==0 || col-row==2)) edge=1;
+            if(edge) { A->i[nz]=row; A->x[nz++]=(row==col?(col%2?4.0:10.0):1.0); }
+        }
+        A->p[col+1]=nz;
+    }
+    A->nzmax=nz?nz:1; return A;
+}
+
+static int test_m3_facade_mixed_components_orders_reuse_and_alias(void)
+{
+    vsdlss *A=make_facade_fixture(10,1); double want[10],rhs[10],out[10];
+    vsdlss_m3_factor *f=NULL; int order,pass; csi k;
+    CHECK(A);
+    for(order=0;order<=4;order++) {
+        CHECK(vsdlss_factorize_m3(A,order,&f)==VSDLSS_OK && f);
+        for(pass=0;pass<2;pass++) {
+            for(k=0;k<10;k++) want[k]=(pass?-.25:1.0)+(double)(k+1)*(pass?0.3:0.2);
+            CHECK(vsdlss_spmv_sym_upper(A,want,rhs)==VSDLSS_OK);
+            CHECK(vsdlss_m3_solve(f,rhs,out)==VSDLSS_OK);
+            for(k=0;k<10;k++) CHECK(fabs(out[k]-want[k])<1e-10);
+        }
+        CHECK(vsdlss_spmv_sym_upper(A,want,rhs)==VSDLSS_OK);
+        CHECK(vsdlss_m3_solve(f,rhs,rhs)==VSDLSS_OK);
+        for(k=0;k<10;k++) CHECK(fabs(rhs[k]-want[k])<1e-10);
+        vsdlss_m3_factor_free(f); f=NULL;
+    }
+    vsdlss_spfree(A); return 0;
+}
+
+static int test_m3_facade_errors_transaction_and_many_isolates(void)
+{
+    csi p[]={0,1,2},i[]={0,1}; double a[]={2,-1},rhs[]={1,NAN},out[]={7,8};
+    vsdlss A={2,2,2,p,i,a,-1}; vsdlss_m3_factor *f=(vsdlss_m3_factor*)1;
+    CHECK(vsdlss_factorize_m3(&A,2,&f)==VSDLSS_ERR_NOT_POSDEF && f==NULL);
+    CHECK(vsdlss_factorize_m3(&A,9,&f)==VSDLSS_ERR_UNSUPPORTED && f==NULL);
+    a[1]=3; CHECK(vsdlss_factorize_m3(&A,2,&f)==VSDLSS_OK);
+    CHECK(vsdlss_m3_solve(f,rhs,out)==VSDLSS_ERR_NONFINITE && out[0]==7 && out[1]==8);
+    CHECK(vsdlss_m3_solve(NULL,rhs,out)==VSDLSS_ERR_INVALID);
+    vsdlss_m3_factor_free(f); vsdlss_m3_factor_free(NULL);
+    { const csi n=12000; vsdlss *D=make_facade_fixture(n,0); double *b,*x; csi k;
+      CHECK(D); b=malloc((size_t)n*sizeof(*b)); x=malloc((size_t)n*sizeof(*x)); CHECK(b&&x);
+      CHECK(vsdlss_factorize_m3(D,4,&f)==VSDLSS_OK);
+      for(k=0;k<n;k++) b[k]=2.0*(k%7-3);
+      CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+      for(k=0;k<n;k++) CHECK(x[k]==b[k]/D->x[D->p[k]]);
+      free(b);free(x);vsdlss_m3_factor_free(f);vsdlss_spfree(D); }
+    { csi hp[]={0}; csi hi[]={0}; double hx[]={1};
+      vsdlss huge={0,INT64_MAX,INT64_MAX,hp,hi,hx,-1}; f=(vsdlss_m3_factor*)1;
+      CHECK(vsdlss_factorize_m3(&huge,2,&f)==VSDLSS_ERR_OOM && f==NULL); }
+    return 0;
+}
+
+static int test_m3_partial_factor_cleanup_without_component_array(void)
+{
+    vsdlss_m3_factor *f=(vsdlss_m3_factor*)calloc(1,sizeof(*f));
+    CHECK(f);
+    f->count=1;
+    f->component=NULL;
+    vsdlss_m3_factor_free(f);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
@@ -565,6 +637,9 @@ int main(void)
     CHECK(test_numeric_heterogeneous_shared_updates_and_reconstruction()==0);
     CHECK(test_numeric_multiple_destinations_and_shared_target()==0);
     CHECK(test_numeric_errors_are_transactional()==0);
+    CHECK(test_m3_facade_mixed_components_orders_reuse_and_alias()==0);
+    CHECK(test_m3_facade_errors_transaction_and_many_isolates()==0);
+    CHECK(test_m3_partial_factor_cleanup_without_component_array()==0);
     puts("m3 component, reduction, RHS, symbolic, and numeric tests passed");
     return 0;
 }

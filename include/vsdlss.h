@@ -53,6 +53,7 @@ typedef struct vsdlss_num /* numeric Cholesky factorization */
 } vsdlss_num;
 
 typedef struct vsdlss_factor vsdlss_factor;
+typedef struct vsdlss_m3_factor vsdlss_m3_factor;
 
 typedef struct vsdlss_order_stats
 {
@@ -66,6 +67,11 @@ vsdlss_status vsdlss_factorize(const vsdlss *A, int order, vsdlss_factor **out);
 vsdlss_status vsdlss_factor_solve(const vsdlss_factor *factor,
                                   const double *rhs, double *solution);
 void vsdlss_factor_free(vsdlss_factor *factor);
+vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
+                                  vsdlss_m3_factor **out);
+vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
+                              const double *rhs, double *solution);
+void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
 const vsdlss *vsdlss_factor_L(const vsdlss_factor *factor);
 const csi *vsdlss_factor_q(const vsdlss_factor *factor);
 const csi *vsdlss_factor_pinv(const vsdlss_factor *factor);

@@ -19,8 +19,9 @@ void vsdlss_components_free(vsdlss_components *components)
     free(components);
 }
 
-vsdlss_status vsdlss_components_build(const vsdlss *A,
-                                      vsdlss_components **out)
+static vsdlss_status components_build_impl(const vsdlss *A,
+                                           vsdlss_components **out,
+                                           int validate)
 {
     vsdlss_components *components = NULL;
     csi *queue = NULL, *sizes = NULL, *adj_offset = NULL;
@@ -34,8 +35,10 @@ vsdlss_status vsdlss_components_build(const vsdlss *A,
         return VSDLSS_ERR_INVALID;
     if (A->n == INT64_MAX || !checked_count(A->n, sizeof(csi)) ||
         !checked_count(A->n + 1, sizeof(csi))) return VSDLSS_ERR_OOM;
-    status = vsdlss_validate_upper_csc(A);
-    if (status != VSDLSS_OK) return status;
+    if (validate) {
+        status = vsdlss_validate_upper_csc(A);
+        if (status != VSDLSS_OK) return status;
+    }
 
     components = (vsdlss_components *)calloc(1, sizeof(*components));
     if (!components) return VSDLSS_ERR_OOM;
@@ -127,9 +130,22 @@ fail:
     return status;
 }
 
-vsdlss_status vsdlss_component_extract(const vsdlss *A,
-                                       const vsdlss_components *components,
-                                       csi component, vsdlss **out)
+vsdlss_status vsdlss_components_build(const vsdlss *A,
+                                      vsdlss_components **out)
+{
+    return components_build_impl(A, out, 1);
+}
+
+vsdlss_status vsdlss_components_build_normalized(const vsdlss *A,
+                                                 vsdlss_components **out)
+{
+    return components_build_impl(A, out, 0);
+}
+
+static vsdlss_status component_extract_impl(const vsdlss *A,
+                                            const vsdlss_components *components,
+                                            csi component, vsdlss **out,
+                                            int validate)
 {
     vsdlss *local = NULL;
     vsdlss_status status;
@@ -144,8 +160,10 @@ vsdlss_status vsdlss_component_extract(const vsdlss *A,
         return VSDLSS_ERR_INVALID;
     if (A->n == INT64_MAX || !checked_count(A->n + 1, sizeof(csi)))
         return VSDLSS_ERR_OOM;
-    status = vsdlss_validate_upper_csc(A);
-    if (status != VSDLSS_OK) return status;
+    if (validate) {
+        status = vsdlss_validate_upper_csc(A);
+        if (status != VSDLSS_OK) return status;
+    }
     start = components->offset[component]; end = components->offset[component + 1];
     if (start < 0 || end <= start || end > A->n) return VSDLSS_ERR_INVALID;
     local_n = end - start;
@@ -174,4 +192,18 @@ vsdlss_status vsdlss_component_extract(const vsdlss *A,
     local->nzmax = dst > 0 ? dst : 1;
     *out = local;
     return VSDLSS_OK;
+}
+
+vsdlss_status vsdlss_component_extract(const vsdlss *A,
+                                       const vsdlss_components *components,
+                                       csi component, vsdlss **out)
+{
+    return component_extract_impl(A, components, component, out, 1);
+}
+
+vsdlss_status vsdlss_component_extract_normalized(const vsdlss *A,
+                                                  const vsdlss_components *components,
+                                                  csi component, vsdlss **out)
+{
+    return component_extract_impl(A, components, component, out, 0);
 }
