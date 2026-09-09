@@ -22,7 +22,29 @@ typedef struct vsdlss_reduction {
     vsdlss *core;
 } vsdlss_reduction;
 
-typedef struct vsdlss_sn_symbolic vsdlss_sn_symbolic;
+/* Strict-supernode symbolic layout.  Each panel s owns columns
+ * [column_start[s],column_start[s+1]) and logical rows J followed by the
+ * sorted external rows row_index[row_ptr[s]..row_ptr[s+1]).  panel_offset
+ * addresses a dense column-major (width + external_count)-by-width panel.
+ * l_panel_slot maps every CSC symbolic-L entry to exactly one absolute panel
+ * slot.  update_target stores, for each source panel, target panel slots for
+ * the lower triangle of R-by-R in column-major triangular order:
+ * (R[0],R[0]), (R[1],R[0]), ... then (R[1],R[1]), ... .  Thus its
+ * retained size is sum_s |R_s|(|R_s|+1)/2 csi slots; this can exceed nnz(L).
+ */
+typedef struct vsdlss_sn_symbolic {
+    csi n, count, l_nnz;
+    csi *parent;          /* n */
+    csi *l_col_ptr;       /* n+1 */
+    csi *l_row_index;     /* l_nnz */
+    csi *column_start;    /* count+1 */
+    csi *row_ptr;         /* count+1 */
+    csi *row_index;       /* row_ptr[count] */
+    csi *panel_offset;    /* count+1, scalar slots */
+    csi *l_panel_slot;    /* l_nnz, absolute panel slots */
+    csi *update_ptr;      /* count+1 */
+    csi *update_target;   /* update_ptr[count], absolute panel slots */
+} vsdlss_sn_symbolic;
 typedef struct vsdlss_sn_factor vsdlss_sn_factor;
 
 vsdlss_status vsdlss_components_build(const vsdlss *, vsdlss_components **);
