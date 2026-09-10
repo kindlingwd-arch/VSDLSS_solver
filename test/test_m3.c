@@ -1,4 +1,5 @@
 #include "../src/vsdlss_m3_internal.h"
+#include "m3_test_alloc.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -584,6 +585,39 @@ static int test_m3_facade_mixed_components_orders_reuse_and_alias(void)
     vsdlss_spfree(A); return 0;
 }
 
+static vsdlss *make_dense33_spd(void)
+{
+    const csi n=33, nz=n*(n+1)/2;
+    vsdlss *A=vsdlss_spalloc(n,n,nz,1,0); csi col,row,at=0;
+    if(!A) return NULL;
+    A->p[0]=0;
+    for(col=0;col<n;col++) {
+        for(row=0;row<col;row++) { A->i[at]=row; A->x[at++]=-1.0; }
+        A->i[at]=col; A->x[at++]=34.0; A->p[col+1]=at;
+    }
+    A->nzmax=at; return A;
+}
+
+static int test_dense33_degenerate_separator_m1_m3(void)
+{
+    vsdlss *A=make_dense33_spd(); double want[33],rhs[33],got[33];
+    const int orders[]={0,4}; csi k; size_t oi;
+    CHECK(A);
+    for(k=0;k<33;k++) want[k]=(k%3==0?-.5:.25)+(double)(k+1)/19.0;
+    CHECK(vsdlss_spmv_sym_upper(A,want,rhs)==VSDLSS_OK);
+    for(oi=0;oi<sizeof(orders)/sizeof(orders[0]);oi++) {
+        vsdlss_factor *m1=NULL; vsdlss_m3_factor *m3=NULL;
+        CHECK(vsdlss_factorize(A,orders[oi],&m1)==VSDLSS_OK && m1);
+        CHECK(vsdlss_factor_solve(m1,rhs,got)==VSDLSS_OK);
+        for(k=0;k<33;k++) CHECK(fabs(got[k]-want[k])<2e-11);
+        CHECK(vsdlss_factorize_m3(A,orders[oi],&m3)==VSDLSS_OK && m3);
+        CHECK(vsdlss_m3_solve(m3,rhs,got)==VSDLSS_OK);
+        for(k=0;k<33;k++) CHECK(fabs(got[k]-want[k])<2e-11);
+        vsdlss_factor_free(m1); vsdlss_m3_factor_free(m3);
+    }
+    vsdlss_spfree(A); return 0;
+}
+
 static int test_m3_facade_errors_transaction_and_many_isolates(void)
 {
     csi p[]={0,1,2},i[]={0,1}; double a[]={2,-1},rhs[]={1,NAN},out[]={7,8};
@@ -617,6 +651,94 @@ static int test_m3_partial_factor_cleanup_without_component_array(void)
     return 0;
 }
 
+typedef struct { csi a,b; double w; } test_edge;
+
+static vsdlss *make_laplacian(csi n, const test_edge *edge, csi edges)
+{
+    csi col,k,nz=0; vsdlss *A=vsdlss_spalloc(n,n,n+edges,1,0);
+    if(!A) return NULL;
+    A->p[0]=0;
+    for(col=0;col<n;col++) {
+        double diagonal=1.0;
+        for(k=0;k<edges;k++) if(edge[k].a==col||edge[k].b==col) diagonal+=edge[k].w;
+        A->i[nz]=col; A->x[nz++]=diagonal;
+        for(k=0;k<edges;k++) {
+            csi lo=edge[k].a<edge[k].b?edge[k].a:edge[k].b;
+            csi hi=edge[k].a<edge[k].b?edge[k].b:edge[k].a;
+            if(hi==col) { A->i[nz]=lo; A->x[nz++]=-edge[k].w; }
+        }
+        /* Keep each upper column sorted for validation. */
+        { csi p,q; for(p=A->p[col]+1;p<nz;p++) for(q=p;q>A->p[col]&&A->i[q]<A->i[q-1];q--) {
+            csi ti=A->i[q]; double tx=A->x[q]; A->i[q]=A->i[q-1]; A->x[q]=A->x[q-1]; A->i[q-1]=ti; A->x[q-1]=tx;
+        }}
+        A->p[col+1]=nz;
+    }
+    A->nzmax=nz; return A;
+}
+
+static int dense_oracle(const vsdlss *A,const double *b,double *x)
+{
+    csi n=A->n,i,j,k,p; double d[128*128],y[128];
+    if(n>128) return 0;
+    memset(d,0,(size_t)n*(size_t)n*sizeof(double));
+    for(j=0;j<n;j++) for(p=A->p[j];p<A->p[j+1];p++) {
+        i=A->i[p]; d[i*n+j]=A->x[p]; d[j*n+i]=A->x[p];
+    }
+    for(j=0;j<n;j++) {
+        for(i=j;i<n;i++) { double s=d[i*n+j]; for(k=0;k<j;k++) s-=d[i*n+k]*d[j*n+k];
+            if(i==j) {if(!(s>0)) return 0; d[j*n+j]=sqrt(s);} else d[i*n+j]=s/d[j*n+j]; }
+    }
+    for(i=0;i<n;i++){double s=b[i];for(k=0;k<i;k++)s-=d[i*n+k]*y[k];y[i]=s/d[i*n+i];}
+    for(i=n;i-->0;){double s=y[i];for(k=i+1;k<n;k++)s-=d[k*n+i]*x[k];x[i]=s/d[i*n+i];}
+    return 1;
+}
+
+static int compare_graph(const vsdlss *A,int expected_layout,int require_degree3)
+{
+    double b[128],xm1[128],xm3[128],xo[128],eta1,eta3; csi k,d3=0;
+    vsdlss_factor *m1=NULL; vsdlss_m3_factor *m3=NULL; vsdlss_reduction *r=NULL;
+    vsdlss_sn_symbolic *s=NULL; vsdlss_sn_factor *sn=NULL;
+    CHECK(A->n<=128); for(k=0;k<A->n;k++) b[k]=sin((double)(k+1)*.37)+.1*k;
+    CHECK(dense_oracle(A,b,xo)); CHECK(vsdlss_factorize(A,2,&m1)==VSDLSS_OK);
+    CHECK(vsdlss_factor_solve(m1,b,xm1)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(A,2,&m3)==VSDLSS_OK); CHECK(vsdlss_m3_solve(m3,b,xm3)==VSDLSS_OK);
+    CHECK(vsdlss_reduce(A,&r)==VSDLSS_OK); for(k=0;k<r->count;k++) if(r->records[k].degree==3)d3++;
+    CHECK(!expected_layout||r->core_n>0); CHECK(!require_degree3||d3>0);
+    if(expected_layout){CHECK(vsdlss_sn_analyze(r->core,&s)==VSDLSS_OK);CHECK(vsdlss_sn_factorize(r->core,s,&sn)==VSDLSS_OK);
+        if(expected_layout==1){CHECK(s->count==1);CHECK(s->row_ptr[s->count]==0);}
+        else {CHECK(s->count>1);CHECK(s->row_ptr[s->count]>0);CHECK(s->update_ptr[s->count]>0);CHECK(sn->count==s->count);CHECK(sn->row_ptr[sn->count]>0);}}
+    for(k=0;k<A->n;k++){CHECK(fabs(xm1[k]-xo[k])<2e-11);CHECK(fabs(xm3[k]-xo[k])<2e-11);}
+    CHECK(vsdlss_backward_error(A,xm1,b,&eta1)==VSDLSS_OK&&eta1<=1e-12);
+    CHECK(vsdlss_backward_error(A,xm3,b,&eta3)==VSDLSS_OK&&eta3<=1e-12);
+    vsdlss_sn_factor_free(sn);vsdlss_sn_symbolic_free(s);vsdlss_reduction_free(r);vsdlss_factor_free(m1);vsdlss_m3_factor_free(m3);return 0;
+}
+
+static int test_deterministic_graph_oracles(void)
+{
+    test_edge cube[12],k5[10],grid[144]; csi e=0,x,y,z;
+    for(x=0;x<8;x++) for(y=0;y<3;y++) if(!(x&(1<<y))) {cube[e++]=(test_edge){x,x+(1<<y),1.0+.03*e};}
+    {vsdlss*A=make_laplacian(8,cube,12);CHECK(A);CHECK(compare_graph(A,0,1)==0);vsdlss_spfree(A);}
+    e=0;for(x=0;x<5;x++)for(y=x+1;y<5;y++)k5[e++]=(test_edge){x,y,.7+.02*e};
+    {vsdlss*A=make_laplacian(5,k5,10);CHECK(A);CHECK(compare_graph(A,1,0)==0);vsdlss_spfree(A);}
+    e=0;for(z=0;z<4;z++)for(y=0;y<4;y++)for(x=0;x<4;x++){
+        csi v=x+4*y+16*z;if(x<3)grid[e++]=(test_edge){v,v+1,1.01};if(y<3)grid[e++]=(test_edge){v,v+4,.93};if(z<3)grid[e++]=(test_edge){v,v+16,1.07};}
+    {vsdlss*A=make_laplacian(64,grid,e);CHECK(A);CHECK(compare_graph(A,2,0)==0);vsdlss_spfree(A);} return 0;
+}
+
+static int test_m3_allocation_failures(void)
+{
+    test_edge edge[144]; csi a,x,y,z,e=0; vsdlss *A; vsdlss_m3_factor *f=NULL; size_t n,k,base,factor_n; double rhs[64],out[64];
+    for(z=0;z<4;z++)for(y=0;y<4;y++)for(x=0;x<4;x++){csi v=x+4*y+16*z;if(x<3)edge[e++]=(test_edge){v,v+1,1};if(y<3)edge[e++]=(test_edge){v,v+4,1};if(z<3)edge[e++]=(test_edge){v,v+16,1};}
+    A=make_laplacian(64,edge,e);CHECK(A);base=m3_alloc_live();
+    m3_alloc_reset();CHECK(vsdlss_factorize_m3(A,0,&f)==VSDLSS_OK);n=m3_alloc_calls();factor_n=n;vsdlss_m3_factor_free(f);f=NULL;CHECK(m3_alloc_live()==base);
+    for(k=1;k<=n;k++){m3_alloc_fail_at(k);CHECK(vsdlss_factorize_m3(A,0,&f)==VSDLSS_ERR_OOM);CHECK(f==NULL);CHECK(m3_alloc_live()==base);}
+    m3_alloc_reset();CHECK(vsdlss_factorize_m3(A,0,&f)==VSDLSS_OK);for(a=0;a<64;a++)rhs[a]=a+1;
+    base=m3_alloc_live();m3_alloc_reset();CHECK(vsdlss_m3_solve(f,rhs,out)==VSDLSS_OK);n=m3_alloc_calls();CHECK(m3_alloc_live()==base);
+    for(k=1;k<=n;k++){for(a=0;a<64;a++)out[a]=99; m3_alloc_fail_at(k);CHECK(vsdlss_m3_solve(f,rhs,out)==VSDLSS_ERR_OOM);for(a=0;a<64;a++)CHECK(out[a]==99);CHECK(m3_alloc_live()==base);}
+    printf("allocation failure sweeps: factorize=%zu solve=%zu\n",factor_n,n);
+    m3_alloc_reset();vsdlss_m3_factor_free(f);vsdlss_spfree(A);return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
@@ -638,8 +760,11 @@ int main(void)
     CHECK(test_numeric_multiple_destinations_and_shared_target()==0);
     CHECK(test_numeric_errors_are_transactional()==0);
     CHECK(test_m3_facade_mixed_components_orders_reuse_and_alias()==0);
+    CHECK(test_dense33_degenerate_separator_m1_m3()==0);
     CHECK(test_m3_facade_errors_transaction_and_many_isolates()==0);
     CHECK(test_m3_partial_factor_cleanup_without_component_array()==0);
+    CHECK(test_deterministic_graph_oracles()==0);
+    CHECK(test_m3_allocation_failures()==0);
     puts("m3 component, reduction, RHS, symbolic, and numeric tests passed");
     return 0;
 }

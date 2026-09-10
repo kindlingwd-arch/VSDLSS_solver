@@ -13,10 +13,11 @@
 - 跨分区边通过最大匹配和 Kőnig 最小顶点覆盖转成节点分隔器；伪外围 BFS 仅保留为退化分区的安全回退。
 - 消元树、符号列计数、稀疏 Cholesky `A = LL^T`。
 - 一个因子顺序求解多个 RHS；失败时不覆盖输出。
+- M3 独立入口提供连通分量拆分、0/1/2/3 度精确预消元、严格超节点块 Cholesky 和可复用 RHS 求解；M1 保留为独立对照。
 - NaN/Inf、非法 CSC、非正定矩阵、I/O 错误和不支持操作的明确状态。
 - RedHawk 风格 `.hdr/.matd/.matf/.matt/.mato/.rhs` 文件适配。
 
-暂不支持一般 LU、不定 LDLT、原版私有数据布局、超节点、磁盘分块、GPU、并行和原版 37 参数 ABI。
+暂不支持一般 LU、不定 LDLT、原版私有数据布局、磁盘分块、GPU、并行和原版 37 参数 ABI。当前 MLD 的增益细化和匹配实现也不宣称与已发表版本逐步等价。
 
 ## 与反编译原理的对应
 
@@ -28,7 +29,7 @@
 | 前代与回代 `solveLoadCase` | `L y = Pb`、`L^T z = y`、`x = P^T z` |
 | 多 load case | `vsdlss_factor_solve` 复用同一只读因子 |
 
-原版包含全内存和磁盘分块两条路径，并对小块使用专门内核。M1 先恢复可信的数学闭环；后续超节点和分块实现将与 M1 的因子及残差逐项对照。
+原版包含全内存和磁盘分块两条路径，并对小块使用专门内核。M3 已在内存内实现严格超节点分解，并与 M1 的解及残差逐项对照；磁盘分块仍待实现。
 
 ## 构建与测试
 
@@ -36,6 +37,7 @@
 make
 make test
 make sanitizers
+make bench-m3
 ```
 
 严格编译：
@@ -78,6 +80,8 @@ make CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
 2. `vsdlss_factor_solve(factor, rhs, solution)`：复用因子求解。
 3. `vsdlss_backward_error(A, solution, rhs, &eta)`：独立计算后向误差。
 4. `vsdlss_factor_free(factor)`：释放因子拥有的全部资源。
+
+M3 对应入口为 `vsdlss_factorize_m3`、`vsdlss_m3_solve` 和 `vsdlss_m3_factor_free`。测试包含固定权重图 Laplacian+I 的独立稠密 oracle、M1/M3 对照、逐分配序号失败注入和事务检查；K5 固定为单一稠密超节点，三维网格还直接检查多个超节点、外部行和更新映射。测试分配器不属于公共 API。`bench-m3` 输出阶段时间、缩减度数、核心、超节点、面板、临时符号元数据、保留因子元数据、求解临时区峰值估算和两路后向误差。峰值覆盖 facade 数组与 `reduce_rhs`/`reduce_recover`/超节点求解的嵌套临时数组，明确排除保留因子、输入输出和分配器开销；它不是进程内存高水位，也不表示已经验证百万节点规模。
 
 置换约定固定为 `q[new]=old`、`pinv[old]=new`，并由性质测试验证双射。
 

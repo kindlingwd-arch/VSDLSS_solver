@@ -93,7 +93,8 @@ void vsdlss_graph_free(vsdlss_graph *graph)
 {
     csi v;
     if (!graph) return;
-    for (v = 0; v < graph->n; ++v) free(graph->adj[v].items);
+    if (graph->adj)
+        for (v = 0; v < graph->n; ++v) free(graph->adj[v].items);
     free(graph->adj);
     free(graph->active);
     free(graph);

@@ -3,4 +3,8 @@
 /vsdlss_solver
 /test_solver
 /test_io
+/test_ordering
+/test_mld
+/test_m3
+/bench_m3
 /test_sparse.*

@@ -180,5 +180,13 @@ independent implementation.
 | exported `L` | export allocates a new CSC | caller diagnostics/comparison | caller owns and frees it |
 | per-solve workspace and saved RHS | solve path allocates or receives independent arrays | one RHS transaction | released at end of call; failure leaves caller solution unchanged |
 
-This audit states M3's intended ownership boundary; it does not claim that the
-original private structures have been fully reconstructed.
+This audit states M3's implemented ownership boundary; it does not claim that
+the original private structures have been fully reconstructed. Task 8's
+allocation-injection sweep exercises every allocation made by M3 factorization
+and solve on a 4x4x4 grid, checks that constructor failures leave `out == NULL`,
+that solve failures leave the caller output unchanged, and that the live
+allocation count returns to its pre-call baseline after every ordinal.
+The benchmark's solve-workspace peak follows the actual nested lifetimes:
+`global_n + 3*component_n + 4*core_n + 2*record_count` doubles at RHS
+reduction/recovery. The supernodal solve's additional `core_n` buffer reaches a
+smaller concurrent total.

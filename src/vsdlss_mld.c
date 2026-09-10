@@ -177,12 +177,11 @@ static vsdlss_status partition_connected(mld_context *ctx, const csi *v, csi n,
         for (k = 0; k < n; ++k) side[v[k]] = part[k];
         goto multilevel_done;
     }
-    /* A degenerate cover retains the verified BFS separator as a safe fallback. */
-    status = VSDLSS_OK;
 multilevel_done:
     free(part);
     if (level) { for (k = 0; k <= allocated_depth; ++k) vsdlss_mld_level_free(level[k]); free(level); }
     if (status != VSDLSS_OK) return status;
+    /* A degenerate successful cover retains the verified BFS separator. */
     if (*left > 0 && *right > 0 && *separator > 0) return VSDLSS_OK;
     status = pseudo_peripheral_bfs(ctx, v, n, &ecc);
     if (status != VSDLSS_OK) return status;

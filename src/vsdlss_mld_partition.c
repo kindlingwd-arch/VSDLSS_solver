@@ -87,5 +87,5 @@ vsdlss_status vsdlss_mld_node_separator(const vsdlss_mld_level *g,signed char *p
     *left=*right=*separator=0;
     for(v=0;v<n;v++){if((part[v]==0&&!zl[v])||(part[v]==1&&zr[v]))part[v]=2;if(part[v]==0)(*left)++;else if(part[v]==1)(*right)++;else(*separator)++;}
     free(mr);free(ml);free(queue);free(seen);free(zl);free(zr);
-    return (*left&&*right&&*separator)?VSDLSS_OK:VSDLSS_ERR_INVALID;
+    return VSDLSS_OK;
 }

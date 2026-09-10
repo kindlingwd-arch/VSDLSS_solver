@@ -225,6 +225,7 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
     diag=(double *)calloc((size_t)A->n,sizeof(*diag)); active=(unsigned char *)malloc((size_t)A->n);
     if(!r||!adj||!diag||!active) { status=VSDLSS_ERR_OOM; goto fail; }
     r->n=n=A->n; memset(active,1,(size_t)n);
+    if ((uint64_t)n > SIZE_MAX / sizeof(*r->records)) {status=VSDLSS_ERR_OOM;goto fail;}
     r->records=(vsdlss_elim_record *)calloc((size_t)n,sizeof(*r->records));
     if(!r->records) { status=VSDLSS_ERR_OOM; goto fail; }
     for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {

@@ -37,7 +37,7 @@ typedef struct vsdlss_sn_symbolic {
     csi *parent;          /* n */
     csi *l_col_ptr;       /* n+1 */
     csi *l_row_index;     /* l_nnz */
-    csi *column_start;    /* count+1 */
+    csi *column_start;    /* allocated n+1; first count+1 entries are used */
     csi *row_ptr;         /* count+1 */
     csi *row_index;       /* row_ptr[count] */
     csi *panel_offset;    /* count+1, scalar slots */
