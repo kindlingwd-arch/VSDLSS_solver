@@ -63,6 +63,17 @@ typedef struct vsdlss_order_stats
     csi separator_count;
 } vsdlss_order_stats;
 
+/* Per-calling-thread policy; default 1; never changes global OpenMP settings.
+ * last_team_size is the largest observed team since the last setter call.
+ * OpenMP runtime memory is not part of the M4 numeric workspace budget.
+ */
+int vsdlss_parallel_enabled(void);
+vsdlss_status vsdlss_set_num_threads(int threads);
+int vsdlss_get_num_threads(void);
+int vsdlss_parallel_last_team_size(void);
+vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *, csi nrhs,
+    const double *rhs, csi ldrhs, double *solutions, csi ldsolutions);
+
 vsdlss_status vsdlss_factorize(const vsdlss *A, int order, vsdlss_factor **out);
 vsdlss_status vsdlss_factor_solve(const vsdlss_factor *factor,
                                   const double *rhs, double *solution);

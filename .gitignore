@@ -11,3 +11,8 @@
 /test_m4
 
 /test_m4_panels
+
+/test_parallel
+/bench_parallel
+
+/test_omp_tsan_probe

@@ -101,7 +101,8 @@ vsdlss_status vsdlss_factorize_m4_scalar(const vsdlss *A, int order,
     f->count=calloc((size_t)f->n,sizeof(uint64_t));
     w=malloc((size_t)f->n*sizeof(double));
     if (!f->offset||!f->count||!w) goto done;
-    if (!directory) directory="/tmp";
+    if (!directory) directory=getenv("TMPDIR");
+    if (!directory || !*directory) directory="/tmp";
     size_t len=strlen(directory);
     if (len>SIZE_MAX-24) goto done;
     path=malloc(len+24);

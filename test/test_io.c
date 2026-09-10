@@ -13,8 +13,9 @@ static int failures;
 static int write_file(const char *path, const void *data, size_t size)
 {
     FILE *f=fopen(path,"wb");
-    int ok=f && fwrite(data,1,size,f)==size && fclose(f)==0;
-    if (f && !ok) fclose(f);
+    if(!f)return 0;
+    int ok=fwrite(data,1,size,f)==size;
+    if(fclose(f)!=0)ok=0;
     return ok;
 }
 
@@ -39,7 +40,7 @@ static void create_valid_job(const char *job, int with_rhs)
 
 static void test_load_modes_and_corruption(void)
 {
-    char dir[]="/tmp/vsdlss-io-XXXXXX", job[512], path[512];
+    char dir[]="./vsdlss-io-XXXXXX", job[512], path[512];
     vsdlss *A=NULL; double *rhs=NULL;
     CHECK(mkdtemp(dir)!=NULL);
     snprintf(job,sizeof job,"%s/case",dir);
@@ -64,6 +65,11 @@ static void test_load_modes_and_corruption(void)
         CHECK(write_file(path,malformed,sizeof(malformed)-1));
         CHECK(vsdlss_load_job(job,1,&A,&rhs)==VSDLSS_ERR_INVALID && !A && !rhs);
     }
+    const char *suffixes[]={".hdr",".matd",".matf",".matt",".mato",".rhs"};
+    for(size_t i=0;i<sizeof(suffixes)/sizeof(suffixes[0]);i++){
+        path_of(path,sizeof path,job,suffixes[i]);CHECK(unlink(path)==0);
+    }
+    CHECK(rmdir(dir)==0);
 }
 
 static void test_solution_write_errors(void)

@@ -18,8 +18,9 @@
 
 - M3：按连通分量分解、低度预消元与超节点数值分解，独立可重用 API。
 - M4：与 M3 共用多列面板内核，预算驱动的超节点拆块、块级磁盘更新与求解、v2 因子保存/打开、完整性校验。
+- 共享内存并行：M3 独立分量/多个 RHS、M3/M4 面板分解与更新、面板外部行求解；默认线程数 1。
 
-暂不支持一般 LU、不定 LDLT、原版私有数据布局/块文件、GPU、并行和原版 37 参数 ABI。M5 原版文件/API 兼容尚需原始程序和真实样本验收。
+暂不支持一般 LU、不定 LDLT、原版私有数据布局/块文件、GPU、MPI 和原版 37 参数 ABI。M5 原版文件/API 兼容尚需原始程序和真实样本验收。
 
 ## 与反编译原理的对应
 
@@ -108,9 +109,34 @@ API：`vsdlss_factorize_m4_ex(A, order, budget, temp_directory, max_columns, &fa
 
 ## M5 对照验收
 
-`tools/validate_m5.py` 根据 manifest 在隔离目录运行 M1/M3/M4，并用独立残差和跨进程因子复用检查数值行为。原版对照需提供哈希锁定的可执行程序/适配器及真实样本；缺少原版时 `--require-original` 返回 3，不能登记为 M5 通过。原版 37 参数 ABI、一般 LU/不定系统、部分分解和并行尚未验收或实现。
+`tools/validate_m5.py` 根据 manifest 在隔离目录运行 M1/M3/M4，并用独立残差和跨进程因子复用检查数值行为。原版对照需提供哈希锁定的可执行程序/适配器及真实样本；缺少原版时 `--require-original` 返回 3，不能登记为 M5 通过。原版 37 参数 ABI、一般 LU/不定系统、部分分解尚未验收或实现。共享内存并行的实现及证据见下节。
 
 实现细节、格式及 manifest 说明见
 [07-m4-panels-m5.md](docs/reconstruction/07-m4-panels-m5.md)。
 旧 v1 证据及格式保留于
 [06-m4-disk-evidence.md](docs/reconstruction/06-m4-disk-evidence.md)。
+
+## 并行求解
+
+默认构建启用 OpenMP（需要支持 `-fopenmp` 的编译器/运行库）：
+
+```bash
+make clean
+make
+./vsdlss_solver --m3 --threads 4 jobname
+./vsdlss_solver --disk-budget 4194304 --block-cols 96 --threads 4 jobname
+make test-parallel
+make bench-parallel
+```
+
+`vsdlss_set_num_threads(4)` 设置调用线程的并行策略；小任务和嵌套阶段自动串行。
+`vsdlss_m3_solve_many` 按列主序批量求解 RHS，支持 leading dimension，整个批次失败时保留输出。
+CLI 报告请求线程数和实际观察到的最大 team 大小。
+
+M1 标量路径、M4 块读写及源块推进顺序仍串行；同一个 M4 因子仍不支持外部并发调用。
+M4 显式数值工作区不随线程数增加，但 OpenMP 运行库/线程栈不计入该预算。
+
+不使用 OpenMP 的构建：`make clean && make OPENMP=0 test`；该构建拒绝大于 1 的线程数。
+实测 4 线程面板 factor 约 2.24×、M4 小型端到端约 1.21×；不是所有矩阵的性能保证。
+设计、反编译/PARDISO 证据、基准和 TSan 工具限制见
+[08-parallel-design.md](docs/reconstruction/08-parallel-design.md)。

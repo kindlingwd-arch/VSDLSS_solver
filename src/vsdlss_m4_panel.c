@@ -2,6 +2,7 @@
 #define _FILE_OFFSET_BITS 64
 #include "vsdlss_m4_internal.h"
 #include "vsdlss_m3_internal.h"
+#include "vsdlss_parallel.h"
 #include <float.h>
 #include <string.h>
 #include <unistd.h>
@@ -46,7 +47,8 @@ static csi lookup(const csi *rows,csi n,csi row)
 }
 static vsdlss_status temporary(const char *directory,FILE **out)
 {
-    if(!directory)directory="/tmp";
+    if(!directory)directory=getenv("TMPDIR");
+    if(!directory||!*directory)directory="/tmp";
     size_t n=strlen(directory);
     if(n>SIZE_MAX-32)return VSDLSS_ERR_OOM;
     char *path=malloc(n+32);if(!path)return VSDLSS_ERR_OOM;
@@ -189,16 +191,26 @@ vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *A,int order,size_t budget,
             if(dest<=id){st=VSDLSS_ERR_INVALID;goto done;}
             if(!block_io(f,dest,target,0,0))goto done;
             csi *dr=target;double *da=(double *)(dr+d->rows);
-            do{
-                csi dc=rows[c]-(csi)d->begin;
-                for(uint64_t r=c;r<b->rows;r++){
-                    csi tr=lookup(dr,(csi)d->rows,rows[r]);
-                    if(tr<0){st=VSDLSS_ERR_INVALID;goto done;}
-                    da[(uint64_t)dc*d->rows+tr]-=vsdlss_panel_dot(a,(csi)b->rows,(csi)b->width,(csi)r,(csi)c);
-                    if(!isfinite(da[(uint64_t)dc*d->rows+tr])){st=VSDLSS_ERR_NONFINITE;goto done;}
+            uint64_t end=c+1;
+            while(end<b->rows&&owner[rows[end]]==dest)end++;
+            int nt=vsdlss_parallel_width((double)(end-c)*b->rows*b->width),bad=0;(void)nt;
+            VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
+            {
+                VSDLSS_OMP(omp master)
+                vsdlss_parallel_observe();
+                VSDLSS_OMP(omp for schedule(dynamic,1))
+                for(uint64_t sc=c;sc<end;sc++){
+                    csi dc=rows[sc]-(csi)d->begin;
+                    for(uint64_t r=sc;r<b->rows;r++){
+                        csi tr=lookup(dr,(csi)d->rows,rows[r]);
+                        if(tr<0){bad|=1;continue;}
+                        da[(uint64_t)dc*d->rows+tr]-=vsdlss_panel_dot(a,(csi)b->rows,(csi)b->width,(csi)r,(csi)sc);
+                        if(!isfinite(da[(uint64_t)dc*d->rows+tr]))bad|=2;
+                    }
                 }
-                c++;
-            }while(c<b->rows&&owner[rows[c]]==dest);
+            }
+            if(bad){st=(bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE;goto done;}
+            c=end;
             if(!block_io(f,dest,target,1,0))goto done;
         }
     }

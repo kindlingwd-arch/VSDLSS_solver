@@ -104,7 +104,7 @@ static int failures(void)
 }
 static int edges_and_cleanup(void)
 {
-    char directory[]="/tmp/vsdlss-m4-test-XXXXXX";
+    char directory[]="./vsdlss-m4-test-XXXXXX";
     csi p[]={0,2,5,6},i[]={0,0,1,0,0,2};
     double a[]={2,2,3,0.25,0.75,2};
     vsdlss A={6,3,3,p,i,a,-1};

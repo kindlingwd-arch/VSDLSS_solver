@@ -1,4 +1,5 @@
 #include "vsdlss_m3_internal.h"
+#include "vsdlss_parallel.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -67,16 +68,27 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
     for(sn=0;sn<f->count;sn++){
         csi begin=f->column_start[sn],w=f->column_start[sn+1]-begin;
         csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext,base=f->panel_offset[sn];
-        csi col,row,u=0;
+
         if(w<1||ext<0||rows<1){st=VSDLSS_ERR_INVALID;goto fail;}
         st=vsdlss_panel_factor(f->panel+base,rows,w);
         if(st!=VSDLSS_OK)goto fail;
-        for(col=0;col<ext;col++)for(row=col;row<ext;row++){
-            csi target=s->update_target[s->update_ptr[sn]+u++]; double v=0;
-            if(target<0||target>=f->panel_offset[f->count]){st=VSDLSS_ERR_INVALID;goto fail;}
-            v=vsdlss_panel_dot(f->panel+base,rows,w,w+row,w+col);
-            f->panel[target]-=v;if(!isfinite(f->panel[target])){st=VSDLSS_ERR_NONFINITE;goto fail;}
+        int nt=vsdlss_parallel_width((double)ext*ext*w),bad=0;(void)nt;
+        VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
+        {
+            VSDLSS_OMP(omp master)
+            vsdlss_parallel_observe();
+            VSDLSS_OMP(omp for schedule(dynamic,1))
+            for(csi col=0;col<ext;col++){
+                csi u=col*ext-col*(col-1)/2;
+                for(csi row=col;row<ext;row++){
+                    csi target=s->update_target[s->update_ptr[sn]+u++];
+                    if(target<0||target>=f->panel_offset[f->count]){bad|=1;continue;}
+                    double v=vsdlss_panel_dot(f->panel+base,rows,w,w+row,w+col);
+                    f->panel[target]-=v;if(!isfinite(f->panel[target]))bad|=2;
+                }
+            }
         }
+        if(bad){st=(bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE;goto fail;}
     }
     *out=f;return VSDLSS_OK;
 fail:vsdlss_sn_factor_free(f);return st;

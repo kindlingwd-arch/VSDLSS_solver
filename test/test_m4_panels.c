@@ -41,7 +41,7 @@ static int dense(void)
             CHECK(vsdlss_m4_solve(f,x,x)==VSDLSS_OK);
             for(csi i=0;i<n;i++) CHECK(isfinite(x[i])&&fabs(x[i]-truth[i])<1e-12&&fabs(x[i]-ref[i])<1e-12);
         }
-        char directory[]="/tmp/vsdlss-panels-XXXXXX",path[100];
+        char directory[]="./vsdlss-panels-XXXXXX",path[100];
         CHECK(mkdtemp(directory)); snprintf(path,sizeof(path),"%s/factor",directory);
         CHECK(vsdlss_m4_save(f,path)==VSDLSS_OK);
         vsdlss_m4_factor_free(f); f=NULL;
@@ -123,7 +123,7 @@ static int faults(void)
     values[2]=3;
     CHECK(vsdlss_factorize_m4_ex(&A,2,8192,NULL,8,&f)==VSDLSS_OK);
     rhs[0]=NAN;CHECK(vsdlss_m4_solve(f,rhs,x)==VSDLSS_ERR_NONFINITE&&x[0]==91&&x[1]==92);rhs[0]=7;
-    char directory[]="/tmp/vsdlss-panel-faults-XXXXXX",path[100];
+    char directory[]="./vsdlss-panel-faults-XXXXXX",path[100];
     CHECK(mkdtemp(directory));snprintf(path,sizeof(path),"%s/factor",directory);
     for(int damage=0;damage<4;damage++){
         CHECK(vsdlss_m4_save(f,path)==VSDLSS_OK);

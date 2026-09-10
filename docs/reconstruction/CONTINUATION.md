@@ -1,6 +1,41 @@
 # 开发续接记录
 
-最后更新：2026-09-09。
+最后更新：2026-09-10。
+
+## 当前最新状态：共享内存并行
+
+分支 `codex/parallel-supernodal`，基于 `f3a53af`；后续章节保留此前里程碑记录。
+
+- 已审读 `computeNodeToThread`、线程索引/错误/分配器 mutex、`vsdlss` 入口的单线程 BLAS 设置，并参考 Intel oneMKL PARDISO 的两层因子/矩阵或 RHS 求解并行说明。证据及边界见 `08-parallel-design.md`。
+- 新增调用线程局部线程配置（默认 1）；OpenMP 构建默认启用，`OPENMP=0` 可完全串行编译。禁止活跃嵌套并行，小任务按估算工作量回退单线程。
+- M3 独立分量并行分解/求解；新增事务式 `vsdlss_m3_solve_many`，可按多个 RHS 并行。
+- M3/M4 共用面板分解的行更新并行；外部贡献按互斥目标列并行；前/回代的外部行贡献并行。主元列及源块依赖顺序保留。
+- M4 I/O 仍由调用线程串行调度，两个块缓冲及显式数值预算不随线程增加；线程栈/runtime 不属于预算。同一个 M4 因子仍不得外部并发调用。
+- CLI `--threads n` 报告 requested/max_team_used；M1 标量路径保持串行。
+- 当前测试环境没有可写 `/tmp`，生产临时路径现在尊重 `TMPDIR`，测试用工作目录。
+
+### 并行验证与性能
+
+`OPENMP=0` 与 `OPENMP=1` 严格全回归均通过；ASan/UBSan 全部 C 测试通过（不含 LeakSanitizer）。1/2/4 线程专项覆盖真实 team、多分量、多 RHS、完整 M4、前/回代、非正定/NaN 失败保护；同构建内串并行结果逐位一致且后向误差 <1e-12。M4 显式工作区不随线程变化。
+
+`parallel-benchmark.tsv` 保存五次计时中位数：4 线程面板 factor 约 2.24×，384 阶 M4 分解+求解约 1.21×。GCC 13.3，`getconf _NPROCESSORS_ONLN`=9。不是生产算例或相对 PARDISO 的性能结论。
+
+ThreadSanitizer 尝试返回 66。已用独立显式 barrier 探针重现当前 libgomp/TSan 的同步识别问题，未登记 race gate 通过。没有添加竞争抑制规则；仍需在支持 OpenMP 的工具组合上完成有效竞态检查。
+
+ASan/UBSan 测试维持仓库既有 `detect_leaks=0` 口径；当前环境不能通过环境变量可靠设置该默认值，新增仅测试链接的 `test/sanitizer_options.c`。生产构建不链接此文件，LeakSanitizer 未验收。
+
+复现命令：
+
+```sh
+make clean
+make OPENMP=0 CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
+make sanitizers
+make clean
+make OPENMP=1 CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
+make bench-parallel
+```
+
+下一步仍是拿到原版程序/真实样本完成 M5 文件与 ABI 验收，以及在目标机器进行大规模矩阵扩展性和有效 race gate 验证。任意消元树 DAG、并行磁盘预取、MPI/GPU、一般不定系统未实现。
 
 ## 当前最新状态：M4 多列与 M5 验收准备
 
