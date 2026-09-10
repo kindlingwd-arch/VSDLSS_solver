@@ -1,4 +1,5 @@
 #include "vsdlss_m3_internal.h"
+#include "vsdlss_parallel.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -24,6 +25,32 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     free(factor);
 }
 
+static vsdlss_status factor_component(vsdlss_m3_factor *factor,const vsdlss *normalized,
+                                      csi component,int order)
+{
+    vsdlss_status status=VSDLSS_OK;
+
+        vsdlss_m3_component_factor *cf=factor->component+component;
+        vsdlss *local=NULL,*permuted=NULL; csi *pinv=NULL;
+        vsdlss_sn_symbolic *symbolic=NULL;
+        cf->n=factor->components->offset[component+1]-factor->components->offset[component];
+        status=vsdlss_component_extract_normalized(normalized,factor->components,component,&local);
+        if(status!=VSDLSS_OK) goto component_fail;
+        status=vsdlss_reduce(local,&cf->reduction);
+        if(status!=VSDLSS_OK) goto component_fail;
+        if(cf->reduction->core_n) {
+            status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
+            if(status!=VSDLSS_OK) goto component_fail;
+            permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
+            if(!permuted) {status=VSDLSS_ERR_OOM;goto component_fail;}
+            status=vsdlss_sn_analyze(permuted,&symbolic);
+            if(status==VSDLSS_OK) status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
+        }
+component_fail:
+        free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted); vsdlss_spfree(local);
+        return status;
+}
+
 vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
                                   vsdlss_m3_factor **out)
 {
@@ -46,42 +73,33 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
     if(!count_fits(factor->count,sizeof(*factor->component))) {status=VSDLSS_ERR_OOM;goto fail;}
     factor->component=(vsdlss_m3_component_factor*)calloc((size_t)factor->count,sizeof(*factor->component));
     if(!factor->component) {status=VSDLSS_ERR_OOM;goto fail;}
-    for(component=0;component<factor->count;component++) {
-        vsdlss_m3_component_factor *cf=factor->component+component;
-        vsdlss *local=NULL,*permuted=NULL; csi *pinv=NULL;
-        vsdlss_sn_symbolic *symbolic=NULL;
-        cf->n=factor->components->offset[component+1]-factor->components->offset[component];
-        status=vsdlss_component_extract_normalized(normalized,factor->components,component,&local);
-        if(status!=VSDLSS_OK) goto component_fail;
-        status=vsdlss_reduce(local,&cf->reduction);
-        if(status!=VSDLSS_OK) goto component_fail;
-        if(cf->reduction->core_n) {
-            status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
-            if(status!=VSDLSS_OK) goto component_fail;
-            permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
-            if(!permuted) {status=VSDLSS_ERR_OOM;goto component_fail;}
-            status=vsdlss_sn_analyze(permuted,&symbolic);
-            if(status==VSDLSS_OK) status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
-        }
-component_fail:
-        free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted); vsdlss_spfree(local);
-        if(status!=VSDLSS_OK) goto fail;
+    vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
+    if(!results){status=VSDLSS_ERR_OOM;goto fail;}
+    int nt=vsdlss_parallel_width((double)factor->n*256);
+    if(nt>factor->count)nt=(int)factor->count;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(component=0;component<factor->count;component++)
+            results[component]=factor_component(factor,normalized,component,order);
     }
+    for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
+        status=results[component];free(results);goto fail;
+    }
+    free(results);
     vsdlss_spfree(normalized); *out=factor; return VSDLSS_OK;
 fail:
     vsdlss_spfree(normalized); vsdlss_m3_factor_free(factor); return status;
 }
 
-vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
-                              const double *rhs, double *solution)
+static vsdlss_status solve_component(const vsdlss_m3_factor *factor,const double *rhs,
+                                     double *global,csi component)
 {
-    double *global=NULL; csi component; vsdlss_status status=VSDLSS_OK;
-    if(!factor || !factor->components || !factor->component || !rhs || !solution)
-        return VSDLSS_ERR_INVALID;
-    if(!count_fits(factor->n,sizeof(*global))) return VSDLSS_ERR_OOM;
-    global=(double*)malloc((size_t)factor->n*sizeof(*global));
-    if(!global) return VSDLSS_ERR_OOM;
-    for(component=0;component<factor->count;component++) {
+    vsdlss_status status=VSDLSS_OK;
+
         const vsdlss_m3_component_factor *cf=factor->component+component;
         const csi begin=factor->components->offset[component]; csi k;
         double *local=NULL,*core_rhs=NULL,*saved=NULL,*permuted=NULL,*core_x=NULL,*local_x=NULL;
@@ -112,8 +130,63 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
             global[factor->components->vertices[begin+k]]=local_x[k];
 component_done:
         free(local);free(core_rhs);free(saved);free(permuted);free(core_x);free(local_x);
-        if(status!=VSDLSS_OK) break;
+        return status;
+}
+
+vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
+                              const double *rhs, double *solution)
+{
+    double *global=NULL; csi component; vsdlss_status status=VSDLSS_OK;
+    if(!factor || !factor->components || !factor->component || !rhs || !solution)
+        return VSDLSS_ERR_INVALID;
+    if(!count_fits(factor->n,sizeof(*global))) return VSDLSS_ERR_OOM;
+    global=(double*)malloc((size_t)factor->n*sizeof(*global));
+    if(!global) return VSDLSS_ERR_OOM;
+    vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
+    if(!results){free(global);return VSDLSS_ERR_OOM;}
+    int nt=vsdlss_parallel_width((double)factor->n*256);
+    if(nt>factor->count)nt=(int)factor->count;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(component=0;component<factor->count;component++)
+            results[component]=solve_component(factor,rhs,global,component);
     }
+    for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
+        status=results[component];break;
+    }
+    free(results);
     if(status==VSDLSS_OK) memcpy(solution,global,(size_t)factor->n*sizeof(*solution));
     free(global); return status;
+}
+
+vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
+    const double *rhs,csi ldrhs,double *solution,csi ldsolution)
+{
+    if(!f||!rhs||!solution||nrhs<1||ldrhs<f->n||ldsolution<f->n)return VSDLSS_ERR_INVALID;
+    if(f->n<1||(uint64_t)nrhs>SIZE_MAX/sizeof(double)/(uint64_t)f->n||
+        (uint64_t)nrhs>SIZE_MAX/sizeof(vsdlss_status)||
+        (uint64_t)(nrhs-1)>(SIZE_MAX/sizeof(double)-(uint64_t)f->n)/(uint64_t)ldrhs||
+        (uint64_t)(nrhs-1)>(SIZE_MAX/sizeof(double)-(uint64_t)f->n)/(uint64_t)ldsolution)
+        return VSDLSS_ERR_OOM;
+    double *work=malloc((size_t)nrhs*(size_t)f->n*sizeof(double));
+    vsdlss_status *results=calloc((size_t)nrhs,sizeof(*results)),status=VSDLSS_OK;
+    if(!work||!results){free(work);free(results);return VSDLSS_ERR_OOM;}
+    int nt=vsdlss_parallel_width((double)f->n*nrhs*256);
+    if(nt>nrhs)nt=(int)nrhs;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(csi r=0;r<nrhs;r++)results[r]=vsdlss_m3_solve(f,rhs+(size_t)r*ldrhs,work+(size_t)r*f->n);
+    }
+    for(csi r=0;r<nrhs;r++)if(results[r]!=VSDLSS_OK){status=results[r];break;}
+    if(status==VSDLSS_OK)for(csi r=0;r<nrhs;r++)
+        memcpy(solution+(size_t)r*ldsolution,work+(size_t)r*f->n,(size_t)f->n*sizeof(double));
+    free(work);free(results);return status;
 }

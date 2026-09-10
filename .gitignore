@@ -8,3 +8,15 @@
 /test_m3
 /bench_m3
 /test_sparse.*
+
+/test_ordering
+/test_mld
+/test_m3
+/test_m4
+
+/test_m4_panels
+
+/test_parallel
+/bench_parallel
+
+/test_omp_tsan_probe
