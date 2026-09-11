@@ -72,7 +72,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_parallel test_small test_reduced_dag bench_parallel bench_m3 test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_parallel test_small test_reduced_dag bench_parallel bench_m3 test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -125,3 +125,20 @@ test-reduced-dag: test_reduced_dag
 	./test_reduced_dag
 
 test: test-reduced-dag
+
+AR ?= ar
+.PHONY: smoke dist test-small test-reduced-dag
+libvsdlss.a: $(LIBOBJS)
+	$(AR) rcs $@ $^
+
+quickstart: examples/quickstart.c libvsdlss.a include/vsdlss.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ examples/quickstart.c libvsdlss.a $(LDLIBS)
+
+smoke: quickstart
+	./quickstart m1
+	./quickstart m3
+	./quickstart m4
+	./quickstart m4-reduced
+
+dist:
+	python3 tools/package_source.py

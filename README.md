@@ -1,3 +1,7 @@
+# 快速接入
+
+首次测试：`make smoke`。完整测试、C API、CLI、错误处理与发包说明见 [用户说明](docs/user/QUICKSTART.md)。源码发包：`make dist`。
+
 # VSDLSS Solver Reconstruction
 
 这是一个依据 VSDLSS 反编译证据和稀疏直接法数学原理重新实现的求解器。`reference/` 保存原始 Ghidra 输出和调用证据；它不参与构建。`src/` 是独立、可维护、经过测试的新实现，不声称与原程序逐行一致或 ABI 兼容。

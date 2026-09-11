@@ -24,3 +24,6 @@
 /test_small
 
 /test_reduced_dag
+/libvsdlss.a
+/quickstart
+/dist/
