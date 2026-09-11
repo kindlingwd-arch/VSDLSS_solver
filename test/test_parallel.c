@@ -2,6 +2,40 @@
 #include "vsdlss.h"
 #include <string.h>
 #define CHECK(e) do{if(!(e)){fprintf(stderr,"FAIL parallel %d: %s\n",__LINE__,#e);return 1;}}while(0)
+/* Construct A(:,J)=L(:,J)*L(J,J)^T independently; cover empty,
+   partial, and multiple external row tiles in both build modes. */
+static int panel_tile_boundaries(void)
+{
+    const csi extras[]={0,1,31,32,33,65};
+    const csi width=67;
+    for(size_t e=0;e<sizeof(extras)/sizeof(extras[0]);e++) {
+        csi rows=width+extras[e];size_t count=(size_t)rows*width;
+        double *l=calloc(count,sizeof(double)),*a=calloc(count,sizeof(double));
+        CHECK(l&&a);
+        for(csi j=0;j<width;j++)for(csi i=j;i<rows;i++)
+            l[j*rows+i]=i==j?2.0:0.02*sin((double)(i+3*j));
+        for(int nt=1;nt<=4;nt*=2) {
+            if(nt>1&&!vsdlss_parallel_enabled())break;
+            CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
+            for(csi j=0;j<width;j++)for(csi i=j;i<rows;i++) {
+                double v=0;for(csi k=0;k<=j;k++)v+=l[k*rows+i]*l[k*rows+j];
+                a[j*rows+i]=v;
+            }
+            CHECK(vsdlss_panel_factor(a,rows,width)==VSDLSS_OK);
+            for(csi j=0;j<width;j++)for(csi i=j;i<rows;i++)
+                CHECK(fabs(a[j*rows+i]-l[j*rows+i])<1e-13);
+        }
+        if(extras[e]) {
+            memset(a,0,count*sizeof(double));
+            for(csi j=0;j<width;j++)a[j*rows+j]=4;
+            a[rows-1]=NAN;
+            CHECK(vsdlss_panel_factor(a,rows,width)==VSDLSS_ERR_NONFINITE);
+        }
+        free(l);free(a);
+    }
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);return 0;
+}
+
 static int kernels(void)
 {
     CHECK(vsdlss_get_num_threads()==1);
@@ -114,6 +148,7 @@ static int solve_kernel(void)
 }
 int main(void)
 {
+    CHECK(panel_tile_boundaries()==0);
     CHECK(kernels()==0);
     if(vsdlss_parallel_enabled()){
         CHECK(components_and_rhs()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);

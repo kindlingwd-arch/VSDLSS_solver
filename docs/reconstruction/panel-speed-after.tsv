@@ -1,0 +1,7 @@
+mode	n	width	threads	median_seconds	speedup	max_team
+panel_factor	1024	256	1	0.010585962	1.000	1
+panel_factor	1024	256	2	0.006364266	1.663	2
+panel_factor	1024	256	4	0.005687258	1.861	4
+m4_end_to_end	384	96	1	0.023222105	1.000	1
+m4_end_to_end	384	96	2	0.019906241	1.167	2
+m4_end_to_end	384	96	4	0.021388870	1.086	4

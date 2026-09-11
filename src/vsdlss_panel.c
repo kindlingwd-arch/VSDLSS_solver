@@ -4,37 +4,53 @@
 vsdlss_status vsdlss_panel_factor(double *a, csi rows, csi width)
 {
     if (!a || width<1 || rows<width) return VSDLSS_ERR_INVALID;
-    int nt=vsdlss_parallel_width((double)rows*width*width),bad=0;
-    vsdlss_status status=VSDLSS_OK;(void)nt;
-    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) shared(status,bad))
+    /* Factor the diagonal block first. External rows only read this block,
+       so each row tile can complete all columns without column barriers.
+       Keep the original increasing-k subtraction order for each element. */
+    for(csi j=0;j<width;j++) {
+        double d=a[j*rows+j];
+        for(csi k=0;k<j;k++)d-=a[k*rows+j]*a[k*rows+j];
+        if(!isfinite(d))return VSDLSS_ERR_NONFINITE;
+        if(d<=0)return VSDLSS_ERR_NOT_POSDEF;
+        d=sqrt(d);a[j*rows+j]=d;
+        for(csi k=0;k<j;k++) {
+            double coeff=a[k*rows+j];
+            for(csi i=j+1;i<width;i++)a[j*rows+i]-=a[k*rows+i]*coeff;
+        }
+        for(csi i=j+1;i<width;i++) {
+            a[j*rows+i]/=d;
+            if(!isfinite(a[j*rows+i]))return VSDLSS_ERR_NONFINITE;
+        }
+    }
+    const csi tile=32,ext=rows-width,tiles=ext/tile+(ext%tile!=0);
+    int nt=vsdlss_parallel_width((double)ext*width*width),bad=0;
+    if(tiles==0)return VSDLSS_OK;
+    if(nt>tiles)nt=(int)tiles;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
     {
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
-        for(csi j=0;j<width;j++) {
-            VSDLSS_OMP(omp single)
-            {
-                bad=0;
-                if(status==VSDLSS_OK){
-                    double d=a[j*rows+j];
-                    for(csi k=0;k<j;k++)d-=a[k*rows+j]*a[k*rows+j];
-                    if(!isfinite(d))status=VSDLSS_ERR_NONFINITE;
-                    else if(d<=0)status=VSDLSS_ERR_NOT_POSDEF;
-                    else a[j*rows+j]=sqrt(d);
+        VSDLSS_OMP(omp for schedule(static))
+        for(csi t=0;t<tiles;t++) {
+            csi first=width+t*tile,n=rows-first;
+            if(n>tile)n=tile;
+            double v[32];
+            for(csi j=0;j<width;j++) {
+                for(csi i=0;i<n;i++)v[i]=a[j*rows+first+i];
+                for(csi k=0;k<j;k++) {
+                    double coeff=a[k*rows+j];
+                    for(csi i=0;i<n;i++)v[i]-=a[k*rows+first+i]*coeff;
+                }
+                for(csi i=0;i<n;i++) {
+                    v[i]/=a[j*rows+j];
+                    if(!isfinite(v[i]))bad=1;
+                    a[j*rows+first+i]=v[i];
                 }
             }
-            VSDLSS_OMP(omp for schedule(static) reduction(|:bad))
-            for(csi i=j+1;i<rows;i++)if(status==VSDLSS_OK){
-                double v=a[j*rows+i];
-                for(csi k=0;k<j;k++)v-=a[k*rows+i]*a[k*rows+j];
-                v/=a[j*rows+j];
-                if(!isfinite(v))bad=1;
-                a[j*rows+i]=v;
-            }
-            VSDLSS_OMP(omp single)
-            { if(bad)status=VSDLSS_ERR_NONFINITE; }
         }
     }
-    return status;
+    return bad?VSDLSS_ERR_NONFINITE:VSDLSS_OK;
 }
 
 double vsdlss_panel_dot(const double *a,csi rows,csi width,csi i,csi j)
