@@ -16,6 +16,7 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     csi k;
     if(!factor) return;
     if(factor->component) for(k=0;k<factor->count;k++) {
+        vsdlss_m4_factor_free(factor->component[k].disk);
         vsdlss_reduction_free(factor->component[k].reduction);
         free(factor->component[k].q);
         vsdlss_sn_factor_free(factor->component[k].numeric);
@@ -38,7 +39,7 @@ static vsdlss_status factor_component(vsdlss_m3_factor *factor,const vsdlss *nor
         if(status!=VSDLSS_OK) goto component_fail;
         status=vsdlss_reduce(local,&cf->reduction);
         if(status!=VSDLSS_OK) goto component_fail;
-        if(cf->reduction->core_n) {
+        if(cf->reduction->core_n && !factor->disk_mode) {
             status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
             if(status!=VSDLSS_OK) goto component_fail;
             permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
@@ -51,8 +52,8 @@ component_fail:
         return status;
 }
 
-vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
-                                  vsdlss_m3_factor **out)
+static vsdlss_status factorize_shared(const vsdlss *A, int order,
+                                  vsdlss_m3_factor **out,int disk_mode,size_t budget,const char *directory)
 {
     vsdlss_m3_factor *factor=NULL; vsdlss *normalized=NULL;
     vsdlss_status status; csi component;
@@ -66,7 +67,7 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
     if(status!=VSDLSS_OK) return status;
     factor=(vsdlss_m3_factor*)calloc(1,sizeof(*factor));
     if(!factor) {status=VSDLSS_ERR_OOM;goto fail;}
-    factor->n=normalized->n;
+    factor->n=normalized->n; factor->disk_mode=disk_mode;
     status=vsdlss_components_build_normalized(normalized,&factor->components);
     if(status!=VSDLSS_OK) goto fail;
     factor->count=factor->components->count;
@@ -75,7 +76,7 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
     if(!factor->component) {status=VSDLSS_ERR_OOM;goto fail;}
     vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
     if(!results){status=VSDLSS_ERR_OOM;goto fail;}
-    int nt=vsdlss_parallel_width((double)factor->n*256);
+    int nt=factor->disk_mode?1:vsdlss_parallel_width((double)factor->n*256);
     if(nt>factor->count)nt=(int)factor->count;
     (void)nt;
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
@@ -90,6 +91,21 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
         status=results[component];free(results);goto fail;
     }
     free(results);
+    if(disk_mode) {
+        csi cores=0;
+        for(component=0;component<factor->count;component++)
+            if(factor->component[component].reduction->core_n)cores++;
+        size_t remaining=budget;
+        for(component=0;component<factor->count;component++) {
+            vsdlss_m3_component_factor *cf=&factor->component[component];
+            if(!cf->reduction->core_n)continue;
+            status=vsdlss_factorize_m4(cf->reduction->core,order,remaining/(size_t)cores,directory,&cf->disk);
+            if(status!=VSDLSS_OK)goto fail;
+            size_t used=vsdlss_m4_workspace_bytes(cf->disk);
+            if(used>remaining){status=VSDLSS_ERR_OOM;goto fail;}
+            remaining-=used;cores--;
+        }
+    }
     vsdlss_spfree(normalized); *out=factor; return VSDLSS_OK;
 fail:
     vsdlss_spfree(normalized); vsdlss_m3_factor_free(factor); return status;
@@ -120,10 +136,15 @@ static vsdlss_status solve_component(const vsdlss_m3_factor *factor,const double
         status=vsdlss_reduce_rhs(cf->reduction,local,core_rhs,saved);
         if(status!=VSDLSS_OK) goto component_done;
         if(cf->reduction->core_n) {
+            if(cf->disk) {
+                status=vsdlss_m4_solve(cf->disk,core_rhs,core_x);
+                if(status!=VSDLSS_OK)goto component_done;
+            } else {
             for(k=0;k<cf->reduction->core_n;k++) permuted[k]=core_rhs[cf->q[k]];
             status=vsdlss_sn_solve(cf->numeric,permuted,permuted);
             if(status!=VSDLSS_OK) goto component_done;
             for(k=0;k<cf->reduction->core_n;k++) core_x[cf->q[k]]=permuted[k];
+            }
         }
         status=vsdlss_reduce_recover(cf->reduction,saved,core_x,local_x);
         if(status==VSDLSS_OK) for(k=0;k<cf->n;k++)
@@ -144,7 +165,7 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
     if(!global) return VSDLSS_ERR_OOM;
     vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
     if(!results){free(global);return VSDLSS_ERR_OOM;}
-    int nt=vsdlss_parallel_width((double)factor->n*256);
+    int nt=factor->disk_mode?1:vsdlss_parallel_width((double)factor->n*256);
     if(nt>factor->count)nt=(int)factor->count;
     (void)nt;
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
@@ -166,6 +187,7 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
 vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
     const double *rhs,csi ldrhs,double *solution,csi ldsolution)
 {
+    if(f && f->disk_mode)return VSDLSS_ERR_UNSUPPORTED;
     if(!f||!rhs||!solution||nrhs<1||ldrhs<f->n||ldsolution<f->n)return VSDLSS_ERR_INVALID;
     if(f->n<1||(uint64_t)nrhs>SIZE_MAX/sizeof(double)/(uint64_t)f->n||
         (uint64_t)nrhs>SIZE_MAX/sizeof(vsdlss_status)||
@@ -190,3 +212,12 @@ vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
         memcpy(solution+(size_t)r*ldsolution,work+(size_t)r*f->n,(size_t)f->n*sizeof(double));
     free(work);free(results);return status;
 }
+
+vsdlss_status vsdlss_factorize_m3(const vsdlss *a,int order,vsdlss_m3_factor **out)
+{ return factorize_shared(a,order,out,0,0,NULL); }
+vsdlss_status vsdlss_factorize_m4_reduced(const vsdlss *a,int order,size_t budget,const char *directory,vsdlss_m4_reduced_factor **out)
+{ return factorize_shared(a,order,out,1,budget,directory); }
+vsdlss_status vsdlss_m4_reduced_solve(vsdlss_m4_reduced_factor *f,const double *b,double *x)
+{ if(!f||!f->disk_mode)return VSDLSS_ERR_INVALID;return vsdlss_m3_solve(f,b,x); }
+void vsdlss_m4_reduced_free(vsdlss_m4_reduced_factor *f)
+{ vsdlss_m3_factor_free(f); }

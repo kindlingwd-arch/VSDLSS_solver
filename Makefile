@@ -66,13 +66,13 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-parallel test-small
+	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-parallel test-small test-reduced-dag
 
 src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_parallel test_small bench_parallel bench_m3 test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_parallel test_small test_reduced_dag bench_parallel bench_m3 test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -117,3 +117,11 @@ test-small: test_small
 	./test_small
 
 test: test-small
+
+test_reduced_dag: test/test_reduced_dag.c $(LIBSRCS) src/vsdlss_small_solve.inc
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_reduced_dag.c $(LIBSRCS) $(LDLIBS)
+
+test-reduced-dag: test_reduced_dag
+	./test_reduced_dag
+
+test: test-reduced-dag

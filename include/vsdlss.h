@@ -67,6 +67,9 @@ typedef struct vsdlss_order_stats
  * last_team_size is the largest observed team since the last setter call.
  * OpenMP runtime memory is not part of the M4 numeric workspace budget.
  */
+/* Experimental numeric DAG; opt-in, per calling thread; default off. */
+void vsdlss_set_dag_enabled(int enabled);
+int vsdlss_get_dag_enabled(void);
 int vsdlss_parallel_enabled(void);
 vsdlss_status vsdlss_set_num_threads(int threads);
 int vsdlss_get_num_threads(void);
@@ -114,6 +117,15 @@ vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *, int order, size_t budget,
 vsdlss_status vsdlss_m4_get_stats(const vsdlss_m4_factor *, vsdlss_m4_stats *);
 vsdlss_status vsdlss_m4_save(vsdlss_m4_factor *, const char *path);
 vsdlss_status vsdlss_m4_open(const char *path, size_t budget, vsdlss_m4_factor **);
+/* Reduced M4 shares M3 preprocessing/recovery. disk_budget is the aggregate
+ * disk-factor workspace allowance, excluding preprocessing/recovery storage,
+ * input, runtime and allocator overhead; not a process memory limit.
+ * Serialized calls only; composite save/open is not supported by v2. */
+typedef struct vsdlss_m3_factor vsdlss_m4_reduced_factor;
+vsdlss_status vsdlss_factorize_m4_reduced(const vsdlss *,int,size_t,const char *,vsdlss_m4_reduced_factor **);
+vsdlss_status vsdlss_m4_reduced_solve(vsdlss_m4_reduced_factor *,const double *,double *);
+void vsdlss_m4_reduced_free(vsdlss_m4_reduced_factor *);
+
 csi vsdlss_m4_dimension(const vsdlss_m4_factor *);
 
 const vsdlss *vsdlss_factor_L(const vsdlss_factor *factor);

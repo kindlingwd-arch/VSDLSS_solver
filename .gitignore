@@ -22,3 +22,5 @@
 /test_omp_tsan_probe
 
 /test_small
+
+/test_reduced_dag

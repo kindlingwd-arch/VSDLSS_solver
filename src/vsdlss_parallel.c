@@ -32,3 +32,7 @@ void vsdlss_parallel_observe(void)
     int team=omp_get_num_threads();if(team>observed)observed=team;
 #endif
 }
+
+static _Thread_local int dag_enabled=0;
+void vsdlss_set_dag_enabled(int enabled){dag_enabled=enabled!=0;}
+int vsdlss_get_dag_enabled(void){return dag_enabled;}

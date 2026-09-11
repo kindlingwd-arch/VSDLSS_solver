@@ -29,6 +29,62 @@ void vsdlss_sn_factor_free(vsdlss_sn_factor *f)
     free(f->panel_offset);free(f->panel);free(f);
 }
 
+/* Tasks are siblings created in source order. A token serializes every
+ * writer of one destination panel; source reads wait for its factor task.
+ * Thus shared-target contributions retain the serial source order. */
+static vsdlss_status factor_dag(vsdlss_sn_factor *f,const vsdlss_sn_symbolic *s,int nt)
+{
+    csi *owner=malloc((size_t)f->n*sizeof(*owner));
+    char *token=calloc((size_t)f->count,1);
+    vsdlss_status *state=calloc((size_t)f->count,sizeof(*state));
+    if(!owner||!token||!state){free(owner);free(token);free(state);return VSDLSS_ERR_OOM;}
+    for(csi sn=0;sn<f->count;sn++)for(csi j=f->column_start[sn];j<f->column_start[sn+1];j++)owner[j]=sn;
+    (void)nt;(void)token;
+    VSDLSS_OMP(omp parallel num_threads(nt))
+    {
+        VSDLSS_OMP(omp master)
+        {
+            vsdlss_parallel_observe();
+            for(csi sn=0;sn<f->count;sn++) {
+                csi w=f->column_start[sn+1]-f->column_start[sn];
+                csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext;
+                csi base=f->panel_offset[sn];
+                VSDLSS_OMP(omp task firstprivate(sn,w,rows,base) depend(inout:token[sn]))
+                {
+                    if(state[sn]==VSDLSS_OK)state[sn]=vsdlss_panel_factor(f->panel+base,rows,w);
+                }
+                for(csi first=0;first<ext;) {
+                    csi dest=owner[f->row_index[f->row_ptr[sn]+first]],end=first+1;
+                    while(end<ext && owner[f->row_index[f->row_ptr[sn]+end]]==dest)end++;
+                    /* Symbolic external columns always belong to later panels. */
+                    VSDLSS_OMP(omp task firstprivate(sn,dest,first,end,ext,w,rows,base) depend(in:token[sn]) depend(inout:token[dest]))
+                    {
+                        if(state[dest]==VSDLSS_OK) {
+                            if(state[sn]!=VSDLSS_OK)state[dest]=state[sn];
+                            else for(csi col=first;col<end;col++) {
+                                csi u=col*ext-col*(col-1)/2;
+                                for(csi row=col;row<ext;row++) {
+                                    csi target=s->update_target[s->update_ptr[sn]+u++];
+                                    if(target<f->panel_offset[dest]||target>=f->panel_offset[dest+1]) {
+                                        state[dest]=VSDLSS_ERR_INVALID;continue;
+                                    }
+                                    f->panel[target]-=vsdlss_panel_dot(f->panel+base,rows,w,w+row,w+col);
+                                    if(!isfinite(f->panel[target]))state[dest]=VSDLSS_ERR_NONFINITE;
+                                }
+                            }
+                        }
+                    }
+                    first=end;
+                }
+            }
+            VSDLSS_OMP(omp taskwait)
+        }
+    }
+    vsdlss_status result=VSDLSS_OK;
+    for(csi sn=0;sn<f->count;sn++)if(state[sn]!=VSDLSS_OK){result=state[sn];break;}
+    free(owner);free(token);free(state);return result;
+}
+
 vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
                                   vsdlss_sn_factor **out)
 {
@@ -64,6 +120,12 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
         if(e<0){st=VSDLSS_ERR_INVALID;goto fail;} slot=f->l_panel_slot[e];
         if(slot<0||slot>=f->panel_offset[f->count]){st=VSDLSS_ERR_INVALID;goto fail;}
         f->panel[slot]+=A->x[k];if(!isfinite(f->panel[slot])){st=VSDLSS_ERR_NONFINITE;goto fail;}
+    }
+    int dag_threads=vsdlss_parallel_width((double)f->n*256);
+    if(vsdlss_get_dag_enabled() && dag_threads>1 && f->count>1) {
+        st=factor_dag(f,s,dag_threads);
+        if(st!=VSDLSS_OK)goto fail;
+        *out=f;return VSDLSS_OK;
     }
     for(sn=0;sn<f->count;sn++){
         csi begin=f->column_start[sn],w=f->column_start[sn+1]-begin;

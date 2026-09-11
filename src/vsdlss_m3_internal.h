@@ -54,6 +54,7 @@ typedef struct vsdlss_sn_factor {
 
 typedef struct vsdlss_m3_component_factor {
     csi n;
+    vsdlss_m4_factor *disk;
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
     csi *q;                      /* q[new] = old for the reduced core */
     vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
@@ -61,6 +62,7 @@ typedef struct vsdlss_m3_component_factor {
 
 struct vsdlss_m3_factor {
     csi n, count;
+    int disk_mode;
     vsdlss_components *components;       /* owns global/local maps */
     vsdlss_m3_component_factor *component; /* count owned entries */
 };
