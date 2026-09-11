@@ -56,11 +56,17 @@ vsdlss_status vsdlss_panel_factor(double *a, csi rows, csi width)
 double vsdlss_panel_dot(const double *a,csi rows,csi width,csi i,csi j)
 {
     double v=0;
-    for(csi k=0;k<width;k++) v+=a[k*rows+i]*a[k*rows+j];
+    /* Preserve left-to-right accumulation, including the initial +0. */
+#define DOT(K) v+=a[(K)*rows+i]*a[(K)*rows+j]
+    if(width>=1 && width<=6) {
+        DOT(0); if(width>=2){DOT(1);} if(width>=3){DOT(2);}
+        if(width>=4){DOT(3);} if(width>=5){DOT(4);} if(width>=6){DOT(5);}
+    } else for(csi k=0;k<width;k++) v+=a[k*rows+i]*a[k*rows+j];
+#undef DOT
     return v;
 }
 
-vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
+static vsdlss_status panel_solve_generic(const double *a,csi begin,csi width,
                                 csi ext,const csi *index,double *x,int back)
 {
     csi rows=width+ext;
@@ -95,4 +101,17 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
         if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
     }
     return VSDLSS_OK;
+}
+
+/* Constant-width entry points permit compiler specialization of triangular
+   loops while sharing exactly the same error and accumulation semantics. */
+vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
+                                csi ext,const csi *index,double *x,int back)
+{
+    switch(width) {
+#define CASE(N) case N: return panel_solve_generic(a,begin,N,ext,index,x,back)
+        CASE(1); CASE(2); CASE(3); CASE(4); CASE(5); CASE(6);
+#undef CASE
+        default: return panel_solve_generic(a,begin,width,ext,index,x,back);
+    }
 }

@@ -7,7 +7,7 @@
 static int panel_tile_boundaries(void)
 {
     const csi extras[]={0,1,31,32,33,65};
-    const csi width=67;
+    for(csi width=1;width<=67;width+=(width<7?1:60))
     for(size_t e=0;e<sizeof(extras)/sizeof(extras[0]);e++) {
         csi rows=width+extras[e];size_t count=(size_t)rows*width;
         double *l=calloc(count,sizeof(double)),*a=calloc(count,sizeof(double));
@@ -30,6 +30,12 @@ static int panel_tile_boundaries(void)
             for(csi j=0;j<width;j++)a[j*rows+j]=4;
             a[rows-1]=NAN;
             CHECK(vsdlss_panel_factor(a,rows,width)==VSDLSS_ERR_NONFINITE);
+        }
+        for(csi i=0;i<rows;i++) {
+            double expected=0;
+            for(csi k=0;k<width;k++)expected+=l[k*rows+i]*l[k*rows+i];
+            double got=vsdlss_panel_dot(l,rows,width,i,i);
+            CHECK(memcmp(&expected,&got,sizeof(double))==0);
         }
         free(l);free(a);
     }
