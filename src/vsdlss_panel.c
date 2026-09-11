@@ -66,7 +66,7 @@ double vsdlss_panel_dot(const double *a,csi rows,csi width,csi i,csi j)
     return v;
 }
 
-static vsdlss_status panel_solve_generic(const double *a,csi begin,csi width,
+vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
                                 csi ext,const csi *index,double *x,int back)
 {
     csi rows=width+ext;
@@ -103,15 +103,18 @@ static vsdlss_status panel_solve_generic(const double *a,csi begin,csi width,
     return VSDLSS_OK;
 }
 
-/* Constant-width entry points permit compiler specialization of triangular
-   loops while sharing exactly the same error and accumulation semantics. */
+#include "vsdlss_small_solve.inc"
+
 vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
                                 csi ext,const csi *index,double *x,int back)
 {
+    /* Keep large external-row work on the existing parallel path. */
+    if(vsdlss_parallel_width((double)width*ext)>1)
+        return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,back);
     switch(width) {
-#define CASE(N) case N: return panel_solve_generic(a,begin,N,ext,index,x,back)
+#define CASE(N) case N: return solve_##N(a,begin,ext,index,x,back)
         CASE(1); CASE(2); CASE(3); CASE(4); CASE(5); CASE(6);
 #undef CASE
-        default: return panel_solve_generic(a,begin,width,ext,index,x,back);
+        default: return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,back);
     }
 }

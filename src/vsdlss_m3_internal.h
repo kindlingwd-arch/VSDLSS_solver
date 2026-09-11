@@ -94,4 +94,8 @@ double vsdlss_panel_dot(const double *, csi rows, csi width, csi i, csi j);
 vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
                                 csi ext, const csi *index, double *, int back);
 vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *, vsdlss_sn_symbolic **);
+
+/* Internal reference path for microkernel validation. */
+vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
+
 #endif

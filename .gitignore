@@ -20,3 +20,5 @@
 /bench_parallel
 
 /test_omp_tsan_probe
+
+/test_small
