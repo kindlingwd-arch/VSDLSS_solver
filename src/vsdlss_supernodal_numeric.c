@@ -29,61 +29,113 @@ void vsdlss_sn_factor_free(vsdlss_sn_factor *f)
     free(f->panel_offset);free(f->panel);free(f);
 }
 
-/* Tasks are siblings created in source order. A token serializes every
- * writer of one destination panel; source reads wait for its factor task.
- * Thus shared-target contributions retain the serial source order. */
+/* Iterators in a depend clause are OpenMP 5.0.  GCC and clang accept them
+ * well before they raise _OPENMP to 201811, so select on the compiler.  The
+ * right-looking alternative (one task per source/destination block pair) was
+ * measured slower than the serial path at every size tried, so without
+ * iterator support the DAG request falls back to the ordinary path instead. */
+#if defined(_OPENMP) && \
+    ((defined(__clang_major__) && __clang_major__ >= 12) || \
+     (!defined(__clang__) && defined(__GNUC__) && __GNUC__ >= 9))
+#define VSDLSS_DAG_TASKS 1
+#endif
+
+#ifdef VSDLSS_DAG_TASKS
+/* Left-looking task graph: exactly one task per panel.  The task applies
+ * every contribution that targets the panel, in increasing source order, and
+ * then factors it, so the sequence of updates seen by each panel slot is the
+ * same one the serial loop produces and results stay bitwise identical.
+ *
+ * The previous right-looking form created one task per (source, destination)
+ * block, i.e. one per nonzero block of the assembly graph, each holding two
+ * dependences.  Task creation and dependence resolution both take the team
+ * task lock, so those thousands of microscopic tasks cost far more than the
+ * arithmetic they carried; it ran 3-20x slower than the serial loop.  Panel
+ * granularity keeps the same dependence edges but only `count` task objects,
+ * and a panel's whole left-looking update is one unit of stealable work. */
 static vsdlss_status factor_dag(vsdlss_sn_factor *f,const vsdlss_sn_symbolic *s,int nt)
 {
+    csi count=f->count,blocks=0;
     csi *owner=malloc((size_t)f->n*sizeof(*owner));
-    char *token=calloc((size_t)f->count,1);
-    vsdlss_status *state=calloc((size_t)f->count,sizeof(*state));
-    if(!owner||!token||!state){free(owner);free(token);free(state);return VSDLSS_ERR_OOM;}
-    for(csi sn=0;sn<f->count;sn++)for(csi j=f->column_start[sn];j<f->column_start[sn+1];j++)owner[j]=sn;
+    csi *src_ptr=calloc((size_t)count+1,sizeof(*src_ptr));
+    csi *src_of=NULL,*src_first=NULL,*src_end=NULL,*cursor=NULL;
+    char *token=calloc((size_t)count,1);
+    vsdlss_status *state=calloc((size_t)count,sizeof(*state));
+    vsdlss_status result=VSDLSS_OK;
+    if(!owner||!src_ptr||!token||!state)goto oom;
+    for(csi sn=0;sn<count;sn++)
+        for(csi j=f->column_start[sn];j<f->column_start[sn+1];j++)owner[j]=sn;
+    /* Transpose the source-major block structure into destination-major
+     * lists.  Appending while sn ascends keeps each list in source order. */
+    for(csi sn=0;sn<count;sn++){
+        csi ext=f->row_ptr[sn+1]-f->row_ptr[sn];
+        for(csi first=0;first<ext;){
+            csi dest=owner[f->row_index[f->row_ptr[sn]+first]],end=first+1;
+            while(end<ext&&owner[f->row_index[f->row_ptr[sn]+end]]==dest)end++;
+            src_ptr[dest+1]++;blocks++;first=end;
+        }
+    }
+    for(csi d=0;d<count;d++)src_ptr[d+1]+=src_ptr[d];
+    src_of=malloc((size_t)(blocks?blocks:1)*sizeof(*src_of));
+    src_first=malloc((size_t)(blocks?blocks:1)*sizeof(*src_first));
+    src_end=malloc((size_t)(blocks?blocks:1)*sizeof(*src_end));
+    cursor=malloc((size_t)count*sizeof(*cursor));
+    if(!src_of||!src_first||!src_end||!cursor)goto oom;
+    for(csi d=0;d<count;d++)cursor[d]=src_ptr[d];
+    for(csi sn=0;sn<count;sn++){
+        csi ext=f->row_ptr[sn+1]-f->row_ptr[sn];
+        for(csi first=0;first<ext;){
+            csi dest=owner[f->row_index[f->row_ptr[sn]+first]],end=first+1;
+            while(end<ext&&owner[f->row_index[f->row_ptr[sn]+end]]==dest)end++;
+            csi at=cursor[dest]++;
+            src_of[at]=sn;src_first[at]=first;src_end[at]=end;first=end;
+        }
+    }
     (void)nt;(void)token;
     VSDLSS_OMP(omp parallel num_threads(nt))
     {
         VSDLSS_OMP(omp master)
         {
             vsdlss_parallel_observe();
-            for(csi sn=0;sn<f->count;sn++) {
-                csi w=f->column_start[sn+1]-f->column_start[sn];
-                csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext;
-                csi base=f->panel_offset[sn];
-                VSDLSS_OMP(omp task firstprivate(sn,w,rows,base) depend(inout:token[sn]))
+            for(csi d=0;d<count;d++){
+                csi off=src_ptr[d],ns=src_ptr[d+1]-off;
+                VSDLSS_OMP(omp task firstprivate(d,off,ns)
+                           depend(iterator(csi i=0:ns),in:token[src_of[off+i]])
+                           depend(inout:token[d]))
                 {
-                    if(state[sn]==VSDLSS_OK)state[sn]=vsdlss_panel_factor(f->panel+base,rows,w);
-                }
-                for(csi first=0;first<ext;) {
-                    csi dest=owner[f->row_index[f->row_ptr[sn]+first]],end=first+1;
-                    while(end<ext && owner[f->row_index[f->row_ptr[sn]+end]]==dest)end++;
-                    /* Symbolic external columns always belong to later panels. */
-                    VSDLSS_OMP(omp task firstprivate(sn,dest,first,end,ext,w,rows,base) depend(in:token[sn]) depend(inout:token[dest]))
-                    {
-                        if(state[dest]==VSDLSS_OK) {
-                            if(state[sn]!=VSDLSS_OK)state[dest]=state[sn];
-                            else for(csi col=first;col<end;col++) {
-                                csi u=col*ext-col*(col-1)/2;
-                                for(csi row=col;row<ext;row++) {
-                                    csi target=s->update_target[s->update_ptr[sn]+u++];
-                                    if(target<f->panel_offset[dest]||target>=f->panel_offset[dest+1]) {
-                                        state[dest]=VSDLSS_ERR_INVALID;continue;
-                                    }
-                                    f->panel[target]-=vsdlss_panel_dot(f->panel+base,rows,w,w+row,w+col);
-                                    if(!isfinite(f->panel[target]))state[dest]=VSDLSS_ERR_NONFINITE;
-                                }
-                            }
-                        }
+                    vsdlss_status st=VSDLSS_OK;
+                    for(csi t=off;st==VSDLSS_OK&&t<off+ns;t++){
+                        csi sn=src_of[t];
+                        if(state[sn]!=VSDLSS_OK){st=state[sn];break;}
+                        csi w=f->column_start[sn+1]-f->column_start[sn];
+                        csi ext=f->row_ptr[sn+1]-f->row_ptr[sn];
+                        int b=vsdlss_panel_update_range(f->panel+f->panel_offset[sn],
+                                w+ext,w,ext,src_first[t],src_end[t],
+                                s->update_target+s->update_ptr[sn],f->panel,
+                                f->panel_offset[d],f->panel_offset[d+1]);
+                        if(b&1)st=VSDLSS_ERR_INVALID;
+                        else if(b&2)st=VSDLSS_ERR_NONFINITE;
                     }
-                    first=end;
+                    if(st==VSDLSS_OK){
+                        csi w=f->column_start[d+1]-f->column_start[d];
+                        csi ext=f->row_ptr[d+1]-f->row_ptr[d];
+                        st=vsdlss_panel_factor(f->panel+f->panel_offset[d],w+ext,w);
+                    }
+                    state[d]=st;
                 }
             }
             VSDLSS_OMP(omp taskwait)
         }
     }
-    vsdlss_status result=VSDLSS_OK;
-    for(csi sn=0;sn<f->count;sn++)if(state[sn]!=VSDLSS_OK){result=state[sn];break;}
-    free(owner);free(token);free(state);return result;
+    for(csi d=0;d<count;d++)if(state[d]!=VSDLSS_OK){result=state[d];break;}
+    goto done;
+oom:
+    result=VSDLSS_ERR_OOM;
+done:
+    free(owner);free(src_ptr);free(src_of);free(src_first);free(src_end);
+    free(cursor);free(token);free(state);return result;
 }
+#endif
 
 vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
                                   vsdlss_sn_factor **out)
@@ -121,12 +173,14 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
         if(slot<0||slot>=f->panel_offset[f->count]){st=VSDLSS_ERR_INVALID;goto fail;}
         f->panel[slot]+=A->x[k];if(!isfinite(f->panel[slot])){st=VSDLSS_ERR_NONFINITE;goto fail;}
     }
+#ifdef VSDLSS_DAG_TASKS
     int dag_threads=vsdlss_parallel_width((double)f->n*256);
     if(vsdlss_get_dag_enabled() && dag_threads>1 && f->count>1) {
         st=factor_dag(f,s,dag_threads);
         if(st!=VSDLSS_OK)goto fail;
         *out=f;return VSDLSS_OK;
     }
+#endif
     for(sn=0;sn<f->count;sn++){
         csi begin=f->column_start[sn],w=f->column_start[sn+1]-begin;
         csi ext=f->row_ptr[sn+1]-f->row_ptr[sn],rows=w+ext,base=f->panel_offset[sn];
@@ -134,20 +188,25 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
         if(w<1||ext<0||rows<1){st=VSDLSS_ERR_INVALID;goto fail;}
         st=vsdlss_panel_factor(f->panel+base,rows,w);
         if(st!=VSDLSS_OK)goto fail;
-        int nt=vsdlss_parallel_width((double)ext*ext*w),bad=0;(void)nt;
+        /* Chunk the external columns; the kernel blocks inside each chunk.
+         * Column chunks own disjoint target slots, so no accumulation races
+         * and no ordering dependence between chunks. */
+        const csi chunk=VSDLSS_PANEL_UPDATE_CB;
+        csi chunks=ext/chunk+(ext%chunk!=0);
+        int nt=vsdlss_parallel_width((double)ext*ext*w),bad=0;
+        if(nt>chunks)nt=(int)chunks;
+        (void)nt;
         VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
         {
             VSDLSS_OMP(omp master)
             vsdlss_parallel_observe();
             VSDLSS_OMP(omp for schedule(dynamic,1))
-            for(csi col=0;col<ext;col++){
-                csi u=col*ext-col*(col-1)/2;
-                for(csi row=col;row<ext;row++){
-                    csi target=s->update_target[s->update_ptr[sn]+u++];
-                    if(target<0||target>=f->panel_offset[f->count]){bad|=1;continue;}
-                    double v=vsdlss_panel_dot(f->panel+base,rows,w,w+row,w+col);
-                    f->panel[target]-=v;if(!isfinite(f->panel[target]))bad|=2;
-                }
+            for(csi c=0;c<chunks;c++){
+                csi c0=c*chunk,c1=c0+chunk;
+                if(c1>ext)c1=ext;
+                bad|=vsdlss_panel_update_range(f->panel+base,rows,w,ext,c0,c1,
+                        s->update_target+s->update_ptr[sn],f->panel,
+                        0,f->panel_offset[f->count]);
             }
         }
         if(bad){st=(bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE;goto fail;}

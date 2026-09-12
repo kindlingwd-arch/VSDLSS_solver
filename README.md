@@ -141,10 +141,23 @@ make bench-parallel
 `vsdlss_m3_solve_many` 按列主序批量求解 RHS，支持 leading dimension，整个批次失败时保留输出。
 CLI 报告请求线程数和实际观察到的最大 team 大小。
 
-M1 标量路径、M4 块读写及源块推进顺序仍串行；同一个 M4 因子仍不支持外部并发调用。
+符号分析（超节点面板槽与更新目标）按超节点并行，内部用单调游标合并扫描代替
+逐条目二分查找；外部块更新是分块的 rank-1 内核，不再逐元素做内积；
+实验性数值 DAG 为左视，每个面板一个任务。全部改动保持逐位一致：
+每个输出元素的浮点运算序列与改动前相同，`make test` 中的
+`test-kernels` 用改动前的逐元素内核作参考实现逐位比对。
+
+M1 标量路径、MLD 排序、M4 块读写及源块推进顺序仍串行；
+跨超节点的三角求解也刻意保持串行（并行会改变外部行的累加顺序，破坏逐位一致）。
+同一个 M4 因子仍不支持外部并发调用。
 M4 显式数值工作区不随线程数增加，但 OpenMP 运行库/线程栈不计入该预算。
 
 不使用 OpenMP 的构建：`make clean && make OPENMP=0 test`；该构建拒绝大于 1 的线程数。
-实测 4 线程面板 factor 约 2.24×、M4 小型端到端约 1.21×；不是所有矩阵的性能保证。
+在一台 2 vCPU 机器上，22³ 三维 Poisson（n=10648，单连通分量，MLD 排序）
+`vsdlss_factorize_m3` 的绝对耗时为基线的 1/2.36（1 线程）和 1/2.72（2 线程），
+2 线程加速比从 0.98×（负加速）升到 1.13×；不是所有矩阵或机器的性能保证。
+`make bench-sn` 复现该基准。
 设计、反编译/PARDISO 证据、基准和 TSan 工具限制见
-[08-parallel-design.md](docs/reconstruction/08-parallel-design.md)。
+[08-parallel-design.md](docs/reconstruction/08-parallel-design.md)；
+本轮并行效率优化的诊断、改动、实测与剩余瓶颈见
+[13-parallel-efficiency.md](docs/reconstruction/13-parallel-efficiency.md)。

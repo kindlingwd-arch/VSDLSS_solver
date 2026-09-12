@@ -1,4 +1,5 @@
 #include "vsdlss_m3_internal.h"
+#include "vsdlss_parallel.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -18,17 +19,6 @@ static int checked_mul(csi a, csi b, csi *out)
 {
     if (a < 0 || b < 0 || (a && b > INT64_MAX / a)) return 0;
     *out = a * b; return 1;
-}
-
-static csi find_l_entry(const vsdlss_sn_symbolic *s, csi col, csi row)
-{
-    csi lo = s->l_col_ptr[col], hi = s->l_col_ptr[col + 1];
-    while (lo < hi) {
-        csi mid = lo + (hi - lo) / 2;
-        if (s->l_row_index[mid] < row) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo < s->l_col_ptr[col + 1] && s->l_row_index[lo] == row ? lo : -1;
 }
 
 void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *s)
@@ -145,42 +135,73 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int comp
     if ((external_total && !z->row_index) || !z->l_panel_slot ||
         (update_total && !z->update_target)) { status = VSDLSS_ERR_OOM; goto fail; }
 
-    for (sn = 0; sn < z->count; ++sn) {
-        csi begin = z->column_start[sn], end = z->column_start[sn + 1];
-        csi width = end - begin, ext = z->row_ptr[sn + 1] - z->row_ptr[sn];
-        csi rows = width + ext;
-        if (ext)
-            memcpy(z->row_index + z->row_ptr[sn],
-                   z->l_row_index + z->l_col_ptr[end - 1] + 1,
-                   (size_t)ext * sizeof(csi));
-        for (j = begin; j < end; ++j) {
-            for (p = z->l_col_ptr[j]; p < z->l_col_ptr[j + 1]; ++p) {
-                csi row = z->l_row_index[p], local_row;
-                if (row < end) local_row = row - begin;
-                else {
-                    csi lo = 0, hi = ext;
-                    while (lo < hi) { csi mid = lo + (hi - lo) / 2;
-                        if (z->row_index[z->row_ptr[sn] + mid] < row) lo = mid + 1;
-                        else hi = mid; }
-                    if (lo == ext || z->row_index[z->row_ptr[sn] + lo] != row) {
-                        status = VSDLSS_ERR_INVALID; goto fail;
+    /* Panel-slot and update-target construction touch only per-supernode
+     * output slices (l_panel_slot follows l_col_ptr, update_target follows
+     * update_ptr), so both loops are data parallel over supernodes.  Both
+     * inner searches walk two ascending index lists, so a single advancing
+     * cursor replaces the former per-entry binary search: L column patterns
+     * and the external row list R are stored in increasing row order.
+     * Only integer indices are produced here; numeric results are unchanged. */
+    total = z->update_ptr[z->count];
+    {
+    int bad = 0;
+    int nt = vsdlss_parallel_width((double)z->l_nnz + (double)total);
+    if (nt > z->count) nt = (int)z->count;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        VSDLSS_OMP(omp for schedule(guided))
+        for (csi t = 0; t < z->count; ++t) {
+            csi begin = z->column_start[t], end = z->column_start[t + 1];
+            csi width = end - begin, ext = z->row_ptr[t + 1] - z->row_ptr[t];
+            csi rows = width + ext, jj, pp;
+            csi *R = z->row_index + z->row_ptr[t];
+            if (ext)
+                memcpy(R, z->l_row_index + z->l_col_ptr[end - 1] + 1,
+                       (size_t)ext * sizeof(csi));
+            for (jj = begin; jj < end; ++jj) {
+                csi cursor2 = 0;
+                for (pp = z->l_col_ptr[jj]; pp < z->l_col_ptr[jj + 1]; ++pp) {
+                    csi row = z->l_row_index[pp], local_row;
+                    if (row < end) local_row = row - begin;
+                    else {
+                        while (cursor2 < ext && R[cursor2] < row) ++cursor2;
+                        if (cursor2 == ext || R[cursor2] != row) { bad = 1; break; }
+                        local_row = width + cursor2;
                     }
-                    local_row = width + lo;
+                    z->l_panel_slot[pp] = z->panel_offset[t] + (jj - begin) * rows + local_row;
                 }
-                z->l_panel_slot[p] = z->panel_offset[sn] + (j - begin) * rows + local_row;
+                if (bad) break;
             }
         }
     }
-    total = 0;
-    for (sn = 0; !compact && sn < z->count; ++sn) {
-        csi ext = z->row_ptr[sn + 1] - z->row_ptr[sn], q, r;
-        for (q = 0; q < ext; ++q) for (r = q; r < ext; ++r) {
-            csi col = z->row_index[z->row_ptr[sn] + q];
-            csi row = z->row_index[z->row_ptr[sn] + r];
-            csi entry = find_l_entry(z, col, row);
-            if (entry < 0) { status = VSDLSS_ERR_INVALID; goto fail; }
-            z->update_target[total++] = z->l_panel_slot[entry];
+    if (bad) { status = VSDLSS_ERR_INVALID; goto fail; }
+    if (!compact) {
+        VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
+        {
+            VSDLSS_OMP(omp master)
+            vsdlss_parallel_observe();
+            VSDLSS_OMP(omp for schedule(guided))
+            for (csi t = 0; t < z->count; ++t) {
+                csi ext = z->row_ptr[t + 1] - z->row_ptr[t], q, r;
+                const csi *R = z->row_index + z->row_ptr[t];
+                csi out = z->update_ptr[t];
+                for (q = 0; q < ext; ++q) {
+                    csi col = R[q], lo = z->l_col_ptr[col], hi = z->l_col_ptr[col + 1];
+                    for (r = q; r < ext; ++r) {
+                        csi row = R[r];
+                        while (lo < hi && z->l_row_index[lo] < row) ++lo;
+                        if (lo == hi || z->l_row_index[lo] != row) { bad = 1; break; }
+                        z->update_target[out++] = z->l_panel_slot[lo];
+                    }
+                    if (bad) break;
+                }
+            }
         }
+        if (bad) { status = VSDLSS_ERR_INVALID; goto fail; }
+    }
     }
     free(stack); free(mark); free(count); free(cursor);
     *out = z; return VSDLSS_OK;

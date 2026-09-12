@@ -16,7 +16,7 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
-.PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-parallel bench-parallel bench-m3 sanitizers clean
+.PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-kernels test-parallel bench-parallel bench-m3 bench-sn sanitizers clean
 
 all: vsdlss_solve vsdlss_solver
 
@@ -57,7 +57,7 @@ test_m3: test/test_m3.c test/m3_test_alloc.c test/m3_test_alloc.h $(LIBSRCS) inc
 test-m3: test_m3
 	./test_m3
 
-test: all test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-parallel
+test: all test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-kernels test-parallel
 	python3 test/gen_sparse.py test_sparse 10
 	./vsdlss_solver test_sparse
 	./vsdlss_solver --disk-budget 8192 test_sparse
@@ -66,13 +66,13 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-parallel test-small test-reduced-dag
+	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-kernels test-parallel test-small test-reduced-dag
 
 src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_parallel test_small test_reduced_dag bench_parallel bench_m3 test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_kernels test_parallel test_small test_reduced_dag bench_parallel bench_m3 bench_sn test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -88,6 +88,12 @@ test-m4-panels: test_m4_panels
 
 test-m5: vsdlss_solver
 	python3 test/test_m5.py
+
+test_kernels: test/test_kernels.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_kernels.c $(LIBSRCS) $(LDLIBS)
+
+test-kernels: test_kernels
+	./test_kernels
 
 test_parallel: test/test_parallel.c $(LIBSRCS) include/vsdlss.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_parallel.c $(LIBSRCS) $(LDLIBS)
@@ -107,8 +113,17 @@ bench_m3: test/bench_m3.c $(LIBSRCS) include/vsdlss.h src/vsdlss_internal.h src/
 bench-m3: bench_m3
 	./bench_m3
 
+# Scaling on one connected component: component-level parallelism gives
+# nothing here, so every speedup comes from the numeric and symbolic kernels.
+# Arguments: grid side, max threads, RHS count.
+bench_sn: test/bench_sn.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_sn.c $(LIBSRCS) $(LDLIBS)
+
+bench-sn: bench_sn
+	./bench_sn 18 4 8
+
 # Generated kernel changes must invalidate all consumers.
-$(LIBOBJS) test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_parallel bench_parallel bench_m3: src/vsdlss_small_solve.inc
+$(LIBOBJS) test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_kernels test_parallel bench_parallel bench_m3 bench_sn: src/vsdlss_small_solve.inc
 
 test_small: test/test_small.c $(LIBSRCS) src/vsdlss_small_solve.inc
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_small.c $(LIBSRCS) $(LDLIBS)

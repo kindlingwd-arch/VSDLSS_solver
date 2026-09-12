@@ -154,17 +154,15 @@ component_done:
         return status;
 }
 
-vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
-                              const double *rhs, double *solution)
+/* Writes every component straight into `dest`, which must not alias the
+ * caller's output unless a partial write is acceptable.  vsdlss_m3_solve adds
+ * the transactional staging buffer; vsdlss_m3_solve_many already owns one. */
+static vsdlss_status solve_into(const vsdlss_m3_factor *factor,
+                                const double *rhs, double *dest)
 {
-    double *global=NULL; csi component; vsdlss_status status=VSDLSS_OK;
-    if(!factor || !factor->components || !factor->component || !rhs || !solution)
-        return VSDLSS_ERR_INVALID;
-    if(!count_fits(factor->n,sizeof(*global))) return VSDLSS_ERR_OOM;
-    global=(double*)malloc((size_t)factor->n*sizeof(*global));
-    if(!global) return VSDLSS_ERR_OOM;
+    csi component; vsdlss_status status=VSDLSS_OK;
     vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
-    if(!results){free(global);return VSDLSS_ERR_OOM;}
+    if(!results)return VSDLSS_ERR_OOM;
     int nt=factor->disk_mode?1:vsdlss_parallel_width((double)factor->n*256);
     if(nt>factor->count)nt=(int)factor->count;
     (void)nt;
@@ -174,12 +172,24 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
         vsdlss_parallel_observe();
         VSDLSS_OMP(omp for schedule(dynamic,1))
         for(component=0;component<factor->count;component++)
-            results[component]=solve_component(factor,rhs,global,component);
+            results[component]=solve_component(factor,rhs,dest,component);
     }
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];break;
     }
-    free(results);
+    free(results); return status;
+}
+
+vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
+                              const double *rhs, double *solution)
+{
+    double *global=NULL; vsdlss_status status;
+    if(!factor || !factor->components || !factor->component || !rhs || !solution)
+        return VSDLSS_ERR_INVALID;
+    if(!count_fits(factor->n,sizeof(*global))) return VSDLSS_ERR_OOM;
+    global=(double*)malloc((size_t)factor->n*sizeof(*global));
+    if(!global) return VSDLSS_ERR_OOM;
+    status=solve_into(factor,rhs,global);
     if(status==VSDLSS_OK) memcpy(solution,global,(size_t)factor->n*sizeof(*solution));
     free(global); return status;
 }
@@ -204,8 +214,10 @@ vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
     {
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
+        /* `work` is already private per RHS, so skip the per-RHS staging
+         * buffer and memcpy that vsdlss_m3_solve would add. */
         VSDLSS_OMP(omp for schedule(dynamic,1))
-        for(csi r=0;r<nrhs;r++)results[r]=vsdlss_m3_solve(f,rhs+(size_t)r*ldrhs,work+(size_t)r*f->n);
+        for(csi r=0;r<nrhs;r++)results[r]=solve_into(f,rhs+(size_t)r*ldrhs,work+(size_t)r*f->n);
     }
     for(csi r=0;r<nrhs;r++)if(results[r]!=VSDLSS_OK){status=results[r];break;}
     if(status==VSDLSS_OK)for(csi r=0;r<nrhs;r++)

@@ -93,6 +93,13 @@ void vsdlss_sn_factor_free(vsdlss_sn_factor *);
 /* Shared in-memory/disk panel kernels. Layout is column major. */
 vsdlss_status vsdlss_panel_factor(double *, csi rows, csi width);
 double vsdlss_panel_dot(const double *, csi rows, csi width, csi i, csi j);
+/* Blocked rank-`width` update of the external block into scattered targets.
+ * Column chunking is the caller's; the kernel blocks internally.  Returns
+ * bit 1 for an out-of-range target slot and bit 2 for a non-finite result. */
+#define VSDLSS_PANEL_UPDATE_CB 4
+int vsdlss_panel_update_range(const double *, csi rows, csi width, csi ext,
+                              csi cfirst, csi clast, const csi *targets,
+                              double *panel, csi lo_slot, csi hi_slot);
 vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
                                 csi ext, const csi *index, double *, int back);
 vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *, vsdlss_sn_symbolic **);
