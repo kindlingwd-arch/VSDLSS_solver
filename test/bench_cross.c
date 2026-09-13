@@ -33,6 +33,7 @@ int main(int argc,char**argv)
     long k=argc>1?atol(argv[1]):22;
     int threads=argc>2?atoi(argv[2]):1;
     int reps=argc>3?atoi(argv[3]):3;
+    int ord=argc>4?atoi(argv[4]):5;
     long n,nz,*P,*I;double *X;
     build(k,&n,&P,&I,&X,&nz);
     printf("# grid %ldx%ldx%ld  n=%ld  nnz(upper)=%ld  threads=%d\n",k,k,k,n,nz,threads);
@@ -50,7 +51,7 @@ int main(int argc,char**argv)
         double bf=1e30,bs=1e30,eta=0;vsdlss_m3_factor *f=NULL;double *x=malloc((size_t)n*8);
         for(int r=-1;r<reps;r++){
             double t=now();
-            if(vsdlss_factorize_m3(A,0,&f)!=VSDLSS_OK){puts("vsdlss factor failed");return 1;}
+            if(vsdlss_factorize_m3(A,ord,&f)!=VSDLSS_OK){puts("vsdlss factor failed");return 1;}
             double a=now()-t;t=now();
             if(vsdlss_m3_solve(f,rhs,x)!=VSDLSS_OK)return 1;
             double b=now()-t;
@@ -62,7 +63,7 @@ int main(int argc,char**argv)
         long lnnz=0,sn=0;
         for(csi ci=0;ci<f->count;ci++)if(f->component[ci].numeric){
             lnnz+=f->component[ci].numeric->l_nnz;sn+=f->component[ci].numeric->count;}
-        printf("VSDLSS-M3   factor %8.4f s   solve %8.5f s   max_err %.3e  bwd_err %.3e\n",bf,bs,err,eta);
+        printf("VSDLSS-M3(p%d) factor %8.4f s   solve %8.5f s   max_err %.3e  bwd_err %.3e\n",ord,bf,bs,err,eta);
         printf("            nnz(L)=%ld  supernodes=%ld\n",lnnz,sn);
         vsdlss_m3_factor_free(f);free(x);
     }
@@ -100,7 +101,7 @@ int main(int argc,char**argv)
             eta=rn/(8.5*xn+bn);free(res);
         }
         printf("CHOLMOD     analyze %6.4f s  factor %8.4f s   solve %8.5f s   max_err %.3e  bwd_err %.3e\n",
-               ba,bf,bs,err,eta);
+               ba,ord,bf,bs,err,eta);
         printf("            nnz(L)=%.0f  flops=%.3f GF  %s  ordering=%d  supernodes=%ld\n",
                c.lnz,c.fl*1e-9,L->is_super?"supernodal":"simplicial",
                (int)c.method[c.selected].ordering,L->is_super?(long)L->nsuper:0L);

@@ -8,7 +8,7 @@
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s [-p 0|1|2|3|4] [--demo-rhs] [--disk-budget bytes] [--temp-dir path] [--block-cols n] [--save-factor path] [--load-factor path] [--m3] [--m4-reduced] [--dag] [--threads n] <job>\n", program);
+    fprintf(stderr, "usage: %s [-p 0|1|2|3|4|5] [--demo-rhs] [--disk-budget bytes] [--temp-dir path] [--block-cols n] [--save-factor path] [--load-factor path] [--m3] [--m4-reduced] [--dag] [--threads n] <job>\n", program);
 }
 
 int main(int argc, char **argv)
@@ -32,7 +32,7 @@ int main(int argc, char **argv)
     for(arg=1;arg<argc;++arg){
         if(strcmp(argv[arg],"-p")==0){
             if(++arg>=argc){usage(argv[0]);return 2;}
-            if(strlen(argv[arg])!=1 || argv[arg][0]<'0' || argv[arg][0]>'4'){usage(argv[0]);return 2;}
+            if(strlen(argv[arg])!=1 || argv[arg][0]<'0' || argv[arg][0]>'5'){usage(argv[0]);return 2;}
             order=argv[arg][0]-'0';
         }else if(strcmp(argv[arg],"--disk-budget")==0){
             char *end; uintmax_t value;

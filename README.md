@@ -11,7 +11,7 @@
 - 实数 double、对称正定矩阵（SPD）。
 - 0-based、上三角 CSC 输入，索引类型为 `int64_t`。
 - 输入校验、列内排序、重复坐标求和，且不修改调用方矩阵。
-- 自然序、Reverse Cuthill–McKee、动态最小度和多层嵌套剖分排序。
+- 自然序、Reverse Cuthill–McKee、动态最小度、近似最小度（AMD）和多层嵌套剖分排序。
 - 按实际消元图插入填充边；报告预测 `nnz(L)`、新增填充边和消元树高度。
 - MLD 使用确定性的 SHEM 强边匹配和加权粗图，最粗层多起点区域增长分区，并在反粗化的每一层执行平衡与增益细化。
 - 跨分区边通过最大匹配和 Kőnig 最小顶点覆盖转成节点分隔器；伪外围 BFS 仅保留为退化分区的安全回退。
@@ -78,7 +78,13 @@ make CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
 ./vsdlss_solver [-p 0|1|2|3|4] [--demo-rhs] jobname
 ```
 
-`-p 0`（默认）使用 MLD，`-p 1` 使用 RCM，`-p 2` 使用自然序，`-p 3` 使用动态最小度，`-p 4` 显式使用 MLD。默认要求 `.rhs` 存在且长度准确；只有显式指定 `--demo-rhs` 才会在 RHS 缺失时构造 `b=A·1`。成功后写出 `<jobname>.rsl`。
+`-p 0`（默认）使用 MLD，`-p 1` 使用 RCM，`-p 2` 使用自然序，`-p 3` 使用动态最小度，`-p 4` 显式使用 MLD，`-p 5` 使用近似最小度（AMD，商图形式）。
+`-p 5` 在当前测试矩阵上比 MLD 快约 35 倍且填充少约 25%，但默认值仍为 MLD：
+MLD 是与反编译证据对应的重建产物，默认排序的更换应当单独决定。
+`-p 3` 的精确最小度此前有一处 O(n³) 的选主元重扫，已修复为等价的 O(1) 判定，
+排列结果逐位不变；它仍然显著慢于 `-p 5`，因为精确最小度会显式建出消去团。
+设计、与 SuiteSparse AMD 的对照及测试见
+[15-ordering-amd.md](docs/reconstruction/15-ordering-amd.md)。默认要求 `.rhs` 存在且长度准确；只有显式指定 `--demo-rhs` 才会在 RHS 缺失时构造 `b=A·1`。成功后写出 `<jobname>.rsl`。
 
 ## 公共 API
 

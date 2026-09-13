@@ -159,6 +159,10 @@ vsdlss_status vsdlss_order_analyze(const vsdlss *A, int order,
         status = vsdlss_min_degree_order(A, &local_q, &local_stats);
         if (status != VSDLSS_OK) return status;
     }
+    else if (order == 5) {
+        status = vsdlss_amd_order(A, &local_q, &local_stats);
+        if (status != VSDLSS_OK) return status;
+    }
     else if (order == 0 || order == 4) {
         status = vsdlss_mld_order(A, &local_q, &local_stats);
         if (status != VSDLSS_OK) return status;

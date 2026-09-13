@@ -30,6 +30,7 @@ int main(int argc,char **argv)
     csi k=argc>1?atoll(argv[1]):20;
     int maxthreads=argc>2?atoi(argv[2]):4;
     int nrhs=argc>3?atoi(argv[3]):8;
+    int ord=argc>4?atoi(argv[4]):0;
     vsdlss *A=poisson3d(k);
     if(!A){puts("alloc failed");return 1;}
     csi n=A->n;
@@ -40,7 +41,7 @@ int main(int argc,char **argv)
     if(vsdlss_spmv_sym_upper(A,truth,rhs)!=VSDLSS_OK)return 1;
     for(int r=0;r<nrhs;r++)memcpy(many+(size_t)r*n,rhs,(size_t)n*8);
 
-    printf("# grid %lldx%lldx%lld  n=%lld\n",(long long)k,(long long)k,(long long)k,(long long)n);
+    printf("# grid %lldx%lldx%lld  n=%lld  ordering=%d\n",(long long)k,(long long)k,(long long)k,(long long)n,ord);
     puts("stage\tthreads\tdag\tseconds\tspeedup\tmax_team\tmax_err");
     double base_f=0,base_s=0,base_m=0;
     for(int dag=0;dag<2;dag++){
@@ -52,7 +53,7 @@ int main(int argc,char **argv)
         double tf=1e30,ts=1e30,tm=1e30,err=0;
         for(int rep=-1;rep<3;rep++){
             double t0=now();
-            if(vsdlss_factorize_m3(A,0,&f)!=VSDLSS_OK){puts("factor failed");return 1;}
+            if(vsdlss_factorize_m3(A,ord,&f)!=VSDLSS_OK){puts("factor failed");return 1;}
             double a1=now()-t0;
             t0=now();
             if(vsdlss_m3_solve(f,rhs,x)!=VSDLSS_OK)return 1;

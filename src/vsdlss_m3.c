@@ -59,7 +59,7 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     vsdlss_status status; csi component;
     if(!out) return VSDLSS_ERR_INVALID;
     *out=NULL;
-    if(order<0 || order>4) return VSDLSS_ERR_UNSUPPORTED;
+    if(order<0 || order>5) return VSDLSS_ERR_UNSUPPORTED;
     if(!A) return VSDLSS_ERR_INVALID;
     if(A->n==INT64_MAX || A->n<1 || !count_fits(A->n+1,sizeof(csi)) ||
        !count_fits(A->n,sizeof(double))) return A->n<1?VSDLSS_ERR_INVALID:VSDLSS_ERR_OOM;

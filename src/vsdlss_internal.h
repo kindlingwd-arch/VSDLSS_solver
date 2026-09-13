@@ -20,6 +20,8 @@ vsdlss_status vsdlss_min_degree_order(const vsdlss *A, csi **q,
                                       vsdlss_order_stats *stats);
 vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
                                        csi count, csi *order);
+vsdlss_status vsdlss_amd_order(const vsdlss *A, csi **q,
+                               vsdlss_order_stats *stats);
 vsdlss_status vsdlss_mld_order(const vsdlss *A, csi **q,
                                vsdlss_order_stats *stats);
 vsdlss_status vsdlss_mld_top_partition(const vsdlss *A, signed char *side,

@@ -83,38 +83,51 @@ vsdlss_status vsdlss_min_degree_order(const vsdlss *A, csi **q,
         return VSDLSS_ERR_OOM;
     }
     predicted = A->n;
+    /* `eliminated` replaces a linear rescan of order[0..step-1] that ran for
+       every candidate at every step, which made selection O(n^3).  `degree`
+       caches vsdlss_graph_degree, which is O(deg(v)); only the neighbours of
+       the vertex just eliminated can change degree, so the cache is refreshed
+       for exactly those.  The selection rule is unchanged: smallest degree,
+       ties to the smallest index, so the permutation is identical.
+       Note self-loops never exist in this graph (graph_add_edge ignores
+       a == b), so the old has_edge(v, v) guard was always true and the `used`
+       rescan was the only filter being applied. */
+    {
+    unsigned char *eliminated = (unsigned char *)calloc((size_t)A->n, 1);
+    csi *degree = (csi *)malloc((size_t)A->n * sizeof(csi));
+    if (!eliminated || !degree) {
+        free(eliminated); free(degree); free(order);
+        vsdlss_graph_free(graph);
+        return VSDLSS_ERR_OOM;
+    }
+    for (step = 0; step < A->n; ++step) degree[step] = vsdlss_graph_degree(graph, step);
     for (step = 0; step < A->n; ++step) {
         csi vertex, best = -1, best_degree = INT64_MAX;
-        csi *neighbors = NULL, count = 0;
-        for (vertex = 0; vertex < A->n; ++vertex) {
-            csi degree = vsdlss_graph_degree(graph, vertex);
-            if (degree > 0 || !vsdlss_graph_has_edge(graph, vertex, vertex)) {
-                /* Eliminated and isolated vertices both report zero.  An eliminated
-                   vertex is recognized because it already appears in order. */
-                csi prior;
-                int used = 0;
-                for (prior = 0; prior < step; ++prior) used |= order[prior] == vertex;
-                if (!used && (degree < best_degree ||
-                              (degree == best_degree && vertex < best))) {
-                    best = vertex;
-                    best_degree = degree;
-                }
+        csi *neighbors = NULL, count = 0, k;
+        for (vertex = 0; vertex < A->n; ++vertex)
+            if (!eliminated[vertex] && degree[vertex] < best_degree) {
+                best = vertex;
+                best_degree = degree[vertex];
             }
-        }
         if (best < 0 || predicted > INT64_MAX - best_degree) {
-            free(order);
+            free(eliminated); free(degree); free(order);
             vsdlss_graph_free(graph);
             return best < 0 ? VSDLSS_ERR_INVALID : VSDLSS_ERR_OOM;
         }
         order[step] = best;
+        eliminated[best] = 1;
         predicted += best_degree;
         status = vsdlss_graph_eliminate(graph, best, &neighbors, &count);
-        free(neighbors);
         if (status != VSDLSS_OK) {
-            free(order);
+            free(neighbors); free(eliminated); free(degree); free(order);
             vsdlss_graph_free(graph);
             return status;
         }
+        degree[best] = 0;
+        for (k = 0; k < count; ++k) degree[neighbors[k]] = vsdlss_graph_degree(graph, neighbors[k]);
+        free(neighbors);
+    }
+    free(eliminated); free(degree);
     }
     if (stats) {
         stats->predicted_nnz_l = predicted;
