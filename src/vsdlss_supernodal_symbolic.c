@@ -1,6 +1,8 @@
 #include "vsdlss_m3_internal.h"
 #include "vsdlss_parallel.h"
 
+
+
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -89,15 +91,43 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int comp
     z->column_start = (csi *)malloc((size_t)(n + 1) * sizeof(csi));
     if (!z->column_start) { status = VSDLSS_ERR_OOM; goto fail; }
     z->count = 0; z->column_start[0] = 0;
+    {
+    /* Fundamental supernodes require identical column patterns, which on a
+     * nested-dissection ordering leaves thousands of width-1 "supernodes"
+     * whose dense blocks are too thin for any blocked kernel.  Relaxed
+     * amalgamation merges a column into the running supernode even when that
+     * stores some explicit zeros, trading a little extra arithmetic for much
+     * wider panels.  Only the merge predicate changes: the external row list
+     * is still the last column's pattern (patterns nest along the elimination
+     * tree, so it stays a clique and every update target still exists), and
+     * l_panel_slot still maps only true L entries, so the extra slots stay the
+     * zeros calloc left there.
+     * The width/zero-fraction schedule follows CHOLMOD's published relaxed
+     * supernode parameters (nrelax/zrelax); VSDLSS_SN_STRICT reverts to
+     * fundamental supernodes. */
+    const int relaxed = getenv("VSDLSS_SN_STRICT") == NULL;
+    csi begin = 0, entries = z->l_col_ptr[1] - z->l_col_ptr[0];
     for (j = 0; j + 1 < n; ++j) {
-        csi a0 = z->l_col_ptr[j], a1 = z->l_col_ptr[j + 1];
-        csi b0 = z->l_col_ptr[j + 1], b1 = z->l_col_ptr[j + 2];
-        int merge = z->parent[j] == j + 1 && a1 - a0 == b1 - b0 + 1;
-        if (merge && memcmp(z->l_row_index + a0 + 1, z->l_row_index + b0,
-                            (size_t)(b1 - b0) * sizeof(csi)) != 0) merge = 0;
-        if (!merge) z->column_start[++z->count] = j + 1;
+        int merge = z->parent[j] == j + 1;
+        csi next = z->l_col_ptr[j + 2] - z->l_col_ptr[j + 1];
+        if (merge) {
+            csi w = j + 2 - begin, ext = next - 1, rows = w + ext;
+            double slots = (double)w * (double)rows - (double)w * ((double)w - 1) / 2;
+            double zeros = slots - (double)(entries + next);
+            double fraction = slots > 0 ? zeros / slots : 0;
+            if (zeros < 0) merge = 0;
+            else if (relaxed) {
+                if (w <= 4) merge = fraction < 0.8;
+                else if (w <= 16) merge = fraction < 0.1;
+                else if (w <= 48) merge = fraction < 0.05;
+                else merge = zeros == 0;
+            } else merge = zeros == 0;
+        }
+        if (merge) entries += next;
+        else { z->column_start[++z->count] = j + 1; begin = j + 1; entries = next; }
     }
     z->column_start[++z->count] = n;
+    }
     z->row_ptr = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
     z->panel_offset = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
     z->update_ptr = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
