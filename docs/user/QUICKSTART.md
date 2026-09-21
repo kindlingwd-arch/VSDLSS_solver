@@ -79,7 +79,7 @@ x = [1,2,3]
 | M4 | vsdlss_factorize_m4 / vsdlss_factorize_m4_ex | vsdlss_m4_solve | vsdlss_m4_factor_free |
 | M4 reduced | vsdlss_factorize_m4_reduced | vsdlss_m4_reduced_solve | vsdlss_m4_reduced_free |
 
-order：0 默认 MLD，1 RCM，2 自然序，3 最小度，4 MLD。因子创建内部保留求解所需数据，不获取用户输入数组所有权；可对同一因子顺序求解多个 RHS。创建失败 out 为 NULL；公开求解失败保持输出不变；支持 rhs 与 solution 为同一数组。释放函数接受 NULL，释放后指针不得复用。
+order：0 默认 MLD，1 RCM，2 自然序，3 最小度，4 MLD，5 AMD（新增可选近似最小度，默认仍为 MLD）。因子创建内部保留求解所需数据，不获取用户输入数组所有权；可对同一因子顺序求解多个 RHS。创建失败 out 为 NULL；公开求解失败保持输出不变；支持 rhs 与 solution 为同一数组。释放函数接受 NULL，释放后指针不得复用。
 
 多 RHS：`vsdlss_m3_solve_many(f,nrhs,rhs,ldrhs,out,ldout)`，按列存放，每列为一个长度 n 的 RHS，两个 leading dimension 均至少 n，nrhs 至少 1。输出整批成功后提交。M4 reduced 对象不得传入此入口；M4 和 M4 reduced 同一因子不支持外部并发调用。
 

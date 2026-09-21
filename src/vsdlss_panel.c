@@ -150,6 +150,7 @@ vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
     if(!back) {
         const csi blk=VSDLSS_SOLVE_BLK,nblocks=ext/blk+(ext%blk!=0);
         int fnt=nt; if(fnt>nblocks)fnt=(int)nblocks;
+        if(fnt<1)fnt=1;
         (void)fnt;
         VSDLSS_OMP(omp parallel num_threads(fnt) if(fnt>1) reduction(|:bad))
         {

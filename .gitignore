@@ -27,3 +27,8 @@
 /libvsdlss.a
 /quickstart
 /dist/
+
+/test_amd
+/test_kernels
+/bench_sn
+/bench_cross

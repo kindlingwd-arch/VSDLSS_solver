@@ -7,7 +7,7 @@ files=[root/'Makefile',root/'README.md']
 for directory in ('src','include','test','examples','tools','docs'):
     files.extend(p for p in (root/directory).rglob('*')
                  if p.is_file() and not p.is_symlink()
-                 and p.suffix in ('.c','.h','.inc','.py','.md','.tsv','.txt'))
+                 and p.suffix in ('.c','.h','.inc','.py','.md','.tsv','.txt','.s'))
 archive=out/'vsdlss-source.tar.gz'
 with tarfile.open(archive,'w:gz') as tar:
     for p in sorted(set(files)):

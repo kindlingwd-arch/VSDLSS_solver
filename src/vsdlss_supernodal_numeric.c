@@ -195,6 +195,7 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A,const vsdlss_sn_symbolic *s,
         csi chunks=ext/chunk+(ext%chunk!=0);
         int nt=vsdlss_parallel_width((double)ext*ext*w),bad=0;
         if(nt>chunks)nt=(int)chunks;
+        if(nt<1)nt=1;
         (void)nt;
         VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
         {
