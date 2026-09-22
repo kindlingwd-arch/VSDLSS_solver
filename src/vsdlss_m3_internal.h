@@ -3,6 +3,14 @@
 
 #include "vsdlss.h"
 #include <stdatomic.h>
+#include <stdio.h>
+
+/* VSDLSS_TRACE=1 prints phase times to stderr.  Shared so the phases inside
+ * the components pass can be timed separately from the facade's totals. */
+int vsdlss_trace_on(void);
+double vsdlss_trace_now(void);
+#define TRACE(label,t0) do{ if(vsdlss_trace_on()){ double t1_=vsdlss_trace_now(); \
+    fprintf(stderr,"vsdlss trace: %-22s %8.3f s\n",(label),t1_-(t0)); (t0)=t1_; } }while(0)
 
 typedef struct vsdlss_components {
     csi n, count;
@@ -147,6 +155,9 @@ void vsdlss_reduction_free(vsdlss_reduction *);
  * paths on small matrices).  Results depend on them, never on threads. */
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
+/* Min n for the union-find component pass; INT64_MAX (off) until measured,
+ * VSDLSS_COMPONENTS_UF=1 enables it for A/B runs.  See vsdlss_components.c. */
+extern csi vsdlss_components_uf_min;
 /* Non-transactional in-place variants for callers with private buffers. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);

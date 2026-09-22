@@ -141,6 +141,47 @@ static vsdlss *powergrid(csi G,int copies)
     vsdlss_spfree(A);return N;
 }
 
+/* Two supply nets (VDD and GND): the extracted netlist splits into two
+ * components of the same size, which is what the parallel component pass is
+ * for.  The union-find path must reproduce the serial seed scan exactly --
+ * same component ids, same BFS order, same adjacency -- for any thread count,
+ * because the renumbering it feeds decides fill and arithmetic order. */
+static int two_supply_nets(void)
+{
+    vsdlss *A=powergrid(40,2);CHECK(A);
+    csi n=A->n,saved=vsdlss_components_uf_min;
+    vsdlss_components *cs=NULL;vsdlss_wgraph *gs=NULL;
+
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    vsdlss_components_uf_min=(csi)1<<40;          /* force the serial scan */
+    CHECK(vsdlss_components_build_graph(A,&cs,&gs)==VSDLSS_OK);
+    CHECK(cs->count==2);
+    CHECK(cs->offset[1]-cs->offset[0]==cs->offset[2]-cs->offset[1]);
+    CHECK(cs->offset[2]==n);
+
+    if(vsdlss_parallel_enabled()) for(int nt=2;nt<=4;nt*=2){
+        vsdlss_components *cp=NULL;vsdlss_wgraph *gp=NULL;csi nz=gs->ptr[n];
+        CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
+        vsdlss_components_uf_min=1;               /* force the union-find path */
+        CHECK(vsdlss_components_build_graph(A,&cp,&gp)==VSDLSS_OK);
+        CHECK(cp->count==cs->count);
+        CHECK(memcmp(cp->offset,cs->offset,(size_t)(cs->count+1)*sizeof(csi))==0);
+        CHECK(memcmp(cp->vertices,cs->vertices,(size_t)n*sizeof(csi))==0);
+        CHECK(memcmp(cp->component_of,cs->component_of,(size_t)n*sizeof(csi))==0);
+        CHECK(memcmp(cp->local_of,cs->local_of,(size_t)n*sizeof(csi))==0);
+        CHECK(memcmp(cp->order,cs->order,(size_t)n*sizeof(csi))==0);
+        CHECK(memcmp(gp->ptr,gs->ptr,(size_t)(n+1)*sizeof(csi))==0);
+        CHECK(memcmp(gp->idx,gs->idx,(size_t)nz*sizeof(csi))==0);
+        CHECK(memcmp(gp->val,gs->val,(size_t)nz*sizeof(double))==0);
+        CHECK(memcmp(gp->diag,gs->diag,(size_t)n*sizeof(double))==0);
+        vsdlss_components_free(cp);vsdlss_wgraph_free(gp);
+    }
+    vsdlss_components_uf_min=saved;
+    vsdlss_components_free(cs);vsdlss_wgraph_free(gs);vsdlss_spfree(A);
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    return 0;
+}
+
 static int large_powergrid(void)
 {
     /* one component of ~150k (blocked reduction + BFS renumbering), plus a
@@ -189,8 +230,9 @@ int main(int argc,char **argv)
         if(one_matrix(A)){fprintf(stderr,"case %zu (n=%lld)\n",c,(long long)cases[c].n);return 1;}
         vsdlss_spfree(A);
     }
+    CHECK(two_supply_nets()==0);
     CHECK(large_powergrid()==0);
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    puts("test_supernodal: random SPD, orders 0-5, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction: ALL OK");
+    puts("test_supernodal: random SPD, orders 0-5, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction, two supply nets: ALL OK");
     return 0;
 }

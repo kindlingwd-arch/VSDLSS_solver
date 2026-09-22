@@ -8,8 +8,9 @@
 #include <stdio.h>
 #include <time.h>
 
-/* VSDLSS_TRACE=1 prints the facade's phase times to stderr. */
-static double trace_now(void)
+/* VSDLSS_TRACE=1 prints phase times to stderr; the TRACE macro is shared
+ * through vsdlss_m3_internal.h so other phases can use the same clock. */
+double vsdlss_trace_now(void)
 {
 #ifdef _OPENMP
     return omp_get_wtime();
@@ -17,14 +18,12 @@ static double trace_now(void)
     return (double)clock()/CLOCKS_PER_SEC;
 #endif
 }
-static int trace_on(void)
+int vsdlss_trace_on(void)
 {
     static int cached=-1;
     if(cached<0){const char *e=getenv("VSDLSS_TRACE");cached=e&&*e&&*e!='0';}
     return cached;
 }
-#define TRACE(label,t0) do{ if(trace_on()){ double t1_=trace_now(); \
-    fprintf(stderr,"vsdlss trace: %-22s %8.3f s\n",label,t1_-(t0)); (t0)=t1_; } }while(0)
 
 /* Components smaller than this keep the ascending numbering. */
 csi vsdlss_reorder_min = 4096;
@@ -91,7 +90,7 @@ static vsdlss_status factor_component(vsdlss_m3_factor *factor,vsdlss_reduce_inp
 {
     vsdlss_m3_component_factor *cf=factor->component+component;
     vsdlss *permuted=NULL; csi *pinv=NULL; vsdlss_sn_symbolic *symbolic=NULL;
-    double t0=trace_now();
+    double t0=vsdlss_trace_now();
     vsdlss_status status=vsdlss_reduce_run(*input,&cf->reduction);
     *input=NULL;
     if(status!=VSDLSS_OK) goto done;
@@ -132,7 +131,7 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     if(!A) return VSDLSS_ERR_INVALID;
     if(A->n==INT64_MAX || A->n<1 || !count_fits(A->n+1,sizeof(csi)) ||
        !count_fits(A->n,sizeof(double))) return A->n<1?VSDLSS_ERR_INVALID:VSDLSS_ERR_OOM;
-    double t0=trace_now();
+    double t0=vsdlss_trace_now();
     const vsdlss *src=A; vsdlss_wgraph *graph=NULL; csi *newidx=NULL;
     /* Already-normalized input (sorted, no duplicates: the usual case) is
      * used in place; only otherwise is a normalized copy made. */
@@ -254,7 +253,7 @@ static vsdlss_status solve_component(const vsdlss_m3_factor *factor,const double
     if(core&&cf->disk) core_x=(double*)malloc((size_t)core*sizeof(double));
     if(!local||(r->count&&!saved)||(core&&!core_b)||(core&&cf->disk&&!core_x))
         {status=VSDLSS_ERR_OOM;goto done;}
-    double t0=trace_now();
+    double t0=vsdlss_trace_now();
     {
         int gt=vsdlss_parallel_width((double)cf->n*4); (void)gt;
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
