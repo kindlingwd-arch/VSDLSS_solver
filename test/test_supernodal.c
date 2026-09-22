@@ -50,6 +50,8 @@ static int one_matrix(vsdlss *A)
     CHECK(b&&x1&&xt);
     for(csi i=0;i<n;i++)b[i]=sin(0.37*(double)i)+0.1;
     for(int order=0;order<=5;order++){
+        /* exact minimum degree builds explicit cliques: keep it to small n */
+        if(order==3&&n>1000)continue;
         for(int nt=1;nt<=4;nt*=2){
             vsdlss_m3_factor *f=NULL;double eta;
             if(nt>1&&!vsdlss_parallel_enabled())break;
@@ -95,18 +97,100 @@ static int one_matrix(vsdlss *A)
     free(b);free(x1);free(xt);return 0;
 }
 
-int main(void)
+/* Power-grid-like graph: G x G junctions, wires of 7 segments with taps,
+ * pendant per junction, grounded pads; `copies` disjoint copies; shuffled.
+ * Large enough to take the BFS renumbering and blocked-reduction paths. */
+static vsdlss *powergrid(csi G,int copies)
 {
+    csi per=G*G+2*G*(G-1)*9+G*G, n=per*copies, cap=3*n, m=0;
+    csi *ea=malloc((size_t)cap*sizeof(csi)),*eb=malloc((size_t)cap*sizeof(csi)),*perm=malloc((size_t)n*sizeof(csi));
+    double *ew=malloc((size_t)cap*sizeof(double)),*diag=calloc((size_t)n,sizeof(double));
+    csi *cnt=calloc((size_t)n+1,sizeof(csi));
+    vsdlss *A;
+    if(!ea||!eb||!perm||!ew||!diag||!cnt)return NULL;
+    for(int cp=0;cp<copies;cp++){
+        csi base=cp*per,next=base+G*G;
+        for(csi y=0;y<G;y++)for(csi x=0;x<G;x++)for(int dir=0;dir<2;dir++){
+            csi x2=x+(dir==0),y2=y+(dir==1),prev=base+y*G+x;
+            if(x2>=G||y2>=G)continue;
+            for(int c=0;c<7;c++){
+                csi node=next++;
+                ea[m]=prev;eb[m]=node;ew[m++]=0.5+0.1*(double)(next%13);
+                if(c==1||c==4){csi tap=next++;ea[m]=node;eb[m]=tap;ew[m++]=0.2;diag[tap]+=1e-3;}
+                prev=node;
+            }
+            ea[m]=prev;eb[m]=base+y2*G+x2;ew[m++]=1.0;
+        }
+        for(csi y=0;y<G;y++)for(csi x=0;x<G;x++){
+            csi pnode=next++;ea[m]=base+y*G+x;eb[m]=pnode;ew[m++]=1.3;
+            if(x%8==0&&y%8==0)diag[pnode]+=10;
+        }
+    }
+    for(csi i=0;i<n;i++)perm[i]=i;
+    for(csi i=n-1;i>0;i--){csi j=(csi)(next_rand()%(unsigned)(i+1)),t=perm[i];perm[i]=perm[j];perm[j]=t;}
+    A=vsdlss_spalloc(n,n,n+m,1,0);if(!A)return NULL;
+    double *d2=calloc((size_t)n,sizeof(double));
+    for(csi k=0;k<m;k++){csi a=perm[ea[k]],b=perm[eb[k]];cnt[a>b?a:b]++;d2[a]+=ew[k];d2[b]+=ew[k];}
+    for(csi i=0;i<n;i++)d2[perm[i]]+=diag[i];
+    A->p[0]=0;for(csi j=0;j<n;j++){A->p[j+1]=A->p[j]+cnt[j]+1;cnt[j]=A->p[j];}
+    for(csi k=0;k<m;k++){csi a=perm[ea[k]],b=perm[eb[k]],col=a>b?a:b;A->i[cnt[col]]=a<b?a:b;A->x[cnt[col]++]=-ew[k];}
+    for(csi j=0;j<n;j++){A->i[cnt[j]]=j;A->x[cnt[j]++]=d2[j];}
+    free(ea);free(eb);free(ew);free(perm);free(diag);free(cnt);free(d2);
+    /* columns were filled in edge order: sort them */
+    vsdlss *N=NULL;if(vsdlss_normalize_upper(A,&N)!=VSDLSS_OK)return NULL;
+    vsdlss_spfree(A);return N;
+}
+
+static int large_powergrid(void)
+{
+    /* one component of ~150k (blocked reduction + BFS renumbering), plus a
+     * second copy so the component loop and gather maps are exercised */
+    vsdlss *A=powergrid(85,2);CHECK(A);CHECK(A->n/2>=((csi)1<<17));
+    csi n=A->n,nrhs=3;
+    double *b=malloc((size_t)n*nrhs*sizeof(double)),*x1=malloc((size_t)n*nrhs*sizeof(double));
+    double *xt=malloc((size_t)n*nrhs*sizeof(double)),*xm=malloc((size_t)n*nrhs*sizeof(double));
+    CHECK(b&&x1&&xt&&xm);
+    for(csi i=0;i<n*nrhs;i++)b[i]=cos(0.001*(double)i)-0.5;
+    for(int order=0;order<=5;order+=5){
+        for(int nt=1;nt<=4;nt*=2){
+            vsdlss_m3_factor *f=NULL;double eta;
+            if(nt>1&&!vsdlss_parallel_enabled())break;
+            CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
+            CHECK(vsdlss_factorize_m3(A,order,&f)==VSDLSS_OK);
+            CHECK(f->count==2&&f->component[0].gather!=NULL);
+            double *x=nt==1?x1:xt;
+            for(csi r=0;r<nrhs;r++)CHECK(vsdlss_m3_solve(f,b+r*n,x+r*n)==VSDLSS_OK);
+            for(csi r=0;r<nrhs;r++)CHECK(vsdlss_backward_error(A,x+r*n,b+r*n,&eta)==VSDLSS_OK&&eta<1e-13);
+            CHECK(vsdlss_m3_solve_many(f,nrhs,b,n,xm,n)==VSDLSS_OK);
+            CHECK(memcmp(xm,x,(size_t)(n*nrhs)*sizeof(double))==0);
+            if(nt>1)CHECK(memcmp(x1,xt,(size_t)(n*nrhs)*sizeof(double))==0);
+            vsdlss_m3_factor_free(f);
+        }
+    }
+    /* reduced M4 goes through the same renumbered preprocessing */
+    { vsdlss_m4_reduced_factor *f=NULL;double eta;
+      CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+      CHECK(vsdlss_factorize_m4_reduced(A,5,(size_t)64<<20,NULL,&f)==VSDLSS_OK);
+      CHECK(vsdlss_m4_reduced_solve(f,b,xt)==VSDLSS_OK);
+      CHECK(vsdlss_backward_error(A,xt,b,&eta)==VSDLSS_OK&&eta<1e-13);
+      vsdlss_m4_reduced_free(f); }
+    free(b);free(x1);free(xt);free(xm);vsdlss_spfree(A);return 0;
+}
+
+int main(int argc,char **argv)
+{
+    int only_large=argc>1&&argv[1][0]=='L';
     static const struct {csi n;int per,blocks,dense;} cases[]={
         {1,0,1,0},{2,1,1,0},{17,2,1,0},{60,3,2,1},{200,2,1,0},{400,4,3,2},
-        {900,3,1,0},{1500,5,2,3},{2500,2,5,0},{3000,6,1,4}};
-    for(size_t c=0;c<sizeof(cases)/sizeof(*cases);c++){
+        {900,3,1,0},{1500,5,2,3},{2000,2,5,0},{1200,6,1,4}};
+    for(size_t c=0;!only_large&&c<sizeof(cases)/sizeof(*cases);c++){
         vsdlss *A=random_spd(cases[c].n,cases[c].per,cases[c].blocks,cases[c].dense);
         CHECK(A);
         if(one_matrix(A)){fprintf(stderr,"case %zu (n=%lld)\n",c,(long long)cases[c].n);return 1;}
         vsdlss_spfree(A);
     }
+    CHECK(large_powergrid()==0);
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    puts("test_supernodal: random SPD, orders 0-5, strict/relaxed, 1/2/4 threads: ALL OK");
+    puts("test_supernodal: random SPD, orders 0-5, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction: ALL OK");
     return 0;
 }

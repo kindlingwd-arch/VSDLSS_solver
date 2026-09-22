@@ -8,6 +8,10 @@ typedef struct vsdlss_components {
     csi *offset;
     csi *vertices;
     csi *component_of, *local_of;
+    /* Optional (may be NULL): per component, local indices in BFS discovery
+     * order, laid out like `vertices`.  Neighbours get nearby positions, which
+     * the low-degree reduction uses as a cache-friendly numbering. */
+    csi *order;
 } vsdlss_components;
 
 typedef struct vsdlss_elim_record {
@@ -61,6 +65,7 @@ typedef struct vsdlss_sn_factor {
 
 typedef struct vsdlss_m3_component_factor {
     csi n;
+    csi *gather;                 /* NULL, or global vertex of each local index */
     vsdlss_m4_factor *disk;
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
     csi *q;                      /* q[new] = old for the reduced core */
@@ -83,12 +88,24 @@ vsdlss_status vsdlss_component_extract_normalized(const vsdlss *,
                                                   const vsdlss_components *,
                                                   csi, vsdlss **);
 void vsdlss_components_free(vsdlss_components *);
+/* Extract component `c` of a normalized matrix numbered by perm (new local
+ * index -> old local index, i.e. position in components->vertices); the
+ * result is normalized upper CSC. */
+vsdlss_status vsdlss_component_extract_permuted(const vsdlss *, const vsdlss_components *,
+                                                csi c, const csi *perm, vsdlss **);
 vsdlss_status vsdlss_reduce(const vsdlss *, vsdlss_reduction **);
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *, const double *,
                                 double *, double *);
 vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *, const double *,
                                     const double *, double *);
 void vsdlss_reduction_free(vsdlss_reduction *);
+/* Size thresholds (internal; tests lower them to reach the large-input
+ * paths on small matrices).  Results depend on them, never on threads. */
+extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
+extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
+/* Non-transactional in-place variants for callers with private buffers. */
+vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
+vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
 /* Compose an elimination-tree postorder into (q, pinv) for matrix A (the

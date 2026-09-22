@@ -16,6 +16,7 @@ void vsdlss_components_free(vsdlss_components *components)
     free(components->vertices);
     free(components->component_of);
     free(components->local_of);
+    free(components->order);
     free(components);
 }
 
@@ -46,12 +47,12 @@ static vsdlss_status components_build_impl(const vsdlss *A,
     components->vertices = (csi *)malloc((size_t)A->n * sizeof(csi));
     components->component_of = (csi *)malloc((size_t)A->n * sizeof(csi));
     components->local_of = (csi *)malloc((size_t)A->n * sizeof(csi));
-    queue = (csi *)malloc((size_t)A->n * sizeof(csi));
+    components->order = (csi *)malloc((size_t)A->n * sizeof(csi));
     sizes = (csi *)calloc((size_t)A->n, sizeof(csi));
     adj_offset = (csi *)calloc((size_t)(A->n + 1), sizeof(csi));
     adj_cursor = (csi *)malloc((size_t)A->n * sizeof(csi));
     if (!components->vertices || !components->component_of ||
-        !components->local_of || !queue || !sizes || !adj_offset || !adj_cursor) {
+        !components->local_of || !components->order || !sizes || !adj_offset || !adj_cursor) {
         status = VSDLSS_ERR_OOM;
         goto fail;
     }
@@ -88,8 +89,12 @@ static vsdlss_status components_build_impl(const vsdlss *A,
     for (seed = 0; seed < A->n; ++seed) components->component_of[seed] = -1;
 
     component = 0;
+    {
+    csi discovered = 0;   /* BFS queues of all components, concatenated */
     for (seed = 0; seed < A->n; ++seed) {
         if (components->component_of[seed] >= 0) continue;
+        /* The BFS queue is written straight into `order`. */
+        queue = components->order + discovered;
         head = 0; tail = 1; queue[0] = seed;
         components->component_of[seed] = component;
         while (head < tail) {
@@ -104,7 +109,9 @@ static vsdlss_status components_build_impl(const vsdlss *A,
                 }
             }
         }
+        discovered += tail;
         ++component;
+    }
     }
     components->count = component;
     components->offset = (csi *)malloc((size_t)(component + 1) * sizeof(csi));
@@ -120,12 +127,16 @@ static vsdlss_status components_build_impl(const vsdlss *A,
         components->local_of[seed] = position;
         components->vertices[components->offset[component] + position] = seed;
     }
-    free(queue); free(sizes); free(adj_offset); free(adj_cursor); free(adjacent);
+    /* Components were discovered in seed order, so the concatenated queues
+     * already follow `offset`; convert global vertices to local indices. */
+    for (seed = 0; seed < A->n; ++seed)
+        components->order[seed] = components->local_of[components->order[seed]];
+    free(sizes); free(adj_offset); free(adj_cursor); free(adjacent);
     *out = components;
     return VSDLSS_OK;
 
 fail:
-    free(queue); free(sizes); free(adj_offset); free(adj_cursor); free(adjacent);
+    free(sizes); free(adj_offset); free(adj_cursor); free(adjacent);
     vsdlss_components_free(components);
     return status;
 }
@@ -206,4 +217,81 @@ vsdlss_status vsdlss_component_extract_normalized(const vsdlss *A,
                                                   csi component, vsdlss **out)
 {
     return component_extract_impl(A, components, component, out, 0);
+}
+
+/* Reads A once in its own column order (sequential) and scatters entries to
+ * their new columns; walking the columns in the new order instead would turn
+ * every read of A into a cache miss on scattered input. */
+vsdlss_status vsdlss_component_extract_permuted(const vsdlss *A,
+                                                const vsdlss_components *components,
+                                                csi component, const csi *perm,
+                                                vsdlss **out)
+{
+    vsdlss *local = NULL;
+    csi *newidx = NULL, *cursor = NULL, start, local_n, k, p, nz = 0;
+    int whole;
+    if (!out) return VSDLSS_ERR_INVALID;
+    *out = NULL;
+    if (!A || !components || !perm || component < 0 || component >= components->count ||
+        components->n != A->n || !components->offset || !components->vertices ||
+        !components->component_of || !components->local_of)
+        return VSDLSS_ERR_INVALID;
+    start = components->offset[component];
+    local_n = components->offset[component + 1] - start;
+    if (local_n < 1 || !checked_count(A->n + 1, sizeof(csi))) return VSDLSS_ERR_INVALID;
+    whole = local_n == A->n;          /* single component: no membership test */
+    newidx = (csi *)malloc((size_t)A->n * sizeof(csi));
+    cursor = (csi *)calloc((size_t)local_n + 1, sizeof(csi));
+    if (!newidx || !cursor) { free(newidx); free(cursor); return VSDLSS_ERR_OOM; }
+    for (k = 0; k < local_n; ++k) newidx[components->vertices[start + k]] = -1;
+    for (k = 0; k < local_n; ++k) {
+        csi g;
+        if (perm[k] < 0 || perm[k] >= local_n) { free(newidx); free(cursor); return VSDLSS_ERR_INVALID; }
+        g = components->vertices[start + perm[k]];
+        if (newidx[g] >= 0) { free(newidx); free(cursor); return VSDLSS_ERR_INVALID; }
+        newidx[g] = k;
+    }
+#define MEMBER(v) (whole || components->component_of[v] == component)
+    for (csi g = 0; g < A->n; ++g) {
+        if (!MEMBER(g)) continue;
+        csi b = newidx[g];
+        for (p = A->p[g]; p < A->p[g + 1]; ++p) {
+            csi row = A->i[p], a;
+            if (!whole && !MEMBER(row)) continue;
+            a = newidx[row];
+            ++cursor[(a > b ? a : b) + 1];
+            ++nz;
+        }
+    }
+    local = vsdlss_spalloc(local_n, local_n, nz, 1, 0);
+    if (!local) { free(newidx); free(cursor); return VSDLSS_ERR_OOM; }
+    local->p[0] = 0;
+    for (k = 0; k < local_n; ++k) { local->p[k + 1] = local->p[k] + cursor[k + 1]; cursor[k] = local->p[k]; }
+    for (csi g = 0; g < A->n; ++g) {
+        if (!MEMBER(g)) continue;
+        csi b = newidx[g];
+        for (p = A->p[g]; p < A->p[g + 1]; ++p) {
+            csi row = A->i[p], a, col, at;
+            if (!whole && !MEMBER(row)) continue;
+            a = newidx[row];
+            col = a > b ? a : b;
+            at = cursor[col]++;
+            local->i[at] = a < b ? a : b; local->x[at] = A->x[p];
+        }
+    }
+#undef MEMBER
+    /* Columns are short: insertion sort keeps them normalized. */
+    for (k = 0; k < local_n; ++k) {
+        for (p = local->p[k] + 1; p < local->p[k + 1]; ++p) {
+            csi ri = local->i[p], q = p; double xi = local->x[p];
+            while (q > local->p[k] && local->i[q - 1] > ri) {
+                local->i[q] = local->i[q - 1]; local->x[q] = local->x[q - 1]; --q;
+            }
+            local->i[q] = ri; local->x[q] = xi;
+        }
+    }
+    local->nzmax = nz > 0 ? nz : 1;
+    free(newidx); free(cursor);
+    *out = local;
+    return VSDLSS_OK;
 }

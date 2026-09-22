@@ -79,7 +79,7 @@ static int test_invalid_inputs_leave_outputs_null(void)
         csi hp[] = {0}; csi hi[] = {0}; double hx[] = {0};
         vsdlss huge = {0,INT64_MAX,INT64_MAX,hp,hi,hx,-1};
         csi offset[] = {0,1}, vertex[] = {0}, map[] = {0};
-        vsdlss_components fake = {INT64_MAX,1,offset,vertex,map,map};
+        vsdlss_components fake = {INT64_MAX,1,offset,vertex,map,map,NULL};
         CHECK(vsdlss_components_build(&huge,&c)==VSDLSS_ERR_OOM && c==NULL);
         CHECK(vsdlss_component_extract(&huge,&fake,0,&B)==VSDLSS_ERR_OOM && B==NULL);
     }
@@ -751,6 +751,47 @@ static int test_m3_allocation_failures(void)
     m3_alloc_reset();vsdlss_m3_factor_free(f);vsdlss_spfree(A);return 0;
 }
 
+/* Chains with taps between junctions: low-degree heavy, like a power grid.
+ * With the thresholds lowered this reaches the BFS renumbering and the
+ * blocked parallel reduction; every allocation failure must still be
+ * transactional. */
+static int test_m3_reorder_paths_and_allocation_failures(void)
+{
+    test_edge edge[1600]; csi e=0,n,x,y,k; vsdlss *A; vsdlss_m3_factor *f=NULL;
+    size_t calls,base,i; double rhs[900],out[900],want[900],eta;
+    const csi G=6; csi next=G*G;
+    for(y=0;y<G;y++)for(x=0;x<G;x++)for(int dir=0;dir<2;dir++){
+        csi x2=x+(dir==0),y2=y+(dir==1),prev=y*G+x;
+        if(x2>=G||y2>=G)continue;
+        for(int c=0;c<5;c++){csi node=next++;edge[e++]=(test_edge){prev,node,1.0+0.01*(double)e};
+            if(c==2){edge[e++]=(test_edge){node,next,0.3};next++;} prev=node;}
+        edge[e++]=(test_edge){prev,y2*G+x2,0.9};
+    }
+    n=next; CHECK(n<=900);
+    A=make_laplacian(n,edge,e);CHECK(A);
+    for(k=0;k<n;k++) rhs[k]=sin(0.3*(double)k)+0.2;
+    vsdlss_reduce_block=64; vsdlss_reorder_min=64;
+    base=m3_alloc_live();
+    m3_alloc_reset();CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);calls=m3_alloc_calls();
+    CHECK(f->component[0].gather!=NULL && f->component[0].reduction->count>n/2);
+    CHECK(vsdlss_m3_solve(f,rhs,want)==VSDLSS_OK);
+    CHECK(vsdlss_backward_error(A,want,rhs,&eta)==VSDLSS_OK&&eta<1e-13);
+    vsdlss_m3_factor_free(f);f=NULL;CHECK(m3_alloc_live()==base);
+    for(i=1;i<=calls;i++){m3_alloc_fail_at(i);CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_ERR_OOM);CHECK(f==NULL);CHECK(m3_alloc_live()==base);}
+    m3_alloc_reset();CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+    base=m3_alloc_live();m3_alloc_reset();CHECK(vsdlss_m3_solve(f,rhs,out)==VSDLSS_OK);calls=m3_alloc_calls();
+    CHECK(memcmp(out,want,(size_t)n*sizeof(double))==0);
+    for(i=1;i<=calls;i++){
+        for(k=0;k<n;k++) out[k]=99;
+        m3_alloc_fail_at(i);CHECK(vsdlss_m3_solve(f,rhs,out)==VSDLSS_ERR_OOM);
+        for(k=0;k<n;k++) CHECK(out[k]==99);
+        CHECK(m3_alloc_live()==base);
+    }
+    m3_alloc_reset();vsdlss_m3_factor_free(f);
+    vsdlss_reduce_block=(csi)1<<16; vsdlss_reorder_min=4096;
+    vsdlss_spfree(A);return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
@@ -777,6 +818,7 @@ int main(void)
     CHECK(test_m3_partial_factor_cleanup_without_component_array()==0);
     CHECK(test_deterministic_graph_oracles()==0);
     CHECK(test_m3_allocation_failures()==0);
+    CHECK(test_m3_reorder_paths_and_allocation_failures()==0);
     puts("m3 component, reduction, RHS, symbolic, and numeric tests passed");
     return 0;
 }

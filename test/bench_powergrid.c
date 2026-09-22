@@ -86,24 +86,42 @@ int main(int argc,char **argv)
            100.0*hist[1]/n,100.0*hist[2]/n,100.0*hist[3]/n,100.0*hist[4]/n,100.0*hist[5]/n,100.0*hist[6]/n);
 
     if(vsdlss_set_num_threads(threads)!=VSDLSS_OK){puts("bad thread count");return 1;}
-    /* Stage view of preprocessing (same calls the M3 facade makes). */
+    /* Stage view: the same calls the M3 facade makes, timed one by one. */
     {
-        vsdlss *N=NULL,*local=NULL;vsdlss_components *c=NULL;vsdlss_reduction *r=NULL;
-        double t0=now();
-        if(vsdlss_normalize_upper(A,&N)||vsdlss_components_build_normalized(N,&c))return 1;
-        double t1=now();
+        vsdlss *N=NULL,*local=NULL,*P=NULL;vsdlss_components *c=NULL;vsdlss_reduction *r=NULL;
+        vsdlss_sn_symbolic *sym=NULL;vsdlss_sn_factor *sf=NULL;csi *q=NULL,*pinv=NULL;
+        double t[10];long f0=faults();
+        t[0]=now();
+        if(vsdlss_normalize_upper(A,&N))return 1;
+        t[1]=now();
+        if(vsdlss_components_build_normalized(N,&c))return 1;
+        t[2]=now();
         csi big=0;for(csi k=0;k<c->count;k++)if(c->offset[k+1]-c->offset[k]>c->offset[big+1]-c->offset[big])big=k;
-        if(vsdlss_component_extract_normalized(N,c,big,&local))return 1;
-        double t15=now();long f0=faults();
+        if(c->order){ if(vsdlss_component_extract_permuted(N,c,big,c->order+c->offset[big],&local))return 1; }
+        else if(vsdlss_component_extract_normalized(N,c,big,&local))return 1;
+        t[3]=now();
         if(vsdlss_reduce(local,&r))return 1;
-        double t2=now();long f1=faults();
+        t[4]=now();
+        if(r->core_n){
+            if(vsdlss_order(r->core,order,&q,&pinv))return 1;
+            t[5]=now();
+            if(vsdlss_postorder_permutation(r->core,q,pinv))return 1;
+            P=vsdlss_symperm(r->core,pinv,1);if(!P)return 1;
+            t[6]=now();
+            if(vsdlss_sn_analyze_relaxed(P,&sym))return 1;
+            t[7]=now();
+            if(vsdlss_sn_factorize(P,sym,&sf))return 1;
+            t[8]=now();
+        } else t[5]=t[6]=t[7]=t[8]=t[4];
+        long f1=faults();
         csi d[4]={0};for(csi k=0;k<r->count;k++)if(r->records[k].degree<4)d[r->records[k].degree]++;
         printf("# components=%lld largest=%lld  eliminated d0=%lld d1=%lld d2=%lld d3=%lld  core_n=%lld (%.2f%% of n) core_nnz_upper=%lld\n",
                (long long)c->count,(long long)(c->offset[big+1]-c->offset[big]),(long long)d[0],(long long)d[1],
                (long long)d[2],(long long)d[3],(long long)r->core_n,100.0*r->core_n/n,
                (long long)(r->core?r->core->p[r->core_n]:0));
-        printf("# stage normalize+components=%.3fs extract=%.3fs reduce=%.3fs\n",t1-t0,t15-t1,t2-t15);
-        printf("# reduce minor page faults=%ld\n",f1-f0);
+        printf("# stage normalize=%.3f components=%.3f extract=%.3f reduce=%.3f order=%.3f post+perm=%.3f symbolic=%.3f numeric=%.3f (s) minor_faults=%ld\n",
+               t[1]-t[0],t[2]-t[1],t[3]-t[2],t[4]-t[3],t[5]-t[4],t[6]-t[5],t[7]-t[6],t[8]-t[7],f1-f0);
+        vsdlss_sn_factor_free(sf);vsdlss_sn_symbolic_free(sym);vsdlss_spfree(P);free(q);free(pinv);
         vsdlss_reduction_free(r);vsdlss_spfree(local);vsdlss_components_free(c);vsdlss_spfree(N);
     }
     double *b=malloc((size_t)n*nrhs*sizeof(double)),*x=malloc((size_t)n*nrhs*sizeof(double));

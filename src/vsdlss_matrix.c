@@ -1,4 +1,5 @@
 #include "vsdlss.h"
+#include "vsdlss_parallel.h"
 
 #include <float.h>
 #include <limits.h>
@@ -49,51 +50,97 @@ vsdlss_status vsdlss_validate_upper_csc(const vsdlss *A)
     return VSDLSS_OK;
 }
 
+/* Output length of one column after sorting and merging duplicates, or -1
+ * when the column is already strictly increasing (copied verbatim). */
+static csi column_unique(const vsdlss *A, csi j, matrix_entry *work)
+{
+    csi len = A->p[j + 1] - A->p[j], k, u = 0;
+    const csi *ri = A->i + A->p[j];
+    for (k = 1; k < len; ++k) if (ri[k] <= ri[k - 1]) break;
+    if (k >= len) return -1;
+    for (k = 0; k < len; ++k) { work[k].row = ri[k]; work[k].value = A->x[A->p[j] + k]; }
+    qsort(work, (size_t)len, sizeof(*work), compare_entry);
+    for (k = 0; k < len; ++k) if (k == 0 || work[k].row != work[k - 1].row) ++u;
+    return u;
+}
+
+/* Sorted/merged columns.  Columns that are already strictly increasing (the
+ * usual case) are copied without sorting; the others are sorted exactly as
+ * before, so the result is unchanged.  Both passes are column-parallel. */
 vsdlss_status vsdlss_normalize_upper(const vsdlss *A, vsdlss **out)
 {
     vsdlss_status status;
     vsdlss *C = NULL;
-    matrix_entry *work = NULL;
-    csi j, k, src, dst = 0, max_col = 0;
+    csi j, max_col = 0, *len = NULL;
     size_t bytes;
+    int bad = 0, nt;
     if (!out) return VSDLSS_ERR_INVALID;
     *out = NULL;
     status = vsdlss_validate_upper_csc(A);
     if (status != VSDLSS_OK) return status;
     for (j = 0; j < A->n; ++j) {
-        csi len = A->p[j + 1] - A->p[j];
-        if (len > max_col) max_col = len;
+        csi l = A->p[j + 1] - A->p[j];
+        if (l > max_col) max_col = l;
     }
-    if (!checked_bytes(max_col > 0 ? max_col : 1, sizeof(*work), &bytes))
+    if (!checked_bytes(max_col > 0 ? max_col : 1, sizeof(matrix_entry), &bytes))
         return VSDLSS_ERR_INVALID;
-    work = (matrix_entry *)malloc(bytes);
+    len = (csi *)malloc((size_t)(A->n + 1) * sizeof(csi));
     C = vsdlss_spalloc(A->n, A->n, A->p[A->n], 1, 0);
-    if (!work || !C) { free(work); vsdlss_spfree(C); return VSDLSS_ERR_OOM; }
-    C->p[0] = 0;
-    for (j = 0; j < A->n; ++j) {
-        csi len = A->p[j + 1] - A->p[j];
-        for (k = 0; k < len; ++k) {
-            src = A->p[j] + k;
-            work[k].row = A->i[src];
-            work[k].value = A->x[src];
+    if (!len || !C) { free(len); vsdlss_spfree(C); return VSDLSS_ERR_OOM; }
+    nt = vsdlss_parallel_width((double)A->p[A->n] * 4);
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
+    {
+        matrix_entry *work = (matrix_entry *)malloc(bytes);
+        if (!work) bad = 1;
+        VSDLSS_OMP(omp for schedule(static))
+        for (csi c = 0; c < A->n; ++c) {
+            csi u;
+            if (!work) continue;
+            u = column_unique(A, c, work);
+            len[c] = u < 0 ? A->p[c + 1] - A->p[c] : u;
         }
-        qsort(work, (size_t)len, sizeof(*work), compare_entry);
-        for (k = 0; k < len; ++k) {
-            if (k > 0 && work[k].row == work[k - 1].row) {
-                C->x[dst - 1] += work[k].value;
-                if (!isfinite(C->x[dst - 1])) {
-                    free(work); vsdlss_spfree(C); return VSDLSS_ERR_NONFINITE;
+        free(work);
+    }
+    if (bad) { free(len); vsdlss_spfree(C); return VSDLSS_ERR_OOM; }
+    C->p[0] = 0;
+    for (j = 0; j < A->n; ++j) C->p[j + 1] = C->p[j] + len[j];
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
+    {
+        matrix_entry *work = (matrix_entry *)malloc(bytes);
+        if (!work) bad = 1;
+        VSDLSS_OMP(omp for schedule(static))
+        for (csi c = 0; c < A->n; ++c) {
+            csi l = A->p[c + 1] - A->p[c], dst = C->p[c], k;
+            if (!work) continue;
+            if (len[c] == l) {
+                /* Either strictly increasing or sorted without duplicates. */
+                const csi *ri = A->i + A->p[c]; int sorted = 1;
+                for (k = 1; k < l; ++k) if (ri[k] <= ri[k - 1]) { sorted = 0; break; }
+                if (sorted) {
+                    memcpy(C->i + dst, ri, (size_t)l * sizeof(csi));
+                    memcpy(C->x + dst, A->x + A->p[c], (size_t)l * sizeof(double));
+                    continue;
                 }
-            } else {
-                C->i[dst] = work[k].row;
-                C->x[dst] = work[k].value;
-                ++dst;
+            }
+            for (k = 0; k < l; ++k) { work[k].row = A->i[A->p[c] + k]; work[k].value = A->x[A->p[c] + k]; }
+            qsort(work, (size_t)l, sizeof(*work), compare_entry);
+            for (k = 0; k < l; ++k) {
+                if (k > 0 && work[k].row == work[k - 1].row) {
+                    C->x[dst - 1] += work[k].value;
+                    if (!isfinite(C->x[dst - 1])) bad = 2;
+                } else {
+                    C->i[dst] = work[k].row;
+                    C->x[dst] = work[k].value;
+                    ++dst;
+                }
             }
         }
-        C->p[j + 1] = dst;
+        free(work);
     }
-    C->nzmax = dst > 0 ? dst : 1;
-    free(work);
+    free(len);
+    if (bad) { vsdlss_spfree(C); return (bad & 1) ? VSDLSS_ERR_OOM : VSDLSS_ERR_NONFINITE; }
+    C->nzmax = C->p[A->n] > 0 ? C->p[A->n] : 1;
     *out = C;
     return VSDLSS_OK;
 }
