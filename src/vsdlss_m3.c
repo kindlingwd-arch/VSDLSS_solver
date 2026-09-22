@@ -5,6 +5,26 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
+
+/* VSDLSS_TRACE=1 prints the facade's phase times to stderr. */
+static double trace_now(void)
+{
+#ifdef _OPENMP
+    return omp_get_wtime();
+#else
+    return (double)clock()/CLOCKS_PER_SEC;
+#endif
+}
+static int trace_on(void)
+{
+    static int cached=-1;
+    if(cached<0){const char *e=getenv("VSDLSS_TRACE");cached=e&&*e&&*e!='0';}
+    return cached;
+}
+#define TRACE(label,t0) do{ if(trace_on()){ double t1_=trace_now(); \
+    fprintf(stderr,"vsdlss trace: %-22s %8.3f s\n",label,t1_-(t0)); (t0)=t1_; } }while(0)
 
 /* Components smaller than this keep the ascending numbering. */
 csi vsdlss_reorder_min = 4096;
@@ -31,43 +51,53 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     free(factor);
 }
 
-static vsdlss_status factor_component(vsdlss_m3_factor *factor,const vsdlss *normalized,
+/* Phase 1: this component's matrix, in BFS numbering when large enough. */
+static vsdlss_status extract_component(vsdlss_m3_factor *factor,const vsdlss *normalized,
+                                       csi component,vsdlss **local)
+{
+    vsdlss_m3_component_factor *cf=factor->component+component;
+    const csi begin=factor->components->offset[component];
+    cf->n=factor->components->offset[component+1]-begin;
+    if(factor->components->order && cf->n>=VSDLSS_REORDER_MIN) {
+        /* BFS numbering: the low-degree reduction walks vertices in index
+         * order, so neighbours with nearby indices keep its adjacency and
+         * diagonal accesses in cache (2-3x faster on scattered input). */
+        const csi *perm=factor->components->order+begin;
+        cf->gather=(csi*)malloc((size_t)cf->n*sizeof(csi));
+        if(!cf->gather) return VSDLSS_ERR_OOM;
+        for(csi k=0;k<cf->n;k++)cf->gather[k]=factor->components->vertices[begin+perm[k]];
+        return vsdlss_component_extract_permuted(normalized,factor->components,component,perm,local);
+    }
+    return vsdlss_component_extract_normalized(normalized,factor->components,component,local);
+}
+
+/* Phase 2: reduce (consuming the local matrix), order and factor the core. */
+static vsdlss_status factor_component(vsdlss_m3_factor *factor,vsdlss **local,
                                       csi component,int order)
 {
-    vsdlss_status status=VSDLSS_OK;
-
-        vsdlss_m3_component_factor *cf=factor->component+component;
-        vsdlss *local=NULL,*permuted=NULL; csi *pinv=NULL;
-        vsdlss_sn_symbolic *symbolic=NULL;
-        cf->n=factor->components->offset[component+1]-factor->components->offset[component];
-        if(factor->components->order && cf->n>=VSDLSS_REORDER_MIN) {
-            /* BFS numbering: the low-degree reduction walks vertices in index
-             * order, so neighbours with nearby indices keep its adjacency and
-             * diagonal accesses in cache (2-3x faster on scattered input). */
-            const csi *perm=factor->components->order+factor->components->offset[component];
-            const csi begin=factor->components->offset[component];
-            cf->gather=(csi*)malloc((size_t)cf->n*sizeof(csi));
-            if(!cf->gather){status=VSDLSS_ERR_OOM;goto component_fail;}
-            for(csi k=0;k<cf->n;k++)cf->gather[k]=factor->components->vertices[begin+perm[k]];
-            status=vsdlss_component_extract_permuted(normalized,factor->components,component,perm,&local);
-        } else
-            status=vsdlss_component_extract_normalized(normalized,factor->components,component,&local);
-        if(status!=VSDLSS_OK) goto component_fail;
-        status=vsdlss_reduce(local,&cf->reduction);
-        if(status!=VSDLSS_OK) goto component_fail;
-        if(cf->reduction->core_n && !factor->disk_mode) {
-            status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
-            if(status!=VSDLSS_OK) goto component_fail;
-            status=vsdlss_postorder_permutation(cf->reduction->core,cf->q,pinv);
-            if(status!=VSDLSS_OK) goto component_fail;
-            permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
-            if(!permuted) {status=VSDLSS_ERR_OOM;goto component_fail;}
-            status=vsdlss_sn_analyze_relaxed(permuted,&symbolic);
-            if(status==VSDLSS_OK) status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
-        }
-component_fail:
-        free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted); vsdlss_spfree(local);
-        return status;
+    vsdlss_m3_component_factor *cf=factor->component+component;
+    vsdlss *permuted=NULL; csi *pinv=NULL; vsdlss_sn_symbolic *symbolic=NULL;
+    double t0=trace_now();
+    vsdlss_status status=vsdlss_reduce_consume(local,&cf->reduction);
+    if(status!=VSDLSS_OK) goto done;
+    TRACE("low-degree reduction",t0);
+    if(cf->reduction->core_n && !factor->disk_mode) {
+        status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
+        if(status!=VSDLSS_OK) goto done;
+        TRACE("core ordering",t0);
+        status=vsdlss_postorder_permutation(cf->reduction->core,cf->q,pinv);
+        if(status!=VSDLSS_OK) goto done;
+        permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
+        if(!permuted) {status=VSDLSS_ERR_OOM;goto done;}
+        status=vsdlss_sn_analyze_relaxed(permuted,&symbolic);
+        if(status!=VSDLSS_OK) goto done;
+        TRACE("core symbolic",t0);
+        status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
+        TRACE("core numeric",t0);
+    }
+done:
+    free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted);
+    return status;
 }
 
 static vsdlss_status factorize_shared(const vsdlss *A, int order,
@@ -81,34 +111,63 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     if(!A) return VSDLSS_ERR_INVALID;
     if(A->n==INT64_MAX || A->n<1 || !count_fits(A->n+1,sizeof(csi)) ||
        !count_fits(A->n,sizeof(double))) return A->n<1?VSDLSS_ERR_INVALID:VSDLSS_ERR_OOM;
+    double t0=trace_now();
     status=vsdlss_normalize_upper(A,&normalized);
     if(status!=VSDLSS_OK) return status;
+    TRACE("normalize",t0);
     factor=(vsdlss_m3_factor*)calloc(1,sizeof(*factor));
     if(!factor) {status=VSDLSS_ERR_OOM;goto fail;}
     factor->n=normalized->n; factor->disk_mode=disk_mode;
     status=vsdlss_components_build_normalized(normalized,&factor->components);
     if(status!=VSDLSS_OK) goto fail;
+    TRACE("components",t0);
     factor->count=factor->components->count;
     if(!count_fits(factor->count,sizeof(*factor->component))) {status=VSDLSS_ERR_OOM;goto fail;}
     factor->component=(vsdlss_m3_component_factor*)calloc((size_t)factor->count,sizeof(*factor->component));
     if(!factor->component) {status=VSDLSS_ERR_OOM;goto fail;}
     vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
-    if(!results){status=VSDLSS_ERR_OOM;goto fail;}
+    vsdlss **locals=calloc((size_t)factor->count,sizeof(*locals));
+    if(!results||!locals){free(results);free(locals);status=VSDLSS_ERR_OOM;goto fail;}
     int nt=factor->disk_mode?1:vsdlss_parallel_width((double)factor->n*256);
     if(nt>factor->count)nt=(int)factor->count;
     (void)nt;
+    /* Extract every component, then drop the normalized matrix and the
+     * vertex maps no later phase reads, so the reduction's working set does
+     * not coexist with them (peak memory on large single-component grids). */
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
     {
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
         VSDLSS_OMP(omp for schedule(dynamic,1))
         for(component=0;component<factor->count;component++)
-            results[component]=factor_component(factor,normalized,component,order);
+            results[component]=extract_component(factor,normalized,component,&locals[component]);
     }
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
-        status=results[component];free(results);goto fail;
+        status=results[component];goto phase_fail;
     }
-    free(results);
+    TRACE("extract",t0);
+    vsdlss_spfree(normalized); normalized=NULL;
+    free(factor->components->order); factor->components->order=NULL;
+    free(factor->components->component_of); factor->components->component_of=NULL;
+    free(factor->components->local_of); factor->components->local_of=NULL;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(component=0;component<factor->count;component++)
+            results[component]=factor_component(factor,&locals[component],component,order);
+    }
+    for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
+        status=results[component];goto phase_fail;
+    }
+    free(results);free(locals);
+    goto phases_done;
+phase_fail:
+    for(component=0;component<factor->count;component++)vsdlss_spfree(locals[component]);
+    free(results);free(locals);
+    goto fail;
+phases_done:
     if(disk_mode) {
         csi cores=0;
         for(component=0;component<factor->count;component++)

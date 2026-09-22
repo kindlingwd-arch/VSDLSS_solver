@@ -94,6 +94,9 @@ void vsdlss_components_free(vsdlss_components *);
 vsdlss_status vsdlss_component_extract_permuted(const vsdlss *, const vsdlss_components *,
                                                 csi c, const csi *perm, vsdlss **);
 vsdlss_status vsdlss_reduce(const vsdlss *, vsdlss_reduction **);
+/* Same, but takes ownership of *A and frees it as soon as the adjacency is
+ * built (always freed; *A is NULL on return). */
+vsdlss_status vsdlss_reduce_consume(vsdlss **A, vsdlss_reduction **);
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *, const double *,
                                 double *, double *);
 vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *, const double *,

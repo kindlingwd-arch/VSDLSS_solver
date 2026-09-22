@@ -13,7 +13,13 @@ typedef struct { csi vertex; double value; } numeric_edge;
  * a list that outgrows its slot moves to the calling phase's growth arena
  * (one per parallel block, one for the sequential phase), so concurrent
  * blocks never reallocate shared storage.  Lists are kept sorted by vertex. */
-typedef struct { csi off, count, capacity, arena; } numeric_list;
+typedef struct { int64_t slot; int32_t count, capacity; } numeric_list;  /* 16 bytes */
+/* slot = arena id in the top 16 bits, offset in the low 48 bits. */
+#define SLOT_OFF(s)   ((csi)((s) & ((INT64_C(1)<<48)-1)))
+#define SLOT_ARENA(s) ((csi)((uint64_t)(s) >> 48))
+#define MAKE_SLOT(a,o) ((int64_t)(((uint64_t)(a) << 48) | (uint64_t)(o)))
+#define MAX_ARENAS 65535
+#define MAX_LIST INT32_MAX
 typedef struct { numeric_edge *edge; csi used, capacity; } edge_arena;
 
 /* Hierarchical bitmap: set/clear O(levels), minimum O(levels).  One per
@@ -88,15 +94,15 @@ static csi edge_lower_bound(const numeric_edge *e, csi count, csi vertex)
 }
 
 static numeric_edge *list_edges(edge_arena *ar, const numeric_list *l)
-{ return ar[l->arena].edge+l->off; }
+{ return ar[SLOT_ARENA(l->slot)].edge+SLOT_OFF(l->slot); }
 
 static vsdlss_status list_reserve(edge_arena *ar, csi grow_id, numeric_list *list, csi needed)
 {
     edge_arena *g=ar+grow_id; csi capacity, need_arena;
     if(needed<=list->capacity) return VSDLSS_OK;
     capacity=list->capacity?list->capacity:4;
-    while(capacity<needed) { if(capacity>INT64_MAX/2) return VSDLSS_ERR_OOM; capacity*=2; }
-    if(g->used>INT64_MAX-capacity) return VSDLSS_ERR_OOM;
+    while(capacity<needed) { if(capacity>MAX_LIST/2) return VSDLSS_ERR_OOM; capacity*=2; }
+    if(g->used>(INT64_C(1)<<48)-1-capacity) return VSDLSS_ERR_OOM;
     need_arena=g->used+capacity;
     if(need_arena>g->capacity) {
         csi grow=g->capacity?g->capacity:64; numeric_edge *edge;
@@ -108,7 +114,7 @@ static vsdlss_status list_reserve(edge_arena *ar, csi grow_id, numeric_list *lis
     }
     if(list->count)
         memcpy(g->edge+g->used,list_edges(ar,list),(size_t)list->count*sizeof(numeric_edge));
-    list->arena=grow_id; list->off=g->used; list->capacity=capacity; g->used+=capacity;
+    list->slot=MAKE_SLOT(grow_id,g->used); list->capacity=(int32_t)capacity; g->used+=capacity;
     return VSDLSS_OK;
 }
 
@@ -123,7 +129,7 @@ static vsdlss_status edge_set(edge_arena *ar, csi grow_id, numeric_list *adj,
         if(!isfinite(updated)) return VSDLSS_ERR_NONFINITE;
         ea[pa].value=eb[pb].value=updated; return VSDLSS_OK;
     }
-    if(adj[a].count==INT64_MAX || adj[b].count==INT64_MAX) return VSDLSS_ERR_OOM;
+    if(adj[a].count>=MAX_LIST-1 || adj[b].count>=MAX_LIST-1) return VSDLSS_ERR_OOM;
     if(list_reserve(ar,grow_id,adj+a,adj[a].count+1)!=VSDLSS_OK ||
        list_reserve(ar,grow_id,adj+b,adj[b].count+1)!=VSDLSS_OK) return VSDLSS_ERR_OOM;
     ea=list_edges(ar,adj+a); eb=list_edges(ar,adj+b);
@@ -405,7 +411,7 @@ out:
 csi vsdlss_reduce_block = (csi)1<<16;
 #define REDUCE_BLOCK vsdlss_reduce_block
 
-vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
+static vsdlss_status reduce_impl(const vsdlss *A, vsdlss **owned, vsdlss_reduction **out)
 {
     vsdlss_reduction *r=NULL; numeric_list *adj=NULL; double *diag=NULL;
     unsigned char *active=NULL; csi *local=NULL; vsdlss_status status;
@@ -420,6 +426,7 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
     status=vsdlss_validate_upper_csc(A); if(status!=VSDLSS_OK) return status;
     n=A->n;
     blocks=n>=2*REDUCE_BLOCK ? (n+REDUCE_BLOCK-1)/REDUCE_BLOCK : 0;
+    if(blocks+2>MAX_ARENAS) return VSDLSS_ERR_OOM;   /* > 4e9 vertices */
     narenas=blocks+2;      /* 0 = initial lists, 1..blocks, blocks+1 = sequential */
     r=(vsdlss_reduction *)calloc(1,sizeof(*r));
     adj=(numeric_list *)calloc((size_t)n,sizeof(*adj));
@@ -437,11 +444,14 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
     for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {
         csi row=A->i[k];
         if(row==col) { diag[col]+=A->x[k]; if(!isfinite(diag[col])) {status=VSDLSS_ERR_NONFINITE;goto fail;} }
-        else { adj[row].capacity++; adj[col].capacity++; }
+        else {
+            if(adj[row].capacity>=MAX_LIST-1 || adj[col].capacity>=MAX_LIST-1) {status=VSDLSS_ERR_OOM;goto fail;}
+            adj[row].capacity++; adj[col].capacity++;
+        }
     }
     for(v=0;v<n;v++) {
-        if(ar[0].used>INT64_MAX-adj[v].capacity) {status=VSDLSS_ERR_OOM;goto fail;}
-        adj[v].off=ar[0].used; ar[0].used+=adj[v].capacity;
+        if(ar[0].used>(INT64_C(1)<<48)-1-adj[v].capacity) {status=VSDLSS_ERR_OOM;goto fail;}
+        adj[v].slot=MAKE_SLOT(0,ar[0].used); ar[0].used+=adj[v].capacity;
     }
     ar[0].capacity=ar[0].used>0?ar[0].used:1;
     if(!checked_count(ar[0].capacity,sizeof(numeric_edge))) {status=VSDLSS_ERR_OOM;goto fail;}
@@ -450,15 +460,15 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
     for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {
         csi row=A->i[k];
         if(row==col) continue;
-        ar[0].edge[adj[col].off+adj[col].count++]=(numeric_edge){row,A->x[k]};
+        ar[0].edge[SLOT_OFF(adj[col].slot)+adj[col].count++]=(numeric_edge){row,A->x[k]};
     }
     for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {
         csi row=A->i[k];
         if(row==col) continue;
-        ar[0].edge[adj[row].off+adj[row].count++]=(numeric_edge){col,A->x[k]};
+        ar[0].edge[SLOT_OFF(adj[row].slot)+adj[row].count++]=(numeric_edge){col,A->x[k]};
     }
     for(v=0;v<n;v++) {
-        numeric_edge *e=ar[0].edge+adj[v].off; csi c=adj[v].count, u=0, j;
+        numeric_edge *e=ar[0].edge+SLOT_OFF(adj[v].slot); csi c=adj[v].count, u=0, j;
         int sorted=1;
         for(j=1;j<c;j++) if(e[j].vertex<=e[j-1].vertex) { sorted=0; break; }
         if(sorted) continue;
@@ -469,8 +479,10 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
                 if(!isfinite(e[u-1].value)) {status=VSDLSS_ERR_NONFINITE;goto fail;}
             } else e[u++]=e[j];
         }
-        adj[v].count=u;
+        adj[v].count=(int32_t)u;
     }
+    /* The adjacency now holds everything; an owned input can go. */
+    if(owned) { vsdlss_spfree(*owned); *owned=NULL; A=NULL; }
 
     {
         reduce_state z={adj,diag,active,ar,r->records};
@@ -540,4 +552,16 @@ fail:
     if(ar) for(k=0;k<narenas;k++) free(ar[k].edge);
     free(ar); free(adj); free(diag); free(active); free(local);
     vsdlss_reduction_free(r); return status;
+}
+
+vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
+{ return reduce_impl(A,NULL,out); }
+
+vsdlss_status vsdlss_reduce_consume(vsdlss **A, vsdlss_reduction **out)
+{
+    vsdlss_status st;
+    if(!A) { if(out) *out=NULL; return VSDLSS_ERR_INVALID; }
+    st=reduce_impl(*A,A,out);
+    vsdlss_spfree(*A); *A=NULL;
+    return st;
 }
