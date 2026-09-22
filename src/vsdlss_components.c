@@ -20,14 +20,19 @@ static int checked_count(csi n, size_t width)
  * output is identical to the serial scan, so this only trades time. */
 csi vsdlss_components_uf_min = INT64_MAX;
 
-static int uf_requested(void)
+/* VSDLSS_COMPONENTS_UF=1 lowers the default threshold, once, so the path can
+ * be A/B'd on one binary.  The threshold is the only gate, so a test that sets
+ * it keeps full control whatever the environment says. */
+static csi uf_threshold(void)
 {
-    static int cached = -1;
-    if (cached < 0) {
+    static int checked = 0;
+    if (!checked) {
         const char *e = getenv("VSDLSS_COMPONENTS_UF");
-        cached = e && *e && *e != '0';
+        checked = 1;
+        if (e && *e && *e != '0' && vsdlss_components_uf_min == INT64_MAX)
+            vsdlss_components_uf_min = 1;
     }
-    return cached;
+    return vsdlss_components_uf_min;
 }
 
 /* Path halving.  Roots are the smallest vertex of their set (union below
@@ -118,21 +123,28 @@ static vsdlss_status components_label_uf(vsdlss_components *components, csi *uf,
         vsdlss_parallel_observe();
         VSDLSS_OMP(omp for schedule(dynamic,1))
         for (csi comp = 0; comp < count; ++comp) {
+            const csi limit = components->offset[comp + 1] - components->offset[comp];
             csi *queue = components->order + components->offset[comp];
             csi head = 0, tail = 1, at;
+            int over = 0;
             queue[0] = roots[comp];
             components->component_of[roots[comp]] = comp;
-            while (head < tail) {
+            while (head < tail && !over) {
                 csi w = queue[head++];
                 for (at = adj_offset[w]; at < adj_offset[w + 1]; ++at) {
                     csi u = adjacent[at];
                     if (components->component_of[u] < 0) {
+                        /* Reaching more vertices than the union-find counted
+                         * would mean the unions and the adjacency disagree.
+                         * Checked before the write, not after the loop: the
+                         * next slice belongs to another thread's component. */
+                        if (tail >= limit) { over = 1; break; }
                         components->component_of[u] = comp;
                         queue[tail++] = u;
                     }
                 }
             }
-            tails[comp] = tail;
+            tails[comp] = over ? -1 : tail;
         }
     }
     /* The BFS must reach exactly the vertices the union-find put in the
@@ -224,7 +236,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
     /* Large multi-threaded runs track connectivity while the entries are
      * scattered, so the BFS below can be run per component in parallel.  The
      * parent array borrows `local_of`, which is only written at the end. */
-    if ((uf_requested() || A->n >= vsdlss_components_uf_min) &&
+    if (A->n >= uf_threshold() &&
         vsdlss_parallel_width((double)A->n * 256.0) > 1) {
         uf = components->local_of;
         for (seed = 0; seed < A->n; ++seed) uf[seed] = seed;
