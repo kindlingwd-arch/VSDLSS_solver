@@ -4,7 +4,7 @@
 
 本次附件合并与独立验证见 [2026-09-22 合并记录](docs/reconstruction/18-refactor-merge-20260922.md)。
 
-最新重构与实测结果见 [2026-09-21 左视超节点重构](docs/reconstruction/17-left-looking-refactor-20260921.md) 与 [2026-09-22 电源网格预处理优化](docs/reconstruction/18-powergrid-preprocessing-20260922.md)（`make bench-powergrid`）（此前的整合记录见 [16](docs/reconstruction/16-main-integration-20260921.md)）。M3 采用后序 + 宽松合并超节点与左视数值分解，M4 采用严格超节点；AMD 通过 `-p 5` 显式启用，默认仍为 MLD。
+最新重构与实测结果见 [2026-09-21 左视超节点重构](docs/reconstruction/17-left-looking-refactor-20260921.md) 与 [2026-09-22 电源网格预处理优化](docs/reconstruction/18-powergrid-preprocessing-20260922.md)（`make bench-powergrid`）、[2026-09-22 单次分解/求解效率](docs/reconstruction/19-single-solve-efficiency-20260922.md)（`make bench-pg-profile`）（此前的整合记录见 [16](docs/reconstruction/16-main-integration-20260921.md)）。M3 采用后序 + 宽松合并超节点与左视数值分解，M4 采用严格超节点；默认排序（`-p 0`）自 2026-09-22 起为 AMD，与 `-p 5` 相同；MLD 用 `-p 4` 显式选择。
 
 # VSDLSS Solver Reconstruction
 
@@ -79,12 +79,13 @@ make CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
 文件求解：
 
 ```bash
-./vsdlss_solver [-p 0|1|2|3|4] [--demo-rhs] jobname
+./vsdlss_solver [-p 0|1|2|3|4|5] [--demo-rhs] jobname
 ```
 
-`-p 0`（默认）使用 MLD，`-p 1` 使用 RCM，`-p 2` 使用自然序，`-p 3` 使用动态最小度，`-p 4` 显式使用 MLD，`-p 5` 使用近似最小度（AMD，商图形式）。
-`-p 5` 在当前测试矩阵上比 MLD 快约 35 倍且填充少约 25%，但默认值仍为 MLD：
-MLD 是与反编译证据对应的重建产物，默认排序的更换应当单独决定。
+`-p 0`（默认）和 `-p 5` 使用近似最小度（AMD，商图形式），`-p 1` 使用 RCM，`-p 2` 使用自然序，`-p 3` 使用动态最小度，`-p 4` 使用 MLD。
+**推荐配置为 `-p 5`（即默认）**：在 2288 万结点、按客户度数分布构造的电源网格上，AMD 分解 47 s、nnz(L) 1.07 亿，MLD 为 90 s、1.56 亿；
+RCM、自然序和精确最小度在 1/4 规模上已无法在 10 分钟或 8 GB 内完成（见 [18](docs/reconstruction/18-powergrid-preprocessing-20260922.md)）。
+MLD 是与反编译证据对应的重建产物，保留为 `-p 4`。
 `-p 3` 的精确最小度此前有一处 O(n³) 的选主元重扫，已修复为等价的 O(1) 判定，
 排列结果逐位不变；它仍然显著慢于 `-p 5`，因为精确最小度会显式建出消去团。
 设计、与 SuiteSparse AMD 的对照及测试见

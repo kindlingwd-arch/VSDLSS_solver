@@ -159,11 +159,13 @@ vsdlss_status vsdlss_order_analyze(const vsdlss *A, int order,
         status = vsdlss_min_degree_order(A, &local_q, &local_stats);
         if (status != VSDLSS_OK) return status;
     }
-    else if (order == 5) {
+    else if (order == 0 || order == 5) {
+        /* 0 = default = AMD since 2026-09-22 (fastest and least fill on the
+         * power-grid cores measured); 4 still selects MLD explicitly. */
         status = vsdlss_amd_order(A, &local_q, &local_stats);
         if (status != VSDLSS_OK) return status;
     }
-    else if (order == 0 || order == 4) {
+    else if (order == 4) {
         status = vsdlss_mld_order(A, &local_q, &local_stats);
         if (status != VSDLSS_OK) return status;
     }

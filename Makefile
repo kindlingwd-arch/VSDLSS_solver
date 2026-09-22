@@ -187,6 +187,6 @@ bench_pg_profile: test/bench_pg_profile.c $(LIBSRCS) include/vsdlss.h src/vsdlss
 
 # Customer degree profile, 22,875,397 nodes (needs ~6 GB RAM), AMD, 2 threads
 bench-pg-profile: bench_pg_profile
-	VSDLSS_TRACE=1 ./bench_pg_profile 5 2 2 1
+	VSDLSS_TRACE=1 ./bench_pg_profile 5 2 1 1
 
 .PHONY: bench-pg-profile

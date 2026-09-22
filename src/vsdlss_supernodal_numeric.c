@@ -48,7 +48,9 @@ void vsdlss_sn_factor_free(vsdlss_sn_factor *f)
 {
     if (!f) return;
     free(f->column_start); free(f->row_ptr); free(f->row_index);
-    free(f->panel_offset); free(f->panel_block); free(f);
+    free(f->panel_offset); free(f->panel_block);
+    free(f->sn_parent); free(f->blk_ptr); free(f->blk_src); free(f->blk_first); free(f->blk_end);
+    free(f);
 }
 
 /* Zeroed panel storage.  Large factors are 2 MiB aligned and marked for
@@ -243,7 +245,7 @@ typedef struct {
 static void tree_free(tree_info *t)
 { free(t->order); free(t->first); free(t->work); }
 
-static int tree_build(const vsdlss_sn_factor *f, const vsdlss_sn_symbolic *s, tree_info *t)
+static int tree_build(const vsdlss_sn_factor *f, const csi *sn_parent, int solve, tree_info *t)
 {
     csi count = f->count, k = 0;
     csi *head = malloc((size_t)count * sizeof(csi)), *next = malloc((size_t)count * sizeof(csi));
@@ -258,13 +260,13 @@ static int tree_build(const vsdlss_sn_factor *f, const vsdlss_sn_symbolic *s, tr
     for (csi d = 0; d < count; ++d) {
         double w = (double)(f->column_start[d + 1] - f->column_start[d]);
         double e = (double)(f->row_ptr[d + 1] - f->row_ptr[d]);
-        t->work[d] = w * w * w / 3 + w * w * e + w * e * e;
+        t->work[d] = solve ? w * (w + e) + 16 : w * w * w / 3 + w * w * e + w * e * e;
         head[d] = -1;
     }
     for (csi d = count - 1; d >= 0; --d)
-        if (s->sn_parent[d] >= 0) { next[d] = head[s->sn_parent[d]]; head[s->sn_parent[d]] = d; }
+        if (sn_parent[d] >= 0) { next[d] = head[sn_parent[d]]; head[sn_parent[d]] = d; }
     for (csi r = 0; r < count; ++r) {
-        if (s->sn_parent[r] >= 0) continue;
+        if (sn_parent[r] >= 0) continue;
         csi top = 0; stack[0] = r; pos[r] = -1;
         while (top >= 0) {
             csi v = stack[top];
@@ -274,7 +276,7 @@ static int tree_build(const vsdlss_sn_factor *f, const vsdlss_sn_symbolic *s, tr
                 stack[++top] = c; pos[c] = -1;
             } else {
                 t->first[v] = pos[v]; t->order[k++] = v; --top;
-                if (s->sn_parent[v] >= 0) t->work[s->sn_parent[v]] += t->work[v];
+                if (sn_parent[v] >= 0) t->work[sn_parent[v]] += t->work[v];
             }
         }
     }
@@ -290,7 +292,7 @@ static vsdlss_status factor_tree(const context *c, workspace *ws, int nt)
     tree_info t;
     csi *sub = NULL; char *in_sub = NULL;
     vsdlss_status st = VSDLSS_OK, *res = NULL;
-    if (!tree_build(f, s, &t)) return VSDLSS_ERR_OOM;
+    if (!tree_build(f, s->sn_parent, 0, &t)) return VSDLSS_ERR_OOM;
     sub = malloc((size_t)count * sizeof(csi));
     in_sub = calloc((size_t)count, 1);
     if (!sub || !in_sub) { st = VSDLSS_ERR_OOM; goto done; }
@@ -401,10 +403,16 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
     f->row_ptr = copy_array(s->row_ptr, s->count + 1, sizeof(csi));
     f->row_index = copy_array(s->row_index, s->row_ptr[s->count], sizeof(csi));
     f->panel_offset = copy_array(s->panel_offset, s->count + 1, sizeof(csi));
+    f->sn_parent = copy_array(s->sn_parent, s->count, sizeof(csi));
+    f->blk_ptr = copy_array(s->blk_ptr, s->count + 1, sizeof(csi));
+    f->blk_src = copy_array(s->blk_src, s->blk_ptr[s->count], sizeof(csi));
+    f->blk_first = copy_array(s->blk_first, s->blk_ptr[s->count], sizeof(csi));
+    f->blk_end = copy_array(s->blk_end, s->blk_ptr[s->count], sizeof(csi));
     f->panel = panel_alloc(s->panel_offset[s->count], &f->panel_block);
     lower = vsdlss_transpose(A, 1);
     if (!f->column_start || !f->row_ptr || !f->row_index || !f->panel_offset ||
-        !f->panel || !lower) goto fail;
+        !f->panel || !lower || !f->sn_parent || !f->blk_ptr || !f->blk_src ||
+        !f->blk_first || !f->blk_end) goto fail;
 
     nt = vsdlss_parallel_width((double)f->n * 256);
     if (nt > 1 && f->count < 2) nt = 1;
@@ -431,6 +439,95 @@ fail:
     return st;
 }
 
+/* Forward step of target d in pull form: subtract every source block that
+ * lands in J_d (sources ascending, columns j ascending per entry), then
+ * solve the diagonal block.  For each entry this is exactly the operation
+ * sequence of the push form in vsdlss_panel_solve, so results are bitwise
+ * identical to the serial solve. */
+static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
+{
+    csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
+    csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
+    const double *a = f->panel + f->panel_offset[d];
+    for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
+        csi sn = f->blk_src[b], bs = f->column_start[sn], ws = f->column_start[sn + 1] - bs;
+        csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
+        const double *as = f->panel + f->panel_offset[sn] + ws;
+        const csi *R = f->row_index + f->row_ptr[sn];
+        for (csi r = f->blk_first[b]; r < f->blk_end[b]; ++r) {
+            double v = x[R[r]];
+            for (csi j = 0; j < ws; ++j) v -= as[j * rs + r] * x[bs + j];
+            x[R[r]] = v;
+            if (!isfinite(v)) return 2;
+        }
+    }
+    for (csi j = 0; j < wd; ++j) {
+        double dj = a[j * rd + j];
+        if (!isfinite(dj) || dj <= 0) return 1;
+        x[bd + j] /= dj;
+        if (!isfinite(x[bd + j])) return 2;
+        for (csi r = j + 1; r < wd; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
+    }
+    return 0;
+}
+
+static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
+{
+    csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+    csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
+    vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+        ext ? f->row_index + f->row_ptr[sn] : NULL, x, 1);
+    return st == VSDLSS_OK ? 0 : st == VSDLSS_ERR_NONFINITE ? 2 : 1;
+}
+
+/* Tree-parallel solves: independent subtrees in parallel, the top of the
+ * tree in order (forward: subtrees first; backward: top first). */
+static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
+{
+    csi count = f->count, nsub = 0;
+    tree_info t; csi *sub = NULL; char *in_sub = NULL; int bad = 0;
+    if (!tree_build(f, f->sn_parent, 1, &t)) return VSDLSS_ERR_OOM;
+    sub = malloc((size_t)count * sizeof(csi));
+    in_sub = calloc((size_t)count, 1);
+    if (!sub || !in_sub) { tree_free(&t); free(sub); free(in_sub); return VSDLSS_ERR_OOM; }
+    double total = 0;
+    for (csi d = 0; d < count; ++d) if (f->sn_parent[d] < 0) total += t.work[d];
+    double cap = total / (4.0 * nt);
+    for (csi k = count - 1; k >= 0; --k) {
+        csi d = t.order[k], p = f->sn_parent[d];
+        if (in_sub[d]) continue;
+        if (t.work[d] <= cap && (p < 0 || t.work[p] > cap)) {
+            sub[nsub++] = d;
+            for (csi q = t.first[d]; q <= k; ++q) in_sub[t.order[q]] = 1;
+        }
+    }
+    if (nt > nsub) nt = (int)(nsub ? nsub : 1);
+    (void)nt;
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
+    for (csi i = 0; i < nsub; ++i) {
+        csi root = sub[i];
+        for (csi k = t.first[root]; !bad && t.order[k] != root; ++k) bad |= forward_pull(f, t.order[k], x);
+        if (!bad) bad |= forward_pull(f, root, x);
+    }
+    for (csi k = 0; k < count && !bad; ++k)
+        if (!in_sub[t.order[k]]) bad |= forward_pull(f, t.order[k], x);
+    for (csi k = count - 1; k >= 0 && !bad; --k)
+        if (!in_sub[t.order[k]]) bad |= backward_panel(f, t.order[k], x);
+    if (!bad) {
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
+        for (csi i = 0; i < nsub; ++i) {
+            csi root = sub[i];
+            /* The subtree is order[first[root] .. pos(root)] with the root
+             * last; walk it backwards so parents precede children. */
+            csi pos = t.first[root];
+            while (t.order[pos] != root) ++pos;
+            for (csi k = pos; !bad && k >= t.first[root]; --k) bad |= backward_panel(f, t.order[k], x);
+        }
+    }
+    tree_free(&t); free(sub); free(in_sub);
+    return bad == 0 ? VSDLSS_OK : (bad & 1) ? VSDLSS_ERR_INVALID : VSDLSS_ERR_NONFINITE;
+}
+
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *f, const double *rhs, double *out)
 {
     double *x; csi sn, j;
@@ -439,6 +536,15 @@ vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *f, const double *rhs, doub
     for (j = 0; j < f->n; j++) {
         if (!isfinite(rhs[j])) { free(x); return VSDLSS_ERR_NONFINITE; }
         x[j] = rhs[j];
+    }
+    {
+        int nt = vsdlss_parallel_width((double)f->l_nnz * 2);
+        if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) {
+            vsdlss_status st = solve_tree(f, x, nt);
+            if (st != VSDLSS_OK) { free(x); return st; }
+            for (j = 0; j < f->n; j++) if (!isfinite(x[j])) { free(x); return VSDLSS_ERR_NONFINITE; }
+            memcpy(out, x, (size_t)f->n * sizeof(*x)); free(x); return VSDLSS_OK;
+        }
     }
     for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
         sn = back ? f->count - 1 - t : t;

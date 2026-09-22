@@ -43,43 +43,64 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
         vsdlss_m4_factor_free(factor->component[k].disk);
         vsdlss_reduction_free(factor->component[k].reduction);
         free(factor->component[k].gather);
+        free(factor->component[k].ws_local);
+        free(factor->component[k].ws_saved);
+        free(factor->component[k].ws_core);
         free(factor->component[k].q);
         vsdlss_sn_factor_free(factor->component[k].numeric);
     }
     free(factor->component);
+    free(factor->ws_global);
     vsdlss_components_free(factor->components);
     free(factor);
 }
 
-/* Phase 1: this component's matrix, in BFS numbering when large enough. */
-static vsdlss_status extract_component(vsdlss_m3_factor *factor,const vsdlss *normalized,
-                                       csi component,vsdlss **local)
+/* Phase 1: this component's reduction input.  Large components are
+ * renumbered in BFS order and their adjacency is built straight from the
+ * weighted graph (no CSC copy of the component); small ones are extracted
+ * from the source matrix as before. */
+static vsdlss_status prepare_component(vsdlss_m3_factor *factor,const vsdlss *src,
+                                       const vsdlss_wgraph *graph,csi *newidx,
+                                       csi component,vsdlss_reduce_input **input)
 {
     vsdlss_m3_component_factor *cf=factor->component+component;
     const csi begin=factor->components->offset[component];
+    vsdlss *local=NULL; vsdlss_status st;
     cf->n=factor->components->offset[component+1]-begin;
-    if(factor->components->order && cf->n>=VSDLSS_REORDER_MIN) {
-        /* BFS numbering: the low-degree reduction walks vertices in index
-         * order, so neighbours with nearby indices keep its adjacency and
-         * diagonal accesses in cache (2-3x faster on scattered input). */
+    if(graph && factor->components->order && cf->n>=VSDLSS_REORDER_MIN) {
         const csi *perm=factor->components->order+begin;
         cf->gather=(csi*)malloc((size_t)cf->n*sizeof(csi));
         if(!cf->gather) return VSDLSS_ERR_OOM;
-        for(csi k=0;k<cf->n;k++)cf->gather[k]=factor->components->vertices[begin+perm[k]];
-        return vsdlss_component_extract_permuted(normalized,factor->components,component,perm,local);
+        for(csi k=0;k<cf->n;k++){
+            csi g=factor->components->vertices[begin+perm[k]];
+            cf->gather[k]=g; newidx[g]=k;     /* this component's entries only */
+        }
+        return vsdlss_reduce_prepare_graph(graph->ptr,graph->idx,graph->val,graph->diag,
+                                           cf->gather,cf->n,newidx,input);
     }
-    return vsdlss_component_extract_normalized(normalized,factor->components,component,local);
+    st=vsdlss_component_extract_normalized(src,factor->components,component,&local);
+    if(st!=VSDLSS_OK) return st;
+    st=vsdlss_reduce_prepare_csc(local,input);
+    vsdlss_spfree(local);
+    return st;
 }
 
-/* Phase 2: reduce (consuming the local matrix), order and factor the core. */
-static vsdlss_status factor_component(vsdlss_m3_factor *factor,vsdlss **local,
+/* Phase 2: reduce (consuming the prepared input), order and factor the core. */
+static vsdlss_status factor_component(vsdlss_m3_factor *factor,vsdlss_reduce_input **input,
                                       csi component,int order)
 {
     vsdlss_m3_component_factor *cf=factor->component+component;
     vsdlss *permuted=NULL; csi *pinv=NULL; vsdlss_sn_symbolic *symbolic=NULL;
     double t0=trace_now();
-    vsdlss_status status=vsdlss_reduce_consume(local,&cf->reduction);
+    vsdlss_status status=vsdlss_reduce_run(*input,&cf->reduction);
+    *input=NULL;
     if(status!=VSDLSS_OK) goto done;
+    atomic_init(&cf->ws_busy,0);
+    cf->ws_local=(double*)malloc((size_t)cf->n*sizeof(double));
+    if(cf->reduction->count) cf->ws_saved=(double*)malloc((size_t)cf->reduction->count*sizeof(double));
+    if(cf->reduction->core_n) cf->ws_core=(double*)malloc((size_t)cf->reduction->core_n*sizeof(double));
+    if(!cf->ws_local||(cf->reduction->count&&!cf->ws_saved)||(cf->reduction->core_n&&!cf->ws_core))
+        {status=VSDLSS_ERR_OOM;goto done;}
     TRACE("low-degree reduction",t0);
     if(cf->reduction->core_n && !factor->disk_mode) {
         status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
@@ -112,40 +133,54 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     if(A->n==INT64_MAX || A->n<1 || !count_fits(A->n+1,sizeof(csi)) ||
        !count_fits(A->n,sizeof(double))) return A->n<1?VSDLSS_ERR_INVALID:VSDLSS_ERR_OOM;
     double t0=trace_now();
-    status=vsdlss_normalize_upper(A,&normalized);
+    const vsdlss *src=A; vsdlss_wgraph *graph=NULL; csi *newidx=NULL;
+    /* Already-normalized input (sorted, no duplicates: the usual case) is
+     * used in place; only otherwise is a normalized copy made. */
+    status=vsdlss_validate_upper_csc(A);
     if(status!=VSDLSS_OK) return status;
+    if(!vsdlss_is_normalized_upper(A)) {
+        status=vsdlss_normalize_upper(A,&normalized);
+        if(status!=VSDLSS_OK) return status;
+        src=normalized;
+    }
     TRACE("normalize",t0);
     factor=(vsdlss_m3_factor*)calloc(1,sizeof(*factor));
     if(!factor) {status=VSDLSS_ERR_OOM;goto fail;}
-    factor->n=normalized->n; factor->disk_mode=disk_mode;
-    status=vsdlss_components_build_normalized(normalized,&factor->components);
+    factor->n=src->n; factor->disk_mode=disk_mode;
+    status=vsdlss_components_build_graph(src,&factor->components,&graph);
     if(status!=VSDLSS_OK) goto fail;
     TRACE("components",t0);
     factor->count=factor->components->count;
     if(!count_fits(factor->count,sizeof(*factor->component))) {status=VSDLSS_ERR_OOM;goto fail;}
     factor->component=(vsdlss_m3_component_factor*)calloc((size_t)factor->count,sizeof(*factor->component));
     if(!factor->component) {status=VSDLSS_ERR_OOM;goto fail;}
+    /* newidx (graph vertex -> new index) is written only for vertices of
+     * renumbered components, whose local_of entries no later step reads (small
+     * components read local_of only for their own vertices), so it shares that
+     * array instead of allocating another n-length one. */
+    newidx=factor->components->local_of;
     vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
-    vsdlss **locals=calloc((size_t)factor->count,sizeof(*locals));
-    if(!results||!locals){free(results);free(locals);status=VSDLSS_ERR_OOM;goto fail;}
+    vsdlss_reduce_input **inputs=calloc((size_t)factor->count,sizeof(*inputs));
+    if(!results||!inputs||!newidx){free(results);free(inputs);status=VSDLSS_ERR_OOM;goto fail;}
     int nt=factor->disk_mode?1:vsdlss_parallel_width((double)factor->n*256);
     if(nt>factor->count)nt=(int)factor->count;
     (void)nt;
-    /* Extract every component, then drop the normalized matrix and the
-     * vertex maps no later phase reads, so the reduction's working set does
-     * not coexist with them (peak memory on large single-component grids). */
+    /* Prepare every component, then drop the graph, the normalized copy and
+     * the vertex maps no later phase reads, so the reduction's working set
+     * does not coexist with them (peak memory on large grids). */
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
     {
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
         VSDLSS_OMP(omp for schedule(dynamic,1))
         for(component=0;component<factor->count;component++)
-            results[component]=extract_component(factor,normalized,component,&locals[component]);
+            results[component]=prepare_component(factor,src,graph,newidx,component,&inputs[component]);
     }
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];goto phase_fail;
     }
-    TRACE("extract",t0);
+    TRACE("renumber+adjacency",t0);
+    vsdlss_wgraph_free(graph); graph=NULL; newidx=NULL;
     vsdlss_spfree(normalized); normalized=NULL;
     free(factor->components->order); factor->components->order=NULL;
     free(factor->components->component_of); factor->components->component_of=NULL;
@@ -156,16 +191,16 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
         vsdlss_parallel_observe();
         VSDLSS_OMP(omp for schedule(dynamic,1))
         for(component=0;component<factor->count;component++)
-            results[component]=factor_component(factor,&locals[component],component,order);
+            results[component]=factor_component(factor,&inputs[component],component,order);
     }
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];goto phase_fail;
     }
-    free(results);free(locals);
+    free(results);free(inputs);
     goto phases_done;
 phase_fail:
-    for(component=0;component<factor->count;component++)vsdlss_spfree(locals[component]);
-    free(results);free(locals);
+    for(component=0;component<factor->count;component++)vsdlss_reduce_input_free(inputs[component]);
+    free(results);free(inputs);
     goto fail;
 phases_done:
     if(disk_mode) {
@@ -183,8 +218,12 @@ phases_done:
             remaining-=used;cores--;
         }
     }
+    atomic_init(&factor->ws_busy,0);
+    factor->ws_global=(double*)malloc((size_t)factor->n*sizeof(double));
+    if(!factor->ws_global){status=VSDLSS_ERR_OOM;goto fail;}
     vsdlss_spfree(normalized); *out=factor; return VSDLSS_OK;
 fail:
+    vsdlss_wgraph_free(graph); (void)newidx;
     vsdlss_spfree(normalized); vsdlss_m3_factor_free(factor); return status;
 }
 
@@ -201,17 +240,30 @@ static vsdlss_status solve_component(const vsdlss_m3_factor *factor,const double
     const csi *map=cf->gather?cf->gather:factor->components->vertices+begin;
     double *local=NULL,*saved=NULL,*core_b=NULL,*core_x=NULL;
     vsdlss_status status=VSDLSS_OK; csi k;
+    vsdlss_m3_component_factor *mcf=(vsdlss_m3_component_factor *)cf;  /* workspace only */
+    int own=0;
     if(!count_fits(cf->n,sizeof(double)) || !count_fits(core,sizeof(double)) ||
        !count_fits(r->count,sizeof(double))) return VSDLSS_ERR_OOM;
-    local=(double*)malloc((size_t)cf->n*sizeof(double));
-    if(r->count) saved=(double*)malloc((size_t)r->count*sizeof(double));
-    if(core) core_b=(double*)malloc((size_t)core*sizeof(double));
+    if(cf->ws_local && atomic_exchange(&mcf->ws_busy,1)==0) {
+        own=1; local=cf->ws_local; saved=cf->ws_saved; core_b=cf->ws_core;
+    } else {
+        local=(double*)malloc((size_t)cf->n*sizeof(double));
+        if(r->count) saved=(double*)malloc((size_t)r->count*sizeof(double));
+        if(core) core_b=(double*)malloc((size_t)core*sizeof(double));
+    }
     if(core&&cf->disk) core_x=(double*)malloc((size_t)core*sizeof(double));
     if(!local||(r->count&&!saved)||(core&&!core_b)||(core&&cf->disk&&!core_x))
         {status=VSDLSS_ERR_OOM;goto done;}
-    for(k=0;k<cf->n;k++) local[k]=rhs[map[k]];
+    double t0=trace_now();
+    {
+        int gt=vsdlss_parallel_width((double)cf->n*4); (void)gt;
+        VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
+        for(csi i=0;i<cf->n;i++) local[i]=rhs[map[i]];
+    }
+    TRACE("solve: gather",t0);
     status=vsdlss_reduce_forward_inplace(r,local,saved);
     if(status!=VSDLSS_OK) goto done;
+    TRACE("solve: reduce forward",t0);
     if(core) {
         if(cf->disk) {
             for(k=0;k<core;k++) core_b[k]=local[r->core_vertices[k]];
@@ -225,10 +277,19 @@ static vsdlss_status solve_component(const vsdlss_m3_factor *factor,const double
             for(k=0;k<core;k++) local[r->core_vertices[cf->q[k]]]=core_b[k];
         }
     }
+    TRACE("solve: core",t0);
     status=vsdlss_reduce_backward_inplace(r,saved,local);
-    if(status==VSDLSS_OK) for(k=0;k<cf->n;k++) global[map[k]]=local[k];
+    TRACE("solve: reduce backward",t0);
+    if(status==VSDLSS_OK) {
+        int gt=vsdlss_parallel_width((double)cf->n*4); (void)gt;
+        VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
+        for(csi i=0;i<cf->n;i++) global[map[i]]=local[i];
+    }
+    TRACE("solve: scatter",t0);
 done:
-    free(local);free(saved);free(core_b);free(core_x);
+    if(own) atomic_store(&mcf->ws_busy,0);
+    else { free(local);free(saved);free(core_b); }
+    free(core_x);
     return status;
 }
 
@@ -264,12 +325,20 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
     double *global=NULL; vsdlss_status status;
     if(!factor || !factor->components || !factor->component || !rhs || !solution)
         return VSDLSS_ERR_INVALID;
+    vsdlss_m3_factor *mf=(vsdlss_m3_factor *)factor;   /* workspace only */
+    int own=0;
     if(!count_fits(factor->n,sizeof(*global))) return VSDLSS_ERR_OOM;
-    global=(double*)malloc((size_t)factor->n*sizeof(*global));
+    if(factor->ws_global && atomic_exchange(&mf->ws_busy,1)==0) { own=1; global=factor->ws_global; }
+    else global=(double*)malloc((size_t)factor->n*sizeof(*global));
     if(!global) return VSDLSS_ERR_OOM;
     status=solve_into(factor,rhs,global);
-    if(status==VSDLSS_OK) memcpy(solution,global,(size_t)factor->n*sizeof(*solution));
-    free(global); return status;
+    if(status==VSDLSS_OK) {
+        int gt=vsdlss_parallel_width((double)factor->n*4); (void)gt;
+        VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
+        for(csi i=0;i<factor->n;i++) solution[i]=global[i];
+    }
+    if(own) atomic_store(&mf->ws_busy,0); else free(global);
+    return status;
 }
 
 /* A batch of right-hand sides through every component: gather/reduce each
@@ -320,6 +389,9 @@ vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
         (uint64_t)(nrhs-1)>(SIZE_MAX/sizeof(double)-(uint64_t)f->n)/(uint64_t)ldrhs||
         (uint64_t)(nrhs-1)>(SIZE_MAX/sizeof(double)-(uint64_t)f->n)/(uint64_t)ldsolution)
         return VSDLSS_ERR_OOM;
+    /* One RHS: the single-solve path (cached workspace, parallel gather,
+     * block-parallel reduction, tree-parallel core) gives identical bits. */
+    if(nrhs==1)return vsdlss_m3_solve(f,rhs,solution);
     double *work=malloc((size_t)nrhs*(size_t)f->n*sizeof(double));
     vsdlss_status *results=calloc((size_t)nrhs,sizeof(*results)),status=VSDLSS_OK;
     if(!work||!results){free(work);free(results);return VSDLSS_ERR_OOM;}

@@ -40,14 +40,44 @@ vsdlss_status vsdlss_validate_upper_csc(const vsdlss *A)
         !checked_bytes(nnz, sizeof(csi), &ignored) ||
         !checked_bytes(nnz, sizeof(double), &ignored))
         return VSDLSS_ERR_INVALID;
-    for (j = 0; j < A->n; ++j) {
-        for (k = A->p[j]; k < A->p[j + 1]; ++k) {
-            if (A->i[k] < 0 || A->i[k] > j || A->i[k] >= A->m)
-                return VSDLSS_ERR_INVALID;
-            if (!isfinite(A->x[k])) return VSDLSS_ERR_NONFINITE;
+    /* Entry checks in parallel; the status of the first offending entry in
+     * column-major order is returned, exactly as a serial scan would. */
+    {
+        csi first_bad_index = INT64_MAX, first_bad_value = INT64_MAX;
+        int nt = vsdlss_parallel_width((double)nnz * 2);
+        (void)nt; (void)k;
+        if (nt <= 1) {
+            for (j = 0; j < A->n; ++j)
+                for (csi q = A->p[j]; q < A->p[j + 1]; ++q) {
+                    if (A->i[q] < 0 || A->i[q] > j || A->i[q] >= A->m) return VSDLSS_ERR_INVALID;
+                    if (!isfinite(A->x[q])) return VSDLSS_ERR_NONFINITE;
+                }
+            return VSDLSS_OK;
         }
+        VSDLSS_OMP(omp parallel for num_threads(nt) schedule(static) reduction(min:first_bad_index,first_bad_value))
+        for (csi c = 0; c < A->n; ++c) {
+            for (csi q = A->p[c]; q < A->p[c + 1]; ++q) {
+                if (A->i[q] < 0 || A->i[q] > c || A->i[q] >= A->m) { if (q < first_bad_index) first_bad_index = q; }
+                else if (!isfinite(A->x[q]) && q < first_bad_value) first_bad_value = q;
+            }
+        }
+        if (first_bad_index < first_bad_value) return VSDLSS_ERR_INVALID;
+        if (first_bad_value != INT64_MAX) return VSDLSS_ERR_NONFINITE;
     }
     return VSDLSS_OK;
+}
+
+/* Validated upper CSC whose columns are strictly increasing (sorted, no
+ * duplicates): exactly what vsdlss_normalize_upper would return. */
+int vsdlss_is_normalized_upper(const vsdlss *A)
+{
+    int ok = 1, nt = vsdlss_parallel_width((double)A->p[A->n] * 2);
+    (void)nt;
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static) reduction(&&:ok))
+    for (csi j = 0; j < A->n; ++j)
+        for (csi k = A->p[j] + 1; k < A->p[j + 1]; ++k)
+            if (A->i[k] <= A->i[k - 1]) ok = 0;
+    return ok;
 }
 
 /* Output length of one column after sorting and merging duplicates, or -1

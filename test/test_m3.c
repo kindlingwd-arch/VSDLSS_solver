@@ -299,17 +299,17 @@ static int test_reduction_rhs_nonempty_core_and_transactions(void)
     vsdlss_reduction_free(r);
 
     { vsdlss_elim_record record={0,1,{1,0,0},1,{2,0,0}};
-      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL};
+      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL};
       double huge[]={DBL_MAX,DBL_MAX}, outcore[]={8}, outsaved[]={9};
       CHECK(vsdlss_reduce_rhs(&fake,huge,outcore,outsaved)==VSDLSS_ERR_NONFINITE);
       CHECK(outcore[0]==8 && outsaved[0]==9); }
-    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL};
+    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL};
       double rhs[]={3,4}, core_only[2], recovered[2];
       CHECK(vsdlss_reduce_rhs(&no_elimination,rhs,core_only,NULL)==VSDLSS_OK);
       CHECK(core_only[0]==3 && core_only[1]==4);
       CHECK(vsdlss_reduce_recover(&no_elimination,NULL,core_only,recovered)==VSDLSS_OK);
       CHECK(recovered[0]==3 && recovered[1]==4); }
-    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL};
+    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL};
       CHECK(vsdlss_reduce_rhs(&empty,NULL,NULL,NULL)==VSDLSS_OK);
       CHECK(vsdlss_reduce_recover(&empty,NULL,NULL,NULL)==VSDLSS_OK); }
     return 0;

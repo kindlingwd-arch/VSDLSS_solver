@@ -192,7 +192,7 @@ static void test_mld_orders_grid_with_separator(void)
 }
 
 /* Catches leaving the post-M2 default on the older RCM strategy. */
-static void test_default_selector_is_mld(void)
+static void test_default_selector_is_amd(void)
 {
     vsdlss *A = make_grid(9);
     vsdlss_order_stats default_stats, mld_stats;
@@ -200,10 +200,11 @@ static void test_default_selector_is_mld(void)
     csi k;
     CHECK(A != NULL);
     if (!A) return;
+    /* mld_* hold the explicit AMD selector (5) here. */
     CHECK(vsdlss_order_analyze(A, 0, &default_q, &default_pinv, &default_stats) == VSDLSS_OK);
-    CHECK(vsdlss_order_analyze(A, 4, &mld_q, &mld_pinv, &mld_stats) == VSDLSS_OK);
+    CHECK(vsdlss_order_analyze(A, 5, &mld_q, &mld_pinv, &mld_stats) == VSDLSS_OK);
     if (default_q && mld_q) for (k = 0; k < A->n; ++k) CHECK(default_q[k] == mld_q[k]);
-    CHECK(default_stats.separator_count == mld_stats.separator_count);
+    CHECK(default_stats.predicted_nnz_l == mld_stats.predicted_nnz_l);
     CHECK(mld_stats.predicted_nnz_l > A->n);
     free(default_q); free(default_pinv); free(mld_q); free(mld_pinv);
     vsdlss_spfree(A);
@@ -271,7 +272,7 @@ int main(void)
     test_dynamic_minimum_degree_matches_boolean_oracle();
     test_minimum_degree_prediction_matches_actual_factor();
     test_mld_orders_grid_with_separator();
-    test_default_selector_is_mld();
+    test_default_selector_is_amd();
     test_mld_balanced_fallback_produces_separator();
     test_mld_orders_many_isolated_vertices();
     if (failures) {

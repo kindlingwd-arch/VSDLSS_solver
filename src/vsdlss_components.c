@@ -20,18 +20,26 @@ void vsdlss_components_free(vsdlss_components *components)
     free(components);
 }
 
+void vsdlss_wgraph_free(vsdlss_wgraph *g)
+{
+    if (!g) return;
+    free(g->ptr); free(g->idx); free(g->val); free(g->diag); free(g);
+}
+
 static vsdlss_status components_build_impl(const vsdlss *A,
                                            vsdlss_components **out,
-                                           int validate)
+                                           int validate, vsdlss_wgraph **graph)
 {
     vsdlss_components *components = NULL;
     csi *queue = NULL, *sizes = NULL, *adj_offset = NULL;
     csi *adj_cursor = NULL, *adjacent = NULL;
-    csi seed, head, tail, col, k, component, position, adjacency_n = 0;
+    double *adjval = NULL, *diag = NULL;
+    csi seed, head, tail, component, position, adjacency_n = 0;
     vsdlss_status status;
 
     if (!out) return VSDLSS_ERR_INVALID;
     *out = NULL;
+    if (graph) *graph = NULL;
     if (!A || A->n < 1)
         return VSDLSS_ERR_INVALID;
     if (A->n == INT64_MAX || !checked_count(A->n, sizeof(csi)) ||
@@ -48,22 +56,29 @@ static vsdlss_status components_build_impl(const vsdlss *A,
     components->component_of = (csi *)malloc((size_t)A->n * sizeof(csi));
     components->local_of = (csi *)malloc((size_t)A->n * sizeof(csi));
     components->order = (csi *)malloc((size_t)A->n * sizeof(csi));
-    sizes = (csi *)calloc((size_t)A->n, sizeof(csi));
+    /* Per-component sizes grow with the component count (usually tiny);
+     * the fill cursor borrows `vertices`, which is only written at the end. */
+    csi sizes_cap = 16;
+    sizes = (csi *)malloc((size_t)sizes_cap * sizeof(csi));
     adj_offset = (csi *)calloc((size_t)(A->n + 1), sizeof(csi));
-    adj_cursor = (csi *)malloc((size_t)A->n * sizeof(csi));
+    adj_cursor = components->vertices;
     if (!components->vertices || !components->component_of ||
-        !components->local_of || !components->order || !sizes || !adj_offset || !adj_cursor) {
+        !components->local_of || !components->order || !sizes || !adj_offset) {
         status = VSDLSS_ERR_OOM;
         goto fail;
     }
-    for (col = 0; col < A->n; ++col) {
-        for (k = A->p[col]; k < A->p[col + 1]; ++k) {
-            csi row = A->i[k];
-            if (row == col) continue;
-            if (adjacency_n > INT64_MAX - 2) { status = VSDLSS_ERR_OOM; goto fail; }
-            adjacency_n += 2;
-            ++adj_offset[row + 1];
-            ++adj_offset[col + 1];
+    /* Degrees: the lower part of vertex c is its own column, the upper part
+     * is scattered from later columns.  Kept serial: with atomics the random
+     * scatter was slower on two threads than on one (cache-line traffic). */
+    {
+        for (csi c = 0; c < A->n; ++c) {
+            csi low = 0;
+            for (csi q = A->p[c]; q < A->p[c + 1]; ++q) {
+                csi row = A->i[q];
+                if (row == c) continue;
+                ++low; ++adj_offset[row + 1];
+            }
+            adj_offset[c + 1] += low; adj_cursor[c] = low; adjacency_n += 2 * low;
         }
     }
     for (seed = 0; seed < A->n; ++seed) {
@@ -71,21 +86,35 @@ static vsdlss_status components_build_impl(const vsdlss *A,
             status = VSDLSS_ERR_OOM; goto fail;
         }
         adj_offset[seed + 1] += adj_offset[seed];
-        adj_cursor[seed] = adj_offset[seed];
     }
     if (!checked_count(adjacency_n, sizeof(csi))) { status = VSDLSS_ERR_OOM; goto fail; }
     if (adjacency_n > 0) {
         adjacent = (csi *)malloc((size_t)adjacency_n * sizeof(csi));
         if (!adjacent) { status = VSDLSS_ERR_OOM; goto fail; }
     }
-    for (col = 0; col < A->n; ++col) {
-        for (k = A->p[col]; k < A->p[col + 1]; ++k) {
-            csi row = A->i[k];
-            if (row == col) continue;
-            adjacent[adj_cursor[row]++] = col;
-            adjacent[adj_cursor[col]++] = row;
+    if (graph) {
+        adjval = (double *)malloc((size_t)(adjacency_n > 0 ? adjacency_n : 1) * sizeof(double));
+        diag = (double *)calloc((size_t)A->n, sizeof(double));
+        if (!adjval || !diag) { status = VSDLSS_ERR_OOM; goto fail; }
+    }
+    /* Each list is [neighbours < v (column v, in order)] [neighbours > v in
+     * increasing column order], i.e. ascending for normalized input. */
+    for (seed = 0; seed < A->n; ++seed) adj_cursor[seed] = adj_offset[seed] + adj_cursor[seed];
+    {
+        const csi *Ap = A->p, *Ai = A->i; const double *Ax = A->x;
+        for (csi c = 0; c < A->n; ++c) {
+            csi lo = adj_offset[c];
+            for (csi q = Ap[c]; q < Ap[c + 1]; ++q) {
+                csi row = Ai[q], at;
+                if (row == c) { if (diag) diag[c] += Ax[q]; continue; }
+                at = adj_cursor[row]++;
+                adjacent[lo] = row; adjacent[at] = c;
+                if (adjval) { adjval[lo] = Ax[q]; adjval[at] = Ax[q]; }
+                ++lo;
+            }
         }
     }
+
     for (seed = 0; seed < A->n; ++seed) components->component_of[seed] = -1;
 
     component = 0;
@@ -94,13 +123,19 @@ static vsdlss_status components_build_impl(const vsdlss *A,
     for (seed = 0; seed < A->n; ++seed) {
         if (components->component_of[seed] >= 0) continue;
         /* The BFS queue is written straight into `order`. */
+        if (component == sizes_cap) {
+            csi *grown;
+            if (sizes_cap > INT64_MAX / 2 || !checked_count(2 * sizes_cap, sizeof(csi))) { status = VSDLSS_ERR_OOM; goto fail; }
+            grown = (csi *)realloc(sizes, (size_t)(2 * sizes_cap) * sizeof(csi));
+            if (!grown) { status = VSDLSS_ERR_OOM; goto fail; }
+            sizes = grown; sizes_cap *= 2;
+        }
         queue = components->order + discovered;
         head = 0; tail = 1; queue[0] = seed;
         components->component_of[seed] = component;
         while (head < tail) {
             csi v = queue[head++];
             csi at;
-            ++sizes[component];
             for (at = adj_offset[v]; at < adj_offset[v + 1]; ++at) {
                 csi neighbor = adjacent[at];
                 if (components->component_of[neighbor] < 0) {
@@ -110,6 +145,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
             }
         }
         discovered += tail;
+        sizes[component] = tail;
         ++component;
     }
     }
@@ -131,12 +167,20 @@ static vsdlss_status components_build_impl(const vsdlss *A,
      * already follow `offset`; convert global vertices to local indices. */
     for (seed = 0; seed < A->n; ++seed)
         components->order[seed] = components->local_of[components->order[seed]];
-    free(sizes); free(adj_offset); free(adj_cursor); free(adjacent);
+    if (graph) {
+        vsdlss_wgraph *g = (vsdlss_wgraph *)calloc(1, sizeof(*g));
+        if (!g) { status = VSDLSS_ERR_OOM; goto fail; }
+        g->n = A->n; g->ptr = adj_offset; g->idx = adjacent; g->val = adjval; g->diag = diag;
+        if (!g->idx) { g->idx = (csi *)malloc(sizeof(csi)); if (!g->idx) { free(g); status = VSDLSS_ERR_OOM; goto fail; } }
+        adj_offset = NULL; adjacent = NULL; adjval = NULL; diag = NULL;
+        *graph = g;
+    }
+    free(sizes); free(adj_offset); free(adjacent); free(adjval); free(diag);
     *out = components;
     return VSDLSS_OK;
 
 fail:
-    free(sizes); free(adj_offset); free(adj_cursor); free(adjacent);
+    free(sizes); free(adj_offset); free(adjacent); free(adjval); free(diag);
     vsdlss_components_free(components);
     return status;
 }
@@ -144,13 +188,20 @@ fail:
 vsdlss_status vsdlss_components_build(const vsdlss *A,
                                       vsdlss_components **out)
 {
-    return components_build_impl(A, out, 1);
+    return components_build_impl(A, out, 1, NULL);
 }
 
 vsdlss_status vsdlss_components_build_normalized(const vsdlss *A,
                                                  vsdlss_components **out)
 {
-    return components_build_impl(A, out, 0);
+    return components_build_impl(A, out, 0, NULL);
+}
+
+vsdlss_status vsdlss_components_build_graph(const vsdlss *A, vsdlss_components **out,
+                                            vsdlss_wgraph **graph)
+{
+    if (!graph) return VSDLSS_ERR_INVALID;
+    return components_build_impl(A, out, 0, graph);
 }
 
 static vsdlss_status component_extract_impl(const vsdlss *A,

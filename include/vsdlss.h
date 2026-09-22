@@ -79,6 +79,8 @@ int vsdlss_parallel_last_team_size(void);
 vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *, csi nrhs,
     const double *rhs, csi ldrhs, double *solutions, csi ldsolutions);
 
+/* order: 0 = default (AMD), 1 = RCM, 2 = natural, 3 = exact minimum degree,
+ * 4 = MLD (multilevel nested dissection), 5 = AMD.  0/5 are recommended. */
 vsdlss_status vsdlss_factorize(const vsdlss *A, int order, vsdlss_factor **out);
 vsdlss_status vsdlss_factor_solve(const vsdlss_factor *factor,
                                   const double *rhs, double *solution);

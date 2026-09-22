@@ -2,6 +2,7 @@
 #define VSDLSS_M3_INTERNAL_H
 
 #include "vsdlss.h"
+#include <stdatomic.h>
 
 typedef struct vsdlss_components {
     csi n, count;
@@ -24,6 +25,11 @@ typedef struct vsdlss_reduction {
     vsdlss_elim_record *records;
     csi *core_vertices;
     vsdlss *core;
+    /* Optional: records [block_ptr[b], block_ptr[b+1]) for b < blocks came
+     * from the parallel block pass and touch only that block's vertices, so
+     * blocks can be replayed concurrently; the rest follow sequentially. */
+    csi blocks;
+    csi *block_ptr;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -61,6 +67,9 @@ typedef struct vsdlss_sn_factor {
     csi *column_start, *row_ptr, *row_index, *panel_offset;
     double *panel;        /* panel_offset[count] values */
     void *panel_block;    /* allocation owning `panel` (may be aligned inside) */
+    /* Tree and source blocks (copied from the symbolic layout) for the
+     * tree-parallel triangular solves. */
+    csi *sn_parent, *blk_ptr, *blk_src, *blk_first, *blk_end;
 } vsdlss_sn_factor;
 
 typedef struct vsdlss_m3_component_factor {
@@ -70,16 +79,38 @@ typedef struct vsdlss_m3_component_factor {
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
     csi *q;                      /* q[new] = old for the reduced core */
     vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
+    /* Solve workspace allocated with the factor, so repeated solves do not
+     * allocate (and fault in) large buffers.  A solve takes it with an
+     * atomic flag; a concurrent solve on the same factor falls back to
+     * private buffers. */
+    double *ws_local, *ws_saved, *ws_core;
+    atomic_int ws_busy;
 } vsdlss_m3_component_factor;
 
 struct vsdlss_m3_factor {
     csi n, count;
     int disk_mode;
+    double *ws_global;                   /* staging buffer for vsdlss_m3_solve */
+    atomic_int ws_busy;
     vsdlss_components *components;       /* owns global/local maps */
     vsdlss_m3_component_factor *component; /* count owned entries */
 };
 
+/* Symmetric weighted adjacency (no diagonal in idx/val; diag separate). */
+typedef struct vsdlss_wgraph {
+    csi n;
+    csi *ptr;        /* n+1 */
+    csi *idx;        /* ptr[n] neighbours, ascending per vertex */
+    double *val;     /* ptr[n] off-diagonal values */
+    double *diag;    /* n */
+} vsdlss_wgraph;
+void vsdlss_wgraph_free(vsdlss_wgraph *);
+/* For a validated upper CSC: 1 if every column is strictly increasing. */
+int vsdlss_is_normalized_upper(const vsdlss *A);
 vsdlss_status vsdlss_components_build(const vsdlss *, vsdlss_components **);
+/* Normalized input; also returns the weighted adjacency built on the way. */
+vsdlss_status vsdlss_components_build_graph(const vsdlss *, vsdlss_components **,
+                                            vsdlss_wgraph **);
 vsdlss_status vsdlss_components_build_normalized(const vsdlss *,
                                                  vsdlss_components **);
 vsdlss_status vsdlss_component_extract(const vsdlss *, const vsdlss_components *,
@@ -97,6 +128,16 @@ vsdlss_status vsdlss_reduce(const vsdlss *, vsdlss_reduction **);
 /* Same, but takes ownership of *A and frees it as soon as the adjacency is
  * built (always freed; *A is NULL on return). */
 vsdlss_status vsdlss_reduce_consume(vsdlss **A, vsdlss_reduction **);
+/* Two-step form: prepare the adjacency (from CSC, or from a component of a
+ * weighted graph renumbered by map: new -> graph vertex, newidx: graph vertex
+ * -> new), then run the elimination, which consumes the input. */
+typedef struct vsdlss_reduce_input vsdlss_reduce_input;
+vsdlss_status vsdlss_reduce_prepare_csc(const vsdlss *A, vsdlss_reduce_input **);
+vsdlss_status vsdlss_reduce_prepare_graph(const csi *ptr, const csi *idx, const double *val,
+                                          const double *diag, const csi *map, csi n,
+                                          const csi *newidx, vsdlss_reduce_input **);
+vsdlss_status vsdlss_reduce_run(vsdlss_reduce_input *, vsdlss_reduction **);
+void vsdlss_reduce_input_free(vsdlss_reduce_input *);
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *, const double *,
                                 double *, double *);
 vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *, const double *,

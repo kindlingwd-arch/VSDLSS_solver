@@ -9,6 +9,7 @@
 static void usage(const char *program)
 {
     fprintf(stderr, "usage: %s [-p 0|1|2|3|4|5] [--demo-rhs] [--disk-budget bytes] [--temp-dir path] [--block-cols n] [--save-factor path] [--load-factor path] [--m3] [--m4-reduced] [--dag] [--threads n] <job>\n", program);
+    fprintf(stderr, "  -p: 0/5 = AMD (default, recommended), 1 = RCM, 2 = natural, 3 = minimum degree, 4 = MLD\n");
 }
 
 int main(int argc, char **argv)

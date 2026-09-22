@@ -44,7 +44,7 @@ static void add(edges *E,csi a,csi b,double g){E->a[E->m]=a;E->b[E->m]=b;E->g[E-
 int main(int argc,char **argv)
 {
     int order=argc>1?atoi(argv[1]):5, threads=argc>2?atoi(argv[2]):1;
-    int nrhs=argc>3?atoi(argv[3]):2, shuffle=argc>4?atoi(argv[4]):1;
+    int nrhs=argc>3?atoi(argv[3]):1, shuffle=argc>4?atoi(argv[4]):1;
     csi N=22875397,D1=2561262,D2=15270759,D3=5000468,D4=42895,D5=10,D6=3;
     if(argc>11){N=atoll(argv[5]);D1=atoll(argv[6]);D2=atoll(argv[7]);D3=atoll(argv[8]);
         D4=atoll(argv[9]);D5=atoll(argv[10]);D6=atoll(argv[11]);}
@@ -212,11 +212,15 @@ int main(int argc,char **argv)
     for(csi i=0;i<(csi)n*nrhs;i++)b[i]=uni(-1e-3,0);
     tt=now();st=vsdlss_m3_solve(f,b,x);double ts=now()-tt;
     if(st!=VSDLSS_OK){printf("solve failed: %s\n",vsdlss_status_string(st));return 1;}
+    /* Repeated solves reuse the factor's workspace: report the warm time. */
+    double warm=1e30;
+    for(int rep=0;rep<3;rep++){tt=now();st=vsdlss_m3_solve(f,b,x);double w=now()-tt;if(w<warm)warm=w;
+        if(st!=VSDLSS_OK){printf("solve failed\n");return 1;}}
     double eta;vsdlss_backward_error(A,x,b,&eta);
     tt=now();st=vsdlss_m3_solve_many(f,nrhs,b,n,x,n);double tm=now()-tt;
     if(st!=VSDLSS_OK){printf("solve_many failed: %s\n",vsdlss_status_string(st));return 1;}
-    printf("# solve: single=%.2fs batch%d=%.2fs (%.2fs/RHS) backward_error=%.2e peak_rss=%ld MB\n",
-           ts,nrhs,tm,tm/nrhs,eta,peak_rss_mb());
+    printf("# solve: first=%.2fs warm=%.2fs batch%d=%.2fs (%.2fs/RHS) backward_error=%.2e peak_rss=%ld MB\n",
+           ts,warm,nrhs,tm,tm/nrhs,eta,peak_rss_mb());
     vsdlss_m3_factor_free(f);vsdlss_spfree(A);free(b);free(x);
     return 0;
 }
