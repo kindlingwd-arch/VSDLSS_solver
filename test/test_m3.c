@@ -315,33 +315,50 @@ static int test_reduction_rhs_nonempty_core_and_transactions(void)
     return 0;
 }
 
-static int check_symbolic_mapping(const vsdlss_sn_symbolic *s)
+/* Compare the stored panel pattern with the pattern of the scalar M1 factor
+ * of the same (unpermuted, order 2) matrix: equal for strict analysis, a
+ * superset for relaxed analysis.  Also checks the source-block lists against
+ * a brute-force recomputation from the panel rows. */
+static int check_symbolic_mapping(const vsdlss *A, const vsdlss_sn_symbolic *s, int strict)
 {
-    csi k, sn, width, rows, slot, local_col, local_row;
-    unsigned char *seen;
-    CHECK(s && s->l_nnz >= 0);
-    seen = calloc((size_t)(s->panel_offset[s->count] ?
-                          s->panel_offset[s->count] : 1), 1);
-    CHECK(seen);
-    for (k = 0; k < s->l_nnz; ++k) {
-        slot = s->l_panel_slot[k];
-        CHECK(slot >= 0 && slot < s->panel_offset[s->count]);
-        CHECK(!seen[slot]); seen[slot] = 1;
-        for (sn = 0; sn + 1 < s->count &&
-             slot >= s->panel_offset[sn + 1]; ++sn) {}
-        width = s->column_start[sn + 1] - s->column_start[sn];
-        rows = width + s->row_ptr[sn + 1] - s->row_ptr[sn];
-        local_col = (slot - s->panel_offset[sn]) / rows;
-        local_row = (slot - s->panel_offset[sn]) % rows;
-        CHECK(local_col >= 0 && local_col < width && local_row >= local_col);
-        CHECK(s->column_start[sn]+local_col >= 0);
-        if (local_row < width)
-            CHECK(s->l_row_index[k] == s->column_start[sn] + local_row);
-        else
-            CHECK(s->l_row_index[k] ==
-                  s->row_index[s->row_ptr[sn] + local_row - width]);
+    vsdlss_factor *m1 = NULL; const vsdlss *L; csi n = A->n, sn, j, k, nz = 0;
+    unsigned char *in_panel;
+    CHECK(s && s->n == n && s->count >= 1 && s->column_start[0] == 0 &&
+          s->column_start[s->count] == n);
+    CHECK(vsdlss_factorize(A, 2, &m1) == VSDLSS_OK);
+    L = vsdlss_factor_L(m1);
+    in_panel = calloc((size_t)(n * n), 1); CHECK(in_panel);
+    for (sn = 0; sn < s->count; ++sn) {
+        csi b = s->column_start[sn], e = s->column_start[sn + 1];
+        csi ext = s->row_ptr[sn + 1] - s->row_ptr[sn];
+        const csi *R = s->row_index + s->row_ptr[sn];
+        CHECK(e > b && s->panel_offset[sn + 1] - s->panel_offset[sn] == (e - b + ext) * (e - b));
+        for (k = 0; k < ext; ++k) CHECK(R[k] >= e && R[k] < n && (!k || R[k] > R[k - 1]));
+        CHECK(ext || s->sn_parent[sn] == -1);
+        for (j = b; j < e; ++j) {
+            for (k = j; k < e; ++k) { in_panel[j * n + k] = 1; ++nz; }
+            for (k = 0; k < ext; ++k) { in_panel[j * n + R[k]] = 1; ++nz; }
+        }
+        /* brute-force source blocks of every target */
+        for (k = 0; k < ext;) {
+            csi d = 0, e2 = k + 1, found = 0, bb;
+            while (!(R[k] >= s->column_start[d] && R[k] < s->column_start[d + 1])) ++d;
+            while (e2 < ext && R[e2] < s->column_start[d + 1]) ++e2;
+            if (k == 0) CHECK(s->sn_parent[sn] == d);
+            for (bb = s->blk_ptr[d]; bb < s->blk_ptr[d + 1]; ++bb)
+                if (s->blk_src[bb] == sn) {
+                    CHECK(!found && s->blk_first[bb] == k && s->blk_end[bb] == e2);
+                    found = 1;
+                }
+            CHECK(found); k = e2;
+        }
     }
-    free(seen); return 0;
+    CHECK(nz == s->l_nnz);
+    for (j = 0; j < n; ++j) for (k = L->p[j]; k < L->p[j + 1]; ++k)
+        CHECK(in_panel[j * n + L->i[k]]);
+    if (strict) CHECK(L->p[n] == s->l_nnz && s->relaxed_zeros == 0);
+    else CHECK(s->l_nnz - L->p[n] == s->relaxed_zeros);
+    free(in_panel); vsdlss_factor_free(m1); return 0;
 }
 
 static int test_symbolic_dense4_and_tridiagonal4(void)
@@ -352,7 +369,7 @@ static int test_symbolic_dense4_and_tridiagonal4(void)
     CHECK(vsdlss_sn_analyze(&D,&s)==VSDLSS_OK);
     CHECK(s->count==1 && s->column_start[0]==0 && s->column_start[1]==4);
     CHECK(s->row_ptr[1]==0 && s->panel_offset[1]==16 && s->l_nnz==10);
-    CHECK(check_symbolic_mapping(s)==0); vsdlss_sn_symbolic_free(s); s=NULL;
+    CHECK(check_symbolic_mapping(&D,s,1)==0); vsdlss_sn_symbolic_free(s); s=NULL;
     { csi p[]={0,1,3,5,7}, i[]={0,0,1,1,2,2,3};
       double x[]={4,1,4,1,4,1,4}; vsdlss A={7,4,4,p,i,x,-1};
       CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK);
@@ -360,7 +377,7 @@ static int test_symbolic_dense4_and_tridiagonal4(void)
             s->column_start[2]==2 && s->column_start[3]==4);
       CHECK(s->row_ptr[0]==0 && s->row_ptr[1]==1 && s->row_ptr[2]==2 &&
             s->row_ptr[3]==2);
-      CHECK(check_symbolic_mapping(s)==0); vsdlss_sn_symbolic_free(s); }
+      CHECK(check_symbolic_mapping(&A,s,1)==0); vsdlss_sn_symbolic_free(s); }
     return 0;
 }
 
@@ -370,25 +387,17 @@ static int test_symbolic_single_shared_updates_and_failures(void)
     double x[]={8,1,8,1,8,1,1,8,1,1,8};
     vsdlss A={11,5,5,p,i,x,-1}; vsdlss_sn_symbolic *s=NULL;
     CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK);
-    { const csi cs[]={0,1,5}, lp[]={0,3,7,10,12,13};
-      const csi li[]={0,1,2,1,2,3,4,2,3,4,3,4,4};
-      const csi rp[]={0,2,2}, ri[]={1,2}, po[]={0,3,19};
-      const csi lm[]={0,1,2,3,4,5,6,8,9,10,13,14,18};
-      const csi up[]={0,3,3}, ut[]={3,4,8}; csi k;
-      CHECK(s->count==2 && s->l_nnz==13);
+    { const csi cs[]={0,1,5}, rp[]={0,2,2}, ri[]={1,2}, po[]={0,3,19}; csi k;
+      CHECK(s->count==2 && s->l_nnz==13 && s->max_rows==4);
       for(k=0;k<3;k++) CHECK(s->column_start[k]==cs[k] &&
                              s->row_ptr[k]==rp[k] &&
-                             s->panel_offset[k]==po[k] &&
-                             s->update_ptr[k]==up[k]);
-      for(k=0;k<6;k++) CHECK(s->l_col_ptr[k]==lp[k]);
-      for(k=0;k<13;k++) CHECK(s->l_row_index[k]==li[k] &&
-                              s->l_panel_slot[k]==lm[k]);
+                             s->panel_offset[k]==po[k]);
       for(k=0;k<2;k++) CHECK(s->row_index[k]==ri[k]);
-      for(k=0;k<3;k++) CHECK(s->update_target[k]==ut[k]); }
-    CHECK(check_symbolic_mapping(s)==0);
-    { csi k; for(k=0;k<s->update_ptr[s->count];++k)
-        CHECK(s->update_target[k]>=0 &&
-              s->update_target[k]<s->panel_offset[s->count]); }
+      /* panel 0 updates panel 1 through one block covering both rows */
+      CHECK(s->blk_ptr[0]==0 && s->blk_ptr[1]==0 && s->blk_ptr[2]==1);
+      CHECK(s->blk_src[0]==0 && s->blk_first[0]==0 && s->blk_end[0]==2);
+      CHECK(s->sn_parent[0]==1 && s->sn_parent[1]==-1); }
+    CHECK(check_symbolic_mapping(&A,s,1)==0);
     vsdlss_sn_symbolic_free(s); s=(vsdlss_sn_symbolic *)1;
     /* Two distinct source panels both update the later column-4 panel. */
     { csi gp[]={0,1,2,4,5,7,8}, gi[]={0,1,0,2,3,0,4,5};
@@ -397,10 +406,12 @@ static int test_symbolic_single_shared_updates_and_failures(void)
       CHECK(vsdlss_sn_analyze(&G,&s)==VSDLSS_OK && s->count==6);
       for(k=0;k<7;k++) CHECK(s->column_start[k]==cs[k] && s->row_ptr[k]==rp[k]);
       CHECK(s->row_index[0]==2 && s->row_index[1]==4 && s->row_index[2]==4);
-      CHECK(s->update_ptr[1]==3 && s->update_ptr[2]==3 &&
-            s->update_ptr[3]==4);
-      CHECK(s->update_target[2]==s->update_target[3]);
-      CHECK(check_symbolic_mapping(s)==0); vsdlss_sn_symbolic_free(s); }
+      /* panel 4 receives blocks from sources 0 and 2, in source order */
+      CHECK(s->blk_ptr[4]-s->blk_ptr[2]==1 && s->blk_ptr[5]-s->blk_ptr[4]==2);
+      CHECK(s->blk_src[s->blk_ptr[2]]==0 && s->blk_end[s->blk_ptr[2]]==1);
+      CHECK(s->blk_src[s->blk_ptr[4]]==0 && s->blk_first[s->blk_ptr[4]]==1);
+      CHECK(s->blk_src[s->blk_ptr[4]+1]==2);
+      CHECK(check_symbolic_mapping(&G,s,1)==0); vsdlss_sn_symbolic_free(s); }
     s=(vsdlss_sn_symbolic *)1;
     { csi q[]={0,1}, j[]={0}; double y[]={1}; vsdlss one={1,1,1,q,j,y,-1};
       CHECK(vsdlss_sn_analyze(&one,&s)==VSDLSS_OK && s->count==1 &&
@@ -472,13 +483,6 @@ static int test_numeric_heterogeneous_shared_updates_and_reconstruction(void)
     return 0;
 }
 
-static csi panel_owner(const vsdlss_sn_symbolic *s, csi slot)
-{
-    csi sn;
-    for(sn=0;sn<s->count;sn++)
-        if(slot>=s->panel_offset[sn]&&slot<s->panel_offset[sn+1]) return sn;
-    return -1;
-}
 
 static int test_numeric_multiple_destinations_and_shared_target(void)
 {
@@ -489,9 +493,9 @@ static int test_numeric_multiple_destinations_and_shared_target(void)
     CHECK(vsdlss_sn_analyze(&A,&s)==VSDLSS_OK && s->count>2);
     /* Source panel 0 scatters to panels 2 and 4.  Panels 0 and 2 both
        contribute to the diagonal slot in the later panel 4. */
-    CHECK(panel_owner(s,s->update_target[0])==2);
-    CHECK(panel_owner(s,s->update_target[2])==4);
-    CHECK(s->update_target[2]==s->update_target[s->update_ptr[2]]);
+    CHECK(s->sn_parent[0]==2 && s->blk_src[s->blk_ptr[2]]==0);
+    CHECK(s->blk_ptr[5]-s->blk_ptr[4]==2 && s->blk_src[s->blk_ptr[4]]==0 &&
+          s->blk_src[s->blk_ptr[4]+1]==2);
     CHECK(vsdlss_sn_factorize(&A,s,&f)==VSDLSS_OK);
     CHECK(vsdlss_sn_export_L(f,&L)==VSDLSS_OK); dense_from_csc(L,dense);
     CHECK(vsdlss_factorize(&A,2,&m1)==VSDLSS_OK);
@@ -535,10 +539,9 @@ static int test_numeric_errors_are_transactional(void)
       csi one[]={0}; vsdlss one_A={1,1,1,one_p,one_i,one_x,-1};
       vsdlss_sn_symbolic huge_count={0};
       huge_count.n=1; huge_count.count=INT64_MAX; huge_count.l_nnz=1;
-      huge_count.l_col_ptr=one; huge_count.l_row_index=one;
-      huge_count.l_panel_slot=one; huge_count.column_start=one;
+      huge_count.column_start=one; huge_count.sn_parent=one;
       huge_count.row_ptr=one; huge_count.panel_offset=one;
-      huge_count.update_ptr=one; f=(vsdlss_sn_factor*)1;
+      huge_count.blk_ptr=one; f=(vsdlss_sn_factor*)1;
       CHECK(vsdlss_sn_factorize(&one_A,&huge_count,&f)==VSDLSS_ERR_OOM&&f==NULL); }
     { vsdlss_sn_symbolic malformed={0}; f=(vsdlss_sn_factor*)1;
       malformed.n=2; malformed.count=1; malformed.l_nnz=1;
@@ -706,7 +709,16 @@ static int compare_graph(const vsdlss *A,int expected_layout,int require_degree3
     CHECK(!expected_layout||r->core_n>0); CHECK(!require_degree3||d3>0);
     if(expected_layout){CHECK(vsdlss_sn_analyze(r->core,&s)==VSDLSS_OK);CHECK(vsdlss_sn_factorize(r->core,s,&sn)==VSDLSS_OK);
         if(expected_layout==1){CHECK(s->count==1);CHECK(s->row_ptr[s->count]==0);}
-        else {CHECK(s->count>1);CHECK(s->row_ptr[s->count]>0);CHECK(s->update_ptr[s->count]>0);CHECK(sn->count==s->count);CHECK(sn->row_ptr[sn->count]>0);}}
+        else {CHECK(s->count>1);CHECK(s->row_ptr[s->count]>0);CHECK(s->blk_ptr[s->count]>0);CHECK(sn->count==s->count);CHECK(sn->row_ptr[sn->count]>0);}
+        CHECK(check_symbolic_mapping(r->core,s,1)==0);
+        { vsdlss_sn_symbolic *rs=NULL; vsdlss_sn_factor *rf=NULL; double xr[128],br[128];
+          CHECK(vsdlss_sn_analyze_relaxed(r->core,&rs)==VSDLSS_OK);
+          CHECK(rs->count<=s->count && check_symbolic_mapping(r->core,rs,0)==0);
+          CHECK(vsdlss_sn_factorize(r->core,rs,&rf)==VSDLSS_OK);
+          for(k=0;k<r->core_n;k++) br[k]=cos((double)k);
+          CHECK(vsdlss_sn_solve(rf,br,xr)==VSDLSS_OK);
+          { double eta; CHECK(vsdlss_backward_error(r->core,xr,br,&eta)==VSDLSS_OK&&eta<=1e-12); }
+          vsdlss_sn_factor_free(rf); vsdlss_sn_symbolic_free(rs); }}
     for(k=0;k<A->n;k++){CHECK(fabs(xm1[k]-xo[k])<2e-11);CHECK(fabs(xm3[k]-xo[k])<2e-11);}
     CHECK(vsdlss_backward_error(A,xm1,b,&eta1)==VSDLSS_OK&&eta1<=1e-12);
     CHECK(vsdlss_backward_error(A,xm3,b,&eta3)==VSDLSS_OK&&eta3<=1e-12);

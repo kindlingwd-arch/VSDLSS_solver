@@ -61,10 +61,16 @@ int main(void){
  double scalar=6;CHECK(vsdlss_m4_reduced_solve(f,&scalar,&scalar)==VSDLSS_OK&&scalar==3);
  vsdlss_m4_reduced_free(f);vsdlss_spfree(a);
  a=grid(8);CHECK(a);csi n=a->n;
+ /* Fill-reducing order + postorder give the bushy supernodal tree that the
+  * subtree scheduler parallelises (natural grid order is a chain). */
+ { csi *q=NULL,*pinv=NULL;vsdlss *p=NULL;
+   CHECK(vsdlss_order(a,5,&q,&pinv)==VSDLSS_OK);
+   CHECK(vsdlss_postorder_permutation(a,q,pinv)==VSDLSS_OK);
+   p=vsdlss_symperm(a,pinv,1);CHECK(p);vsdlss_spfree(a);a=p;free(q);free(pinv); }
  double *b=malloc(n*sizeof(double)),*ref=malloc(n*sizeof(double)),*out=malloc(n*sizeof(double));CHECK(b&&ref&&out);
  for(csi i=0;i<n;i++)b[i]=sin(i+0.2);
  vsdlss_sn_symbolic *s=NULL;vsdlss_sn_factor *one=NULL,*many=NULL;
- CHECK(vsdlss_sn_analyze(a,&s)==VSDLSS_OK&&s->count>1);
+ CHECK(vsdlss_sn_analyze_relaxed(a,&s)==VSDLSS_OK&&s->count>1);
  CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
  double start=now();
  CHECK(vsdlss_sn_factorize(a,s,&one)==VSDLSS_OK);
@@ -83,7 +89,7 @@ int main(void){
   double eta;CHECK(vsdlss_backward_error(a,out,b,&eta)==VSDLSS_OK&&eta<1e-12);
   vsdlss_sn_factor_free(many);many=NULL;
  }
- a->x[a->p[n-1+1]-1]=-1;
+ for(csi k=a->p[n-1];k<a->p[n];k++)if(a->i[k]==n-1)a->x[k]=-1;
  CHECK(vsdlss_sn_factorize(a,s,&many)==VSDLSS_ERR_NOT_POSDEF&&many==NULL);
  vsdlss_sn_factor_free(one);vsdlss_sn_symbolic_free(s);vsdlss_spfree(a);free(b);free(ref);free(out);
  CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);

@@ -13,7 +13,8 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_components.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
            src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m4.c \
-           src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c
+           src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c \
+           src/vsdlss_dense.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
 .PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel bench-parallel bench-m3 bench-sn sanitizers clean
@@ -57,7 +58,7 @@ test_m3: test/test_m3.c test/m3_test_alloc.c test/m3_test_alloc.h $(LIBSRCS) inc
 test-m3: test_m3
 	./test_m3
 
-test: all test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel
+test: all test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel test-supernodal
 	python3 test/gen_sparse.py test_sparse 10
 	./vsdlss_solver test_sparse
 	./vsdlss_solver --disk-budget 8192 test_sparse
@@ -66,13 +67,13 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag
+	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal
 
-src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
+src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag bench_parallel bench_m3 bench_sn test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_parallel bench_m3 bench_sn test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -163,3 +164,11 @@ smoke: quickstart
 
 dist:
 	python3 tools/package_source.py
+
+test_supernodal: test/test_supernodal.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h src/vsdlss_dense.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_supernodal.c $(LIBSRCS) $(LDLIBS)
+
+test-supernodal: test_supernodal
+	./test_supernodal
+
+.PHONY: test-supernodal
