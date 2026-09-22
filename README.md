@@ -2,7 +2,7 @@
 
 首次测试：`make smoke`。完整测试、C API、CLI、错误处理与发包说明见 [用户说明](docs/user/QUICKSTART.md)。源码发包：`make dist`。
 
-本次附件合并与独立验证见 [2026-09-22 合并记录](docs/reconstruction/18-refactor-merge-20260922.md)。
+附件合并记录见 [第一批](docs/reconstruction/18-refactor-merge-20260922.md) 与 [第二批](docs/reconstruction/20-attachment-merge-20260922.md)。第二批合并后尚未执行构建与测试，复现命令见第 20 篇。
 
 最新重构与实测结果见 [2026-09-21 左视超节点重构](docs/reconstruction/17-left-looking-refactor-20260921.md) 与 [2026-09-22 电源网格预处理优化](docs/reconstruction/18-powergrid-preprocessing-20260922.md)（`make bench-powergrid`）、[2026-09-22 单次分解/求解效率](docs/reconstruction/19-single-solve-efficiency-20260922.md)（`make bench-pg-profile`）（此前的整合记录见 [16](docs/reconstruction/16-main-integration-20260921.md)）。M3 采用后序 + 宽松合并超节点与左视数值分解，M4 采用严格超节点；默认排序（`-p 0`）自 2026-09-22 起为 AMD，与 `-p 5` 相同；MLD 用 `-p 4` 显式选择。
 

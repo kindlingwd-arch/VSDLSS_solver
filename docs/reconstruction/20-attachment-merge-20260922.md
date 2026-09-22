@@ -1,0 +1,64 @@
+# 2026-09-22 第二批附件合并记录
+
+## 来源及去重
+
+基线为 main `8e90ef6`。用户同时提供 `vsdlss-refactor_2.patch` 和 `vsdlss-refactor_2.bundle`。
+
+bundle 头为 `1d3fad08028d7e1584d7d56a7a7b97aaccb4b339`（`refs/heads/refactor/left-looking-supernodal`），`git bundle verify` 通过，所需前置为 `ec35ee1`，在 main 历史中。patch 含 6 个提交：
+
+| 序号 | 提交 | 主题 |
+|---|---|---|
+| 1/6 | `c0e6ee5` | perf(mld): remove quadratic steps from MLD ordering |
+| 2/6 | `7241378` | refactor: left-looking supernodal core with blocked dense kernels |
+| 3/6 | `1189871` | perf(reduction): arena adjacency + bitmap buckets |
+| 4/6 | `0f98909` | perf(m3): locality renumbering, blocked parallel reduction |
+| 5/6 | `2c05e8f` | bench: customer degree-profile power grid (22.9M nodes) |
+| 6/6 | `1d3fad0` | M3: AMD default, merged components+renumbering, parallel cached solve |
+
+去重检查：
+
+- 将 patch 的 6 个提交在 `ec35ee1` 上以 `git am` 应用，最终树与 bundle 头 `1d3fad0` 逐文件完全一致。两个附件是同一份工作，只合一次。
+- 第 1/6、2/6 与第 18 篇已合入的 `cc118f1`、`6b9b996` 哈希相同且树差异为空，已在 main 中，本次不重复合入。
+
+因此本次实际合入 3/6–6/6 共四个提交。
+
+## 合并方式与冲突
+
+在 main 上 cherry-pick `7241378..1d3fad0`，保留原作者信息，得到 `ef9e95d`、`2ff0f8d`、`9f46541`、`0db32ea`。
+
+冲突仅出现在 `README.md` 的同一段（`0f98909` 与 `1d3fad0` 各一次），原因是 main 的 `b61acd4` 在该段插入了第 18 篇合并记录的链接。解决方式为保留该链接行，正文段落取附件版本。
+
+合并后与附件头 `1d3fad0` 的差异仅为 main 独有的 `18-refactor-merge-20260922.md`、两个 `20260922-refactor-*.tsv` 及上述 README 链接行；`src/`、`test/`、`include/`、`Makefile` 零差异。
+
+## 主要行为变化
+
+**默认排序由 MLD 改为 AMD**。`order=0` 与 `order=5` 均为 AMD，MLD 需显式 `-p 4` / `order=4`。`README.md`、`docs/user/QUICKSTART.md`、`include/vsdlss.h` 注释与命令行帮助已同步。
+
+依据为附件第 19 篇在 2287.5 万结点客户度数分布电源网格上的实测：AMD 排序 1.8 s、nnz(L) 1.07 亿；MLD 排序 43.5 s、nnz(L) 1.56 亿。第 18 篇（powergrid）另记录 RCM、自然序和精确最小度在 1/4 规模上已无法在 10 分钟或 8 GB 内完成。
+
+该项对应此前 `CONTINUATION.md` 中"默认排序 MLD/AMD 的取舍尚未决定"的待办，现按上述实测确定。AMD 会改变填充与浮点运算顺序，与 MLD 的结果不逐位相同。
+
+其余改动见附件自带的两篇文档：[18-powergrid-preprocessing](18-powergrid-preprocessing-20260922.md)（低度消元重写、按局部性重编号、规范化与求解原地化）和 [19-single-solve-efficiency](19-single-solve-efficiency-20260922.md)（连通分量与抽取合并、减少缺页、求解并行化与工作区缓存）。
+
+## 文档编号冲突
+
+本次带入的 `18-powergrid-preprocessing-20260922.md` 与 main 已有的 `18-refactor-merge-20260922.md` 编号重复。两文件内容不同且互不引用，暂按原名保留；第 19 篇及 README 引用的"18"指 powergrid 一篇。后续如重新编号需同步修正这些引用。
+
+## 验证状态
+
+**本次合并未在本地执行任何构建或测试。** 执行合并的环境为 Windows，没有 gcc、make 或 WSL 发行版，无法编译。以上仅完成 patch/bundle 等价性、去重、冲突解决和树差异的静态核对。
+
+附件两篇文档记录了作者环境下的验证：严格告警完整回归、`make sanitizers`（ASan/UBSan）、`OPENMP=0` 完整回归、`make smoke`，以及 `test_m3` 开启 LSan 泄漏检测；新增重编号/分块路径与电源网格路径的分配失败注入测试。这些是附件作者的记录，不是本次独立复测结果。
+
+合并后的 main 仍需在 Linux 环境执行一次完整验证：
+
+```sh
+make clean
+make -j4 CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test smoke test-small test-reduced-dag
+make sanitizers
+make -B -j4 OPENMP=0 CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test smoke
+make bench-powergrid
+make bench-pg-profile
+```
+
+在该验证完成并记录退出码之前，不应认为合并后的 main 已通过测试。
