@@ -2,6 +2,8 @@
 
 首次测试：`make smoke`。完整测试、C API、CLI、错误处理与发包说明见 [用户说明](docs/user/QUICKSTART.md)。源码发包：`make dist`。
 
+本次附件合并与独立验证见 [2026-09-22 合并记录](docs/reconstruction/18-refactor-merge-20260922.md)。
+
 最新重构与实测结果见 [2026-09-21 左视超节点重构](docs/reconstruction/17-left-looking-refactor-20260921.md)（此前的整合记录见 [16](docs/reconstruction/16-main-integration-20260921.md)）。M3 采用后序 + 宽松合并超节点与左视数值分解，M4 采用严格超节点；AMD 通过 `-p 5` 显式启用，默认仍为 MLD。
 
 # VSDLSS Solver Reconstruction
