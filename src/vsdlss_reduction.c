@@ -6,95 +6,142 @@
 #include <string.h>
 
 typedef struct { csi vertex; double value; } numeric_edge;
-typedef struct { numeric_edge *edge; csi count, capacity; } numeric_list;
-typedef struct { csi degree, vertex; } heap_entry;
-typedef struct { heap_entry *entry; csi count, capacity; } min_heap;
+
+/* Adjacency lists live in one arena and are addressed by offset, so growth
+ * never invalidates other lists; a list that outgrows its slot moves to the
+ * arena end with doubled capacity.  Lists are kept sorted by vertex. */
+typedef struct { csi off, count, capacity; } numeric_list;
+typedef struct { numeric_edge *edge; csi used, capacity; } edge_arena;
+
+/* Hierarchical bitmap: set/clear O(levels), minimum O(levels).  One per
+ * degree 0..3 replaces the former binary heap with lazy deletion; popping the
+ * lowest non-empty degree's minimum vertex yields exactly the heap's order
+ * (smallest current degree, ties to the smallest vertex). */
+#define BS_LEVELS 8
+typedef struct { int levels; uint64_t *word[BS_LEVELS]; } min_bitset;
 
 static int checked_count(csi n, size_t width)
 { return n >= 0 && (uint64_t)n <= SIZE_MAX / width; }
 
-static csi edge_lower_bound(const numeric_list *list, csi vertex)
+static int ctz64(uint64_t x)
 {
-    csi lo=0, hi=list->count;
-    while(lo<hi) { csi mid=lo+(hi-lo)/2; if(list->edge[mid].vertex<vertex) lo=mid+1; else hi=mid; }
-    return lo;
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ctzll(x);
+#else
+    int k=0; while(!(x&1)){x>>=1;k++;} return k;
+#endif
 }
 
-static vsdlss_status list_reserve(numeric_list *list, csi needed)
-{
-    csi capacity; numeric_edge *edge;
-    if(needed<=list->capacity) return VSDLSS_OK;
-    capacity=list->capacity?list->capacity:4;
-    while(capacity<needed) { if(capacity>INT64_MAX/2) return VSDLSS_ERR_OOM; capacity*=2; }
-    if(!checked_count(capacity,sizeof(*edge))) return VSDLSS_ERR_OOM;
-    edge=(numeric_edge *)realloc(list->edge,(size_t)capacity*sizeof(*edge));
-    if(!edge) return VSDLSS_ERR_OOM;
-    list->edge=edge; list->capacity=capacity; return VSDLSS_OK;
-}
+static void bs_free(min_bitset *s)
+{ for(int l=0;l<BS_LEVELS;l++) { free(s->word[l]); s->word[l]=NULL; } s->levels=0; }
 
-static void list_insert_reserved(numeric_list *list, csi at, csi vertex, double value)
+static vsdlss_status bs_init(min_bitset *s, csi n)
 {
-    memmove(list->edge+at+1,list->edge+at,(size_t)(list->count-at)*sizeof(*list->edge));
-    list->edge[at].vertex=vertex; list->edge[at].value=value; list->count++;
-}
-
-static vsdlss_status edge_set(numeric_list *adj, csi a, csi b, double value, int add)
-{
-    csi pa=edge_lower_bound(adj+a,b), pb=edge_lower_bound(adj+b,a);
-    int has=pa<adj[a].count && adj[a].edge[pa].vertex==b;
-    if(has) {
-        double updated=add?adj[a].edge[pa].value+value:value;
-        if(!isfinite(updated)) return VSDLSS_ERR_NONFINITE;
-        adj[a].edge[pa].value=adj[b].edge[pb].value=updated; return VSDLSS_OK;
-    }
-    if(adj[a].count==INT64_MAX || adj[b].count==INT64_MAX) return VSDLSS_ERR_OOM;
-    if(list_reserve(adj+a,adj[a].count+1)!=VSDLSS_OK ||
-       list_reserve(adj+b,adj[b].count+1)!=VSDLSS_OK) return VSDLSS_ERR_OOM;
-    list_insert_reserved(adj+a,pa,b,value); list_insert_reserved(adj+b,pb,a,value);
+    csi size=n;
+    memset(s,0,sizeof(*s));
+    do {
+        size=(size+63)/64;
+        if(s->levels==BS_LEVELS) return VSDLSS_ERR_OOM;
+        s->word[s->levels]=(uint64_t *)calloc((size_t)size,sizeof(uint64_t));
+        if(!s->word[s->levels]) { bs_free(s); return VSDLSS_ERR_OOM; }
+        s->levels++;
+    } while(size>1);
     return VSDLSS_OK;
 }
 
-static void edge_remove(numeric_list *list, csi vertex)
+static void bs_set(min_bitset *s, csi v)
 {
-    csi at=edge_lower_bound(list,vertex);
-    if(at<list->count && list->edge[at].vertex==vertex) {
-        memmove(list->edge+at,list->edge+at+1,(size_t)(list->count-at-1)*sizeof(*list->edge));
+    for(int l=0;l<s->levels;l++) {
+        uint64_t *w=s->word[l]+(v>>6); int had=*w!=0;
+        *w|=(uint64_t)1<<(v&63);
+        if(had) return;
+        v>>=6;
+    }
+}
+
+static void bs_clear(min_bitset *s, csi v)
+{
+    for(int l=0;l<s->levels;l++) {
+        uint64_t *w=s->word[l]+(v>>6);
+        *w&=~((uint64_t)1<<(v&63));
+        if(*w) return;
+        v>>=6;
+    }
+}
+
+static csi bs_min(const min_bitset *s)
+{
+    csi idx=0;
+    if(!s->word[s->levels-1][0]) return -1;
+    for(int l=s->levels-1;l>=0;l--) idx=idx*64+ctz64(s->word[l][idx]);
+    return idx;
+}
+
+static csi edge_lower_bound(const numeric_edge *e, csi count, csi vertex)
+{
+    csi lo=0, hi=count;
+    while(lo<hi) { csi mid=lo+(hi-lo)/2; if(e[mid].vertex<vertex) lo=mid+1; else hi=mid; }
+    return lo;
+}
+
+static vsdlss_status list_reserve(edge_arena *arena, numeric_list *list, csi needed)
+{
+    csi capacity, need_arena;
+    if(needed<=list->capacity) return VSDLSS_OK;
+    capacity=list->capacity?list->capacity:4;
+    while(capacity<needed) { if(capacity>INT64_MAX/2) return VSDLSS_ERR_OOM; capacity*=2; }
+    if(arena->used>INT64_MAX-capacity) return VSDLSS_ERR_OOM;
+    need_arena=arena->used+capacity;
+    if(need_arena>arena->capacity) {
+        csi grow=arena->capacity?arena->capacity:16; numeric_edge *edge;
+        while(grow<need_arena) { if(grow>INT64_MAX/2) return VSDLSS_ERR_OOM; grow*=2; }
+        if(!checked_count(grow,sizeof(*edge))) return VSDLSS_ERR_OOM;
+        edge=(numeric_edge *)realloc(arena->edge,(size_t)grow*sizeof(*edge));
+        if(!edge) return VSDLSS_ERR_OOM;
+        arena->edge=edge; arena->capacity=grow;
+    }
+    if(list->count)
+        memcpy(arena->edge+arena->used,arena->edge+list->off,(size_t)list->count*sizeof(numeric_edge));
+    list->off=arena->used; list->capacity=capacity; arena->used+=capacity;
+    return VSDLSS_OK;
+}
+
+static vsdlss_status edge_set(edge_arena *arena, numeric_list *adj, csi a, csi b, double value)
+{
+    numeric_edge *ea=arena->edge+adj[a].off, *eb;
+    csi pa=edge_lower_bound(ea,adj[a].count,b), pb;
+    if(pa<adj[a].count && ea[pa].vertex==b) {
+        double updated=ea[pa].value+value;
+        eb=arena->edge+adj[b].off; pb=edge_lower_bound(eb,adj[b].count,a);
+        if(!isfinite(updated)) return VSDLSS_ERR_NONFINITE;
+        ea[pa].value=eb[pb].value=updated; return VSDLSS_OK;
+    }
+    if(adj[a].count==INT64_MAX || adj[b].count==INT64_MAX) return VSDLSS_ERR_OOM;
+    if(list_reserve(arena,adj+a,adj[a].count+1)!=VSDLSS_OK ||
+       list_reserve(arena,adj+b,adj[b].count+1)!=VSDLSS_OK) return VSDLSS_ERR_OOM;
+    ea=arena->edge+adj[a].off; eb=arena->edge+adj[b].off;
+    pb=edge_lower_bound(eb,adj[b].count,a);
+    memmove(ea+pa+1,ea+pa,(size_t)(adj[a].count-pa)*sizeof(*ea));
+    ea[pa].vertex=b; ea[pa].value=value; adj[a].count++;
+    memmove(eb+pb+1,eb+pb,(size_t)(adj[b].count-pb)*sizeof(*eb));
+    eb[pb].vertex=a; eb[pb].value=value; adj[b].count++;
+    return VSDLSS_OK;
+}
+
+static void edge_remove(edge_arena *arena, numeric_list *list, csi vertex)
+{
+    numeric_edge *e=arena->edge+list->off;
+    csi at=edge_lower_bound(e,list->count,vertex);
+    if(at<list->count && e[at].vertex==vertex) {
+        memmove(e+at,e+at+1,(size_t)(list->count-at-1)*sizeof(*e));
         list->count--;
     }
 }
 
-static int heap_less(heap_entry a, heap_entry b)
-{ return a.degree<b.degree || (a.degree==b.degree && a.vertex<b.vertex); }
-
-static vsdlss_status heap_push(min_heap *heap, csi degree, csi vertex)
+static int cmp_edge(const void *x, const void *y)
 {
-    csi at; heap_entry value={degree,vertex};
-    if(degree>3) return VSDLSS_OK;
-    if(heap->count==heap->capacity) {
-        csi capacity; heap_entry *entry;
-        if(heap->capacity>INT64_MAX/2) return VSDLSS_ERR_OOM;
-        capacity=heap->capacity?heap->capacity*2:16;
-        if(!checked_count(capacity,sizeof(*entry))) return VSDLSS_ERR_OOM;
-        entry=(heap_entry *)realloc(heap->entry,(size_t)capacity*sizeof(*entry));
-        if(!entry) return VSDLSS_ERR_OOM;
-        heap->entry=entry; heap->capacity=capacity;
-    }
-    at=heap->count++;
-    while(at>0) { csi parent=(at-1)/2; if(!heap_less(value,heap->entry[parent])) break;
-        heap->entry[at]=heap->entry[parent]; at=parent; }
-    heap->entry[at]=value; return VSDLSS_OK;
-}
-
-static heap_entry heap_pop(min_heap *heap)
-{
-    heap_entry result=heap->entry[0], last=heap->entry[--heap->count]; csi at=0;
-    while(at<heap->count) { csi child=2*at+1; if(child>=heap->count) break;
-        if(child+1<heap->count && heap_less(heap->entry[child+1],heap->entry[child])) child++;
-        if(!heap_less(heap->entry[child],last)) break;
-        heap->entry[at]=heap->entry[child]; at=child;
-    }
-    if(heap->count) heap->entry[at]=last;
-    return result;
+    csi a=((const numeric_edge *)x)->vertex, b=((const numeric_edge *)y)->vertex;
+    return (a>b)-(a<b);
 }
 
 void vsdlss_reduction_free(vsdlss_reduction *reduction)
@@ -211,7 +258,8 @@ done:
 vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
 {
     vsdlss_reduction *r=NULL; numeric_list *adj=NULL; double *diag=NULL;
-    unsigned char *active=NULL; csi *local=NULL; min_heap heap={0}; vsdlss_status status;
+    unsigned char *active=NULL; csi *local=NULL; vsdlss_status status;
+    edge_arena arena={0}; min_bitset bucket[4]; int buckets=0;
     csi n,col,k,v,remaining,core_n,nnz,at;
     if(!out) return VSDLSS_ERR_INVALID;
     *out=NULL;
@@ -228,37 +276,88 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
     if ((uint64_t)n > SIZE_MAX / sizeof(*r->records)) {status=VSDLSS_ERR_OOM;goto fail;}
     r->records=(vsdlss_elim_record *)calloc((size_t)n,sizeof(*r->records));
     if(!r->records) { status=VSDLSS_ERR_OOM; goto fail; }
+
+    /* Symmetric adjacency in one pass: count, place (rows i<v of column v come
+     * first, then columns j>v in increasing order, so lists are sorted), and
+     * only if the input had unsorted or repeated rows sort and merge. */
     for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {
         csi row=A->i[k];
         if(row==col) { diag[col]+=A->x[k]; if(!isfinite(diag[col])) {status=VSDLSS_ERR_NONFINITE;goto fail;} }
-        else { status=edge_set(adj,row,col,A->x[k],1); if(status!=VSDLSS_OK) goto fail; }
+        else { adj[row].capacity++; adj[col].capacity++; }
     }
-    for(v=0;v<n;v++) { status=heap_push(&heap,adj[v].count,v); if(status!=VSDLSS_OK) goto fail; }
+    for(v=0;v<n;v++) {
+        if(arena.used>INT64_MAX-adj[v].capacity) {status=VSDLSS_ERR_OOM;goto fail;}
+        adj[v].off=arena.used; arena.used+=adj[v].capacity;
+    }
+    arena.capacity=arena.used+arena.used/4+16;
+    if(!checked_count(arena.capacity,sizeof(numeric_edge))) {status=VSDLSS_ERR_OOM;goto fail;}
+    arena.edge=(numeric_edge *)malloc((size_t)arena.capacity*sizeof(numeric_edge));
+    if(!arena.edge) {status=VSDLSS_ERR_OOM;goto fail;}
+    for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {
+        csi row=A->i[k];
+        if(row==col) continue;
+        arena.edge[adj[col].off+adj[col].count++]=(numeric_edge){row,A->x[k]};
+    }
+    for(col=0;col<n;col++) for(k=A->p[col];k<A->p[col+1];k++) {
+        csi row=A->i[k];
+        if(row==col) continue;
+        arena.edge[adj[row].off+adj[row].count++]=(numeric_edge){col,A->x[k]};
+    }
+    for(v=0;v<n;v++) {
+        numeric_edge *e=arena.edge+adj[v].off; csi c=adj[v].count, u=0, j;
+        int sorted=1;
+        for(j=1;j<c;j++) if(e[j].vertex<=e[j-1].vertex) { sorted=0; break; }
+        if(sorted) continue;
+        qsort(e,(size_t)c,sizeof(*e),cmp_edge);
+        for(j=0;j<c;j++) {
+            if(u && e[u-1].vertex==e[j].vertex) {
+                e[u-1].value+=e[j].value;
+                if(!isfinite(e[u-1].value)) {status=VSDLSS_ERR_NONFINITE;goto fail;}
+            } else e[u++]=e[j];
+        }
+        adj[v].count=u;
+    }
+
+    for(buckets=0;buckets<4;buckets++) {
+        status=bs_init(&bucket[buckets],n);
+        if(status!=VSDLSS_OK) goto fail;
+    }
+    for(v=0;v<n;v++) if(adj[v].count<=3) bs_set(&bucket[adj[v].count],v);
     remaining=n;
-    while(heap.count) {
-        heap_entry h=heap_pop(&heap); numeric_list *list; vsdlss_elim_record *record; csi a,b;
-        v=h.vertex; if(!active[v] || adj[v].count!=h.degree || h.degree>3) continue;
+    for(;;) {
+        numeric_list *list; numeric_edge *e; vsdlss_elim_record *record; csi a,b,d,old[3];
+        for(d=0;d<4;d++) { v=bs_min(&bucket[d]); if(v>=0) break; }
+        if(d==4) break;
+        bs_clear(&bucket[d],v);
         if(!isfinite(diag[v])) {status=VSDLSS_ERR_NONFINITE;goto fail;}
         if(diag[v]<=0.0) {status=VSDLSS_ERR_NOT_POSDEF;goto fail;}
         list=adj+v; record=r->records+r->count; record->vertex=v;
         record->degree=list->count; record->pivot=diag[v];
+        e=arena.edge+list->off;
         for(a=0;a<list->count;a++) {
-            csi w=list->edge[a].vertex; double avw=list->edge[a].value;
+            csi w=e[a].vertex; double avw=e[a].value;
+            old[a]=adj[w].count;
             record->neighbor[a]=w; record->multiplier[a]=avw/diag[v];
             if(!isfinite(record->multiplier[a])) {status=VSDLSS_ERR_NONFINITE;goto fail;}
             diag[w]-=record->multiplier[a]*avw;
             if(!isfinite(diag[w])) {status=VSDLSS_ERR_NONFINITE;goto fail;}
         }
-        for(a=0;a<list->count;a++) for(b=a+1;b<list->count;b++) {
-            csi wa=list->edge[a].vertex, wb=list->edge[b].vertex;
-            double updated=-record->multiplier[a]*list->edge[b].value;
+        for(a=0;a<record->degree;a++) for(b=a+1;b<record->degree;b++) {
+            /* v's own list is not modified here, but the arena may move. */
+            double vb=arena.edge[adj[v].off+b].value;
+            double updated=-record->multiplier[a]*vb;
             if(!isfinite(updated)) {status=VSDLSS_ERR_NONFINITE;goto fail;}
-            status=edge_set(adj,wa,wb,updated,1); if(status!=VSDLSS_OK) goto fail;
+            status=edge_set(&arena,adj,record->neighbor[a],record->neighbor[b],updated);
+            if(status!=VSDLSS_OK) goto fail;
         }
-        for(a=0;a<list->count;a++) edge_remove(adj+list->edge[a].vertex,v);
+        for(a=0;a<record->degree;a++) edge_remove(&arena,adj+record->neighbor[a],v);
         active[v]=0; r->count++; remaining--;
-        for(a=0;a<list->count;a++) { csi w=list->edge[a].vertex;
-            status=heap_push(&heap,adj[w].count,w); if(status!=VSDLSS_OK) goto fail; }
+        for(a=0;a<record->degree;a++) {
+            csi w=record->neighbor[a], now=adj[w].count;
+            if(now==old[a]) continue;
+            if(old[a]<=3) bs_clear(&bucket[old[a]],w);
+            if(now<=3) bs_set(&bucket[now],w);
+        }
     }
     r->core_n=core_n=remaining;
     if(core_n) {
@@ -276,20 +375,21 @@ vsdlss_status vsdlss_reduce(const vsdlss *A, vsdlss_reduction **out)
         at=0; for(v=0;v<n;v++) if(active[v]) { r->core_vertices[at]=v; local[v]=at++; }
         at=0; r->core->p[0]=0;
         for(col=0;col<core_n;col++) {
-            csi original=r->core_vertices[col], e;
-            for(e=0;e<adj[original].count;e++) {
-                csi neighbor=adj[original].edge[e].vertex;
+            csi original=r->core_vertices[col], j;
+            const numeric_edge *e=arena.edge+adj[original].off;
+            for(j=0;j<adj[original].count;j++) {
+                csi neighbor=e[j].vertex;
                 if(neighbor>=original) continue;
-                r->core->i[at]=local[neighbor]; r->core->x[at++]=adj[original].edge[e].value;
+                r->core->i[at]=local[neighbor]; r->core->x[at++]=e[j].value;
             }
             r->core->i[at]=col; r->core->x[at++]=diag[original]; r->core->p[col+1]=at;
         }
     }
-    for(v=0;v<n;v++) free(adj[v].edge);
-    free(adj); free(diag); free(active); free(local); free(heap.entry);
+    free(arena.edge); free(adj); free(diag); free(active); free(local);
+    for(k=0;k<buckets;k++) bs_free(&bucket[k]);
     *out=r; return VSDLSS_OK;
 fail:
-    if(adj) for(v=0;v<A->n;v++) free(adj[v].edge);
-    free(adj); free(diag); free(active); free(local); free(heap.entry);
+    free(arena.edge); free(adj); free(diag); free(active); free(local);
+    for(k=0;k<buckets;k++) bs_free(&bucket[k]);
     vsdlss_reduction_free(r); return status;
 }

@@ -36,3 +36,4 @@
 /test_kernels
 /test_amd
 /bench_sn
+/bench_powergrid

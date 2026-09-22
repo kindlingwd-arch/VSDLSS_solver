@@ -73,7 +73,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_parallel bench_m3 bench_sn test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_parallel bench_m3 bench_sn test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -172,3 +172,12 @@ test-supernodal: test_supernodal
 	./test_supernodal
 
 .PHONY: test-supernodal
+
+bench_powergrid: test/bench_powergrid.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_powergrid.c $(LIBSRCS) $(LDLIBS)
+
+# 20M full nonzeros, degree mix 25/50/20/5 (%), AMD, 2 threads, 4 RHS
+bench-powergrid: bench_powergrid
+	./bench_powergrid 2e7 5 2 4
+
+.PHONY: bench-powergrid
