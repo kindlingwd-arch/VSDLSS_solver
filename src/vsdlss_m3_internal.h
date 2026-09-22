@@ -22,34 +22,41 @@ typedef struct vsdlss_reduction {
     vsdlss *core;
 } vsdlss_reduction;
 
-/* Strict-supernode symbolic layout.  Each panel s owns columns
- * [column_start[s],column_start[s+1]) and logical rows J followed by the
- * sorted external rows row_index[row_ptr[s]..row_ptr[s+1]).  panel_offset
- * addresses a dense column-major (width + external_count)-by-width panel.
- * l_panel_slot maps every CSC symbolic-L entry to exactly one absolute panel
- * slot.  update_target stores, for each source panel, target panel slots for
- * the lower triangle of R-by-R in column-major triangular order:
- * (R[0],R[0]), (R[1],R[0]), ... then (R[1],R[1]), ... .  Thus its
- * retained size is sum_s |R_s|(|R_s|+1)/2 csi slots; this can exceed nnz(L).
- */
+/* Supernodal symbolic layout.
+ *
+ * Panel s owns columns [column_start[s], column_start[s+1]) and stores the
+ * rows J_s = those columns followed by the sorted external rows
+ * R_s = row_index[row_ptr[s]..row_ptr[s+1]).  panel_offset addresses a dense
+ * column-major (width + |R_s|)-by-width panel; the strictly upper part of the
+ * leading width-by-width block is kept zero.
+ *
+ * Strict analysis yields maximal (fundamental) supernodes, so every panel
+ * slot on or below the diagonal is a structural entry of L.  Relaxed analysis
+ * additionally amalgamates a child into its parent when the explicit zeros it
+ * introduces stay under the usual size-dependent thresholds; l_nnz then counts
+ * those stored zeros too (relaxed_zeros of them).
+ *
+ * The left-looking numeric phase needs, for every target panel d, the source
+ * blocks that update it: block b = (blk_src[b], blk_first[b], blk_end[b]) for
+ * b in [blk_ptr[d], blk_ptr[d+1]) says that rows R_src[first..end) are
+ * columns of d, and R_src[first..|R_src|) are the rows to update.  Blocks of
+ * one target are sorted by source, which fixes the accumulation order.
+ * Storage is O(n + sum |R_s|); no per-entry map of L is kept. */
 typedef struct vsdlss_sn_symbolic {
-    csi n, count, l_nnz;
-    csi *parent;          /* n */
-    csi *l_col_ptr;       /* n+1 */
-    csi *l_row_index;     /* l_nnz */
-    csi *column_start;    /* allocated n+1; first count+1 entries are used */
+    csi n, count, l_nnz, relaxed_zeros, max_rows;
+    csi *sn_parent;       /* count, -1 for roots */
+    csi *column_start;    /* count+1 */
     csi *row_ptr;         /* count+1 */
     csi *row_index;       /* row_ptr[count] */
     csi *panel_offset;    /* count+1, scalar slots */
-    csi *l_panel_slot;    /* l_nnz, absolute panel slots */
-    csi *update_ptr;      /* count+1 */
-    csi *update_target;   /* update_ptr[count], absolute panel slots */
+    csi *blk_ptr;         /* count+1 */
+    csi *blk_src, *blk_first, *blk_end; /* blk_ptr[count] each */
 } vsdlss_sn_symbolic;
 typedef struct vsdlss_sn_factor {
     csi n, count, l_nnz;
-    csi *l_col_ptr, *l_row_index, *l_panel_slot;
     csi *column_start, *row_ptr, *row_index, *panel_offset;
-    double *panel;
+    double *panel;        /* panel_offset[count] values */
+    void *panel_block;    /* allocation owning `panel` (may be aligned inside) */
 } vsdlss_sn_factor;
 
 typedef struct vsdlss_m3_component_factor {
@@ -83,27 +90,22 @@ vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *, const double *,
                                     const double *, double *);
 void vsdlss_reduction_free(vsdlss_reduction *);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
+vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
+/* Compose an elimination-tree postorder into (q, pinv) for matrix A (the
+ * matrix before permutation).  Fill is unchanged; supernodes get larger. */
+vsdlss_status vsdlss_postorder_permutation(const vsdlss *A, csi *q, csi *pinv);
 void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *);
 vsdlss_status vsdlss_sn_factorize(const vsdlss *, const vsdlss_sn_symbolic *,
                                   vsdlss_sn_factor **);
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *);
+vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *, csi nrhs, double *x, csi ldx);
 vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *, vsdlss **);
 void vsdlss_sn_factor_free(vsdlss_sn_factor *);
 
 /* Shared in-memory/disk panel kernels. Layout is column major. */
 vsdlss_status vsdlss_panel_factor(double *, csi rows, csi width);
-double vsdlss_panel_dot(const double *, csi rows, csi width, csi i, csi j);
-/* Blocked rank-`width` update of the external block into scattered targets.
- * Column chunking is the caller's; the kernel blocks internally.  Returns
- * bit 1 for an out-of-range target slot and bit 2 for a non-finite result. */
-#define VSDLSS_PANEL_UPDATE_CB 4
-int vsdlss_panel_update_range(const double *, csi rows, csi width, csi ext,
-                              csi cfirst, csi clast, const csi *targets,
-                              double *panel, csi lo_slot, csi hi_slot);
 vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
                                 csi ext, const csi *index, double *, int back);
-vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *, vsdlss_sn_symbolic **);
-
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
 

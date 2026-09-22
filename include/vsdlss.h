@@ -67,7 +67,9 @@ typedef struct vsdlss_order_stats
  * last_team_size is the largest observed team since the last setter call.
  * OpenMP runtime memory is not part of the M4 numeric workspace budget.
  */
-/* Experimental numeric DAG; opt-in, per calling thread; default off. */
+/* Kept for API compatibility.  Since the left-looking rewrite the in-memory
+ * factorization always uses the subtree/tree-top schedule when more than one
+ * thread is requested, so this flag no longer changes the path or results. */
 void vsdlss_set_dag_enabled(int enabled);
 int vsdlss_get_dag_enabled(void);
 int vsdlss_parallel_enabled(void);

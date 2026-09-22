@@ -3,11 +3,14 @@
 #include "vsdlss_m4_internal.h"
 #include "vsdlss_m3_internal.h"
 #include "vsdlss_parallel.h"
+#include "vsdlss_dense.h"
 #include <float.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
 
+#define M4_MC 128
+#define M4_NC 64
 #define MAGIC UINT64_C(0x003453534c445356)
 #define HASH_INIT UINT64_C(14695981039346656037)
 static uint64_t hash_bytes(uint64_t h,const void *v,size_t n)
@@ -140,10 +143,11 @@ vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *A,int order,size_t budget,
     if((uint64_t)cap>fit)cap=(csi)fit;
     st=vsdlss_normalize_upper(A,&B);if(st!=VSDLSS_OK)goto done;
     st=vsdlss_order(B,order,&q,&pinv);if(st!=VSDLSS_OK)goto done;
+    st=vsdlss_postorder_permutation(B,q,pinv);if(st!=VSDLSS_OK)goto done;
     st=VSDLSS_ERR_OOM;
     P=vsdlss_symperm(B,pinv,1);if(!P)goto done;
     vsdlss_spfree(B);B=NULL;free(pinv);pinv=NULL;
-    st=vsdlss_sn_analyze_compact(P,&s);if(st!=VSDLSS_OK)goto done;
+    st=vsdlss_sn_analyze(P,&s);if(st!=VSDLSS_OK)goto done;
     st=VSDLSS_ERR_OOM;
     lower=vsdlss_transpose(P,1);if(!lower)goto done;
     vsdlss_spfree(P);P=NULL;
@@ -154,7 +158,9 @@ vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *A,int order,size_t budget,
     for(csi sn=0;sn<s->count;sn++)for(csi begin=s->column_start[sn];begin<s->column_start[sn+1];){
         csi width=s->column_start[sn+1]-begin;if(width>cap)width=cap;
         vsdlss_disk_panel *b=&f->blocks[f->block_count];
-        b->begin=begin;b->width=width;b->rows=s->l_col_ptr[begin+1]-s->l_col_ptr[begin];
+        b->begin=begin;b->width=width;
+        b->rows=s->column_start[sn+1]-begin+s->row_ptr[sn+1]-s->row_ptr[sn];
+        b->checksum=(uint64_t)sn; /* supernode id until the block is written */
         size_t bytes=payload(b);if(bytes>f->max_payload)f->max_payload=bytes;
         for(csi j=begin;j<begin+width;j++)owner[j]=f->block_count;
         f->block_count++;begin+=width;
@@ -170,7 +176,12 @@ vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *A,int order,size_t budget,
         if(offset>(uint64_t)INT64_MAX-bytes)goto done;
         b->offset=offset;offset+=bytes;
         memset(source,0,bytes);csi *rows=source;double *a=(double *)(rows+b->rows);
-        memcpy(rows,s->l_row_index+s->l_col_ptr[b->begin],(size_t)b->rows*8);
+        {
+            csi sn=(csi)b->checksum,end=s->column_start[sn+1],k=0;
+            for(csi r=(csi)b->begin;r<end;r++)rows[k++]=r;
+            memcpy(rows+k,s->row_index+s->row_ptr[sn],
+                   (size_t)(s->row_ptr[sn+1]-s->row_ptr[sn])*8);
+        }
         for(uint64_t j=0;j<b->width;j++)for(csi p=lower->p[b->begin+j];p<lower->p[b->begin+j+1];p++){
             csi r=lookup(rows,(csi)b->rows,lower->i[p]);
             if(r<0){st=VSDLSS_ERR_INVALID;goto done;}
@@ -193,19 +204,45 @@ vsdlss_status vsdlss_factorize_m4_ex(const vsdlss *A,int order,size_t budget,
             csi *dr=target;double *da=(double *)(dr+d->rows);
             uint64_t end=c+1;
             while(end<b->rows&&owner[rows[end]]==dest)end++;
-            int nt=vsdlss_parallel_width((double)(end-c)*b->rows*b->width),bad=0;(void)nt;
+            /* Rows c.. of this block against its columns c..end: blocked
+             * dense product into a stack tile, scattered by merging the
+             * sorted source rows into the sorted target rows.  Row tiles
+             * write disjoint target rows. */
+            csi m=(csi)(b->rows-c),kk=(csi)(end-c);
+            csi tiles=m/M4_MC+(m%M4_MC!=0);
+            int nt=vsdlss_parallel_width((double)m*kk*b->width),bad=0;
+            if(nt>tiles)nt=(int)tiles;
+            if(nt<1)nt=1;
+            (void)nt;
             VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
             {
+                double tile[M4_MC*M4_NC];csi tr[M4_MC];
                 VSDLSS_OMP(omp master)
                 vsdlss_parallel_observe();
                 VSDLSS_OMP(omp for schedule(dynamic,1))
-                for(uint64_t sc=c;sc<end;sc++){
-                    csi dc=rows[sc]-(csi)d->begin;
-                    for(uint64_t r=sc;r<b->rows;r++){
-                        csi tr=lookup(dr,(csi)d->rows,rows[r]);
-                        if(tr<0){bad|=1;continue;}
-                        da[(uint64_t)dc*d->rows+tr]-=vsdlss_panel_dot(a,(csi)b->rows,(csi)b->width,(csi)r,(csi)sc);
-                        if(!isfinite(da[(uint64_t)dc*d->rows+tr]))bad|=2;
+                for(csi t=0;t<tiles;t++){
+                    csi r0=t*M4_MC,mc=m-r0<M4_MC?m-r0:M4_MC;
+                    csi cur=lookup(dr,(csi)d->rows,rows[c+r0]);
+                    if(cur<0){bad|=1;continue;}
+                    for(csi i=0;i<mc;i++){
+                        while(cur<(csi)d->rows&&dr[cur]<rows[c+r0+i])cur++;
+                        if(cur==(csi)d->rows||dr[cur]!=rows[c+r0+i]){bad|=1;break;}
+                        tr[i]=cur;
+                    }
+                    if(bad&1)continue;
+                    for(csi c0=0;c0<kk&&c0<r0+mc;c0+=M4_NC){
+                        csi nc=kk-c0<M4_NC?kk-c0:M4_NC,tri=r0-c0;
+                        memset(tile,0,(size_t)mc*(size_t)nc*sizeof(double));
+                        vsdlss_gemm_nt_sub(mc,nc,(csi)b->width,a+c+r0,(csi)b->rows,
+                            a+c+c0,(csi)b->rows,tile,mc,tri);
+                        for(csi j=0;j<nc;j++){
+                            csi dc=rows[c+c0+j]-(csi)d->begin,ib=c0+j>r0?c0+j-r0:0;
+                            double *col=da+(uint64_t)dc*d->rows;
+                            for(csi i=ib;i<mc;i++){
+                                col[tr[i]]+=tile[j*mc+i];
+                                if(!isfinite(col[tr[i]]))bad|=2;
+                            }
+                        }
                     }
                 }
             }

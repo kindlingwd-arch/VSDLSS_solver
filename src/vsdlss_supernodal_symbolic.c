@@ -1,12 +1,25 @@
 #include "vsdlss_m3_internal.h"
-#include "vsdlss_parallel.h"
-
-
 
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Supernodal symbolic analysis.
+ *
+ *   1. elimination tree, postorder and column counts of L (Gilbert-Ng-Peyton,
+ *      O(nnz(A) alpha(n)); no pass over the entries of L);
+ *   2. maximal supernodes: j and j+1 share a panel iff parent(j) = j+1 and
+ *      |L(:,j)| = |L(:,j+1)| + 1, i.e. L(j+1:n,j) has the pattern of L(:,j+1);
+ *   3. external rows of every supernode as the union of the lower pattern of
+ *      A in its columns and the external rows of its child supernodes;
+ *   4. optional relaxed amalgamation of a supernode into its parent;
+ *   5. per-target lists of source blocks for the left-looking numeric phase.
+ *
+ * Everything is O(nnz(A) + sum_s |R_s| log |R_s|) time and O(n + sum |R_s|)
+ * memory.  The former layout also materialised the pattern of L and, per
+ * source panel, a |R|(|R|+1)/2 update-target table; on a 26^3 grid ordered by
+ * MLD that table alone held 1.7e8 entries. */
 
 static int checked_count(csi n, size_t width)
 { return n >= 0 && (uint64_t)n <= SIZE_MAX / width; }
@@ -23,196 +36,261 @@ static int checked_mul(csi a, csi b, csi *out)
     *out = a * b; return 1;
 }
 
+/* width*(width+1)/2 + width*ext, the stored lower trapezoid of a panel. */
+static int trapezoid(csi width, csi ext, csi *out)
+{
+    csi tri, rect;
+    if (!checked_mul(width, width + 1, &tri) || !checked_mul(width, ext, &rect))
+        return 0;
+    return checked_add(tri / 2, rect, out);
+}
+
+static int cmp_csi(const void *a, const void *b)
+{
+    csi x = *(const csi *)a, y = *(const csi *)b;
+    return (x > y) - (x < y);
+}
+
 void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *s)
 {
     if (!s) return;
-    free(s->parent); free(s->l_col_ptr); free(s->l_row_index);
-    free(s->column_start); free(s->row_ptr); free(s->row_index);
-    free(s->panel_offset); free(s->l_panel_slot);
-    free(s->update_ptr); free(s->update_target); free(s);
+    free(s->sn_parent); free(s->column_start); free(s->row_ptr);
+    free(s->row_index); free(s->panel_offset); free(s->blk_ptr);
+    free(s->blk_src); free(s->blk_first); free(s->blk_end); free(s);
 }
 
-static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int compact)
+vsdlss_status vsdlss_postorder_permutation(const vsdlss *A, csi *q, csi *pinv)
+{
+    vsdlss *P = NULL; csi *parent = NULL, *post = NULL, *old = NULL, n, k;
+    vsdlss_status st = VSDLSS_ERR_OOM;
+    if (!A || !q || !pinv || A->n < 1) return VSDLSS_ERR_INVALID;
+    n = A->n;
+    P = vsdlss_symperm(A, pinv, 0);
+    if (!P) goto done;
+    parent = vsdlss_etree(P, 0);
+    if (!parent) goto done;
+    post = vsdlss_post(parent, n);
+    old = (csi *)vsdlss_malloc(n, sizeof(csi));
+    if (!post || !old) goto done;
+    memcpy(old, q, (size_t)n * sizeof(csi));
+    for (k = 0; k < n; ++k) { q[k] = old[post[k]]; pinv[q[k]] = k; }
+    st = vsdlss_validate_permutation(q, pinv, n);
+done:
+    vsdlss_spfree(P); free(parent); free(post); free(old);
+    return st;
+}
+
+/* CHOLMOD's default amalgamation rule (nrelax = 4/16/48, zrelax 0.8/0.1/0.05). */
+static int relax_ok(csi cols, double zeros, double total)
+{
+    double frac = total > 0 ? zeros / total : 0;
+    if (cols <= 4) return 1;
+    if (cols <= 16 && frac < 0.8) return 1;
+    if (cols <= 48 && frac < 0.1) return 1;
+    return frac < 0.05;
+}
+
+static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int relax)
 {
     vsdlss_sn_symbolic *z = NULL;
-    csi *stack = NULL, *mark = NULL, *count = NULL, *cursor = NULL;
-    csi n, k, p, top, j, sn, total, external_total = 0, panel_total = 0;
-    csi update_total = 0;
+    vsdlss *AT = NULL;
+    csi *parent = NULL, *post = NULL, *cc = NULL;
+    csi *fstart = NULL, *fparent = NULL, *fowner = NULL, *fptr = NULL, *frows = NULL;
+    csi *head = NULL, *next = NULL, *mark = NULL, *gstart = NULL, *owner = NULL;
+    csi n, j, k, fcount = 0, total, s, p;
     vsdlss_status status;
 
     if (!out) return VSDLSS_ERR_INVALID;
     *out = NULL;
     if (!A || A->n < 1) return VSDLSS_ERR_INVALID;
     n = A->n;
-    if (n == INT64_MAX || !checked_count(n, sizeof(csi)) ||
-        !checked_count(n + 1, sizeof(csi))) return VSDLSS_ERR_OOM;
+    if (n == INT64_MAX || !checked_count(n + 1, sizeof(csi))) return VSDLSS_ERR_OOM;
     status = vsdlss_validate_upper_csc(A);
     if (status != VSDLSS_OK) return status;
-    z = (vsdlss_sn_symbolic *)calloc(1, sizeof(*z));
-    count = (csi *)calloc((size_t)n, sizeof(*count));
-    stack = (csi *)malloc((size_t)n * sizeof(*stack));
-    mark = (csi *)calloc((size_t)n, sizeof(*mark));
-    if (!z || !count || !stack || !mark) { status = VSDLSS_ERR_OOM; goto fail; }
-    z->n = n;
-    z->parent = vsdlss_etree(A, 0);
-    if (!z->parent) { status = VSDLSS_ERR_OOM; goto fail; }
-    for (k = 0; k < n; ++k) {
-        top = vsdlss_ereach(A, k, z->parent, stack, mark);
-        if (top < 0) { status = VSDLSS_ERR_INVALID; goto fail; }
-        for (p = top; p < n; ++p) {
-            j = stack[p];
-            if (count[j] == INT64_MAX) { status = VSDLSS_ERR_OOM; goto fail; }
-            ++count[j];
-        }
-    }
-    z->l_col_ptr = (csi *)malloc((size_t)(n + 1) * sizeof(csi));
-    if (!z->l_col_ptr) { status = VSDLSS_ERR_OOM; goto fail; }
-    z->l_col_ptr[0] = 0;
+    status = VSDLSS_ERR_OOM;
+
+    /* 1. etree, postorder, column counts (diagonal included). */
+    parent = vsdlss_etree(A, 0);
+    post = parent ? vsdlss_post(parent, n) : NULL;
+    cc = post ? vsdlss_counts(A, parent, post, 0) : NULL;
+    AT = vsdlss_transpose(A, 0);   /* column j of AT = rows i >= j of A */
+    if (!cc || !AT) goto fail;
+
+    /* 2. maximal supernodes over the given column order. */
+    fstart = (csi *)malloc((size_t)(n + 1) * sizeof(csi));
+    fowner = (csi *)malloc((size_t)n * sizeof(csi));
+    if (!fstart || !fowner) goto fail;
     for (j = 0; j < n; ++j) {
-        if (count[j] == INT64_MAX ||
-            !checked_add(z->l_col_ptr[j], count[j] + 1, &z->l_col_ptr[j + 1])) {
-            status = VSDLSS_ERR_OOM; goto fail;
-        }
+        if (cc[j] < 1 || cc[j] > n - j) { status = VSDLSS_ERR_INVALID; goto fail; }
+        if (j == 0 || !(parent[j - 1] == j && cc[j - 1] == cc[j] + 1))
+            fstart[fcount++] = j;
+        fowner[j] = fcount - 1;
     }
-    z->l_nnz = z->l_col_ptr[n];
-    if (!checked_count(z->l_nnz, sizeof(csi))) { status = VSDLSS_ERR_OOM; goto fail; }
-    z->l_row_index = (csi *)malloc((size_t)z->l_nnz * sizeof(csi));
-    cursor = (csi *)malloc((size_t)n * sizeof(csi));
-    if (!z->l_row_index || !cursor) { status = VSDLSS_ERR_OOM; goto fail; }
-    for (j = 0; j < n; ++j) {
-        cursor[j] = z->l_col_ptr[j]; z->l_row_index[cursor[j]++] = j;
-        mark[j] = 0;
+    fstart[fcount] = n;
+    fparent = (csi *)malloc((size_t)fcount * sizeof(csi));
+    fptr = (csi *)malloc((size_t)(fcount + 1) * sizeof(csi));
+    head = (csi *)malloc((size_t)fcount * sizeof(csi));
+    next = (csi *)malloc((size_t)fcount * sizeof(csi));
+    mark = (csi *)malloc((size_t)n * sizeof(csi));
+    if (!fparent || !fptr || !head || !next || !mark) goto fail;
+    fptr[0] = 0;
+    for (s = 0; s < fcount; ++s) {
+        csi last = fstart[s + 1] - 1;
+        fparent[s] = parent[last] < 0 ? -1 : fowner[parent[last]];
+        if (!checked_add(fptr[s], cc[last] - 1, &fptr[s + 1])) goto fail;
+        head[s] = -1;
     }
-    for (k = 0; k < n; ++k) {
-        top = vsdlss_ereach(A, k, z->parent, stack, mark);
-        for (p = top; p < n; ++p) z->l_row_index[cursor[stack[p]]++] = k;
+    if (!checked_count(fptr[fcount], sizeof(csi))) goto fail;
+    frows = (csi *)malloc((size_t)(fptr[fcount] ? fptr[fcount] : 1) * sizeof(csi));
+    if (!frows) goto fail;
+    for (s = fcount - 1; s >= 0; --s)
+        if (fparent[s] >= 0) { next[s] = head[fparent[s]]; head[fparent[s]] = s; }
+    for (j = 0; j < n; ++j) mark[j] = -1;
+
+    /* 3. external rows: union of A's lower pattern and children's rows. */
+    for (s = 0; s < fcount; ++s) {
+        csi b = fstart[s], e = fstart[s + 1], cnt = 0, want = fptr[s + 1] - fptr[s];
+        csi *R = frows + fptr[s];
+        for (j = b; j < e; ++j)
+            for (p = AT->p[j]; p < AT->p[j + 1]; ++p) {
+                csi i = AT->i[p];
+                if (i >= e && mark[i] != s) {
+                    if (cnt == want) { status = VSDLSS_ERR_INVALID; goto fail; }
+                    mark[i] = s; R[cnt++] = i;
+                }
+            }
+        for (csi c = head[s]; c >= 0; c = next[c])
+            for (p = fptr[c]; p < fptr[c + 1]; ++p) {
+                csi i = frows[p];
+                if (i >= e && mark[i] != s) {
+                    if (cnt == want) { status = VSDLSS_ERR_INVALID; goto fail; }
+                    mark[i] = s; R[cnt++] = i;
+                }
+            }
+        if (cnt != want) { status = VSDLSS_ERR_INVALID; goto fail; }
+        qsort(R, (size_t)cnt, sizeof(csi), cmp_csi);
     }
 
-    z->column_start = (csi *)malloc((size_t)(n + 1) * sizeof(csi));
-    if (!z->column_start) { status = VSDLSS_ERR_OOM; goto fail; }
-    z->count = 0; z->column_start[0] = 0;
-    for (j = 0; j + 1 < n; ++j) {
-        csi a0 = z->l_col_ptr[j], a1 = z->l_col_ptr[j + 1];
-        csi b0 = z->l_col_ptr[j + 1], b1 = z->l_col_ptr[j + 2];
-        int merge = z->parent[j] == j + 1 && a1 - a0 == b1 - b0 + 1;
-        if (merge && memcmp(z->l_row_index + a0 + 1, z->l_row_index + b0,
-                            (size_t)(b1 - b0) * sizeof(csi)) != 0) merge = 0;
-        if (!merge) z->column_start[++z->count] = j + 1;
+    /* 4. amalgamation.  Supernodes s, s+1, ..., t form a group when each is
+     * the last child of the next; the group keeps R_t as external rows and
+     * stores zeros for entries of the lower members outside their pattern. */
+    gstart = (csi *)malloc((size_t)(fcount + 1) * sizeof(csi));
+    if (!gstart) goto fail;
+    {
+        /* Per group keyed by its first supernode: true entries and columns. */
+        double *gtrue = (double *)malloc((size_t)fcount * sizeof(double));
+        csi *gcols = (csi *)malloc((size_t)fcount * sizeof(csi));
+        csi *gtop = (csi *)malloc((size_t)fcount * sizeof(csi));
+        char *merged = (char *)calloc((size_t)fcount, 1);
+        csi groups = 0;
+        if (!gtrue || !gcols || !gtop || !merged) {
+            free(gtrue); free(gcols); free(gtop); free(merged); goto fail;
+        }
+        for (s = 0; s < fcount; ++s) {
+            csi w = fstart[s + 1] - fstart[s];
+            gcols[s] = w; gtop[s] = s;
+            gtrue[s] = (double)w * (double)(w + 1) / 2 +
+                       (double)w * (double)(fptr[s + 1] - fptr[s]);
+        }
+        if (relax) for (s = fcount - 2; s >= 0; --s) {
+            csi g = s + 1, ext, cols;
+            double panel;
+            if (fparent[s] != g) continue;
+            ext = fptr[gtop[g] + 1] - fptr[gtop[g]];
+            cols = gcols[g] + gcols[s];
+            panel = (double)cols * (double)(cols + 1) / 2 + (double)cols * (double)ext;
+            if (!relax_ok(cols, panel - gtrue[g] - gtrue[s], panel)) continue;
+            merged[g] = 1;               /* g no longer starts a group */
+            gcols[s] = cols; gtop[s] = gtop[g]; gtrue[s] += gtrue[g];
+        }
+        for (s = 0; s < fcount; ++s) if (!merged[s]) gstart[groups++] = s;
+        gstart[groups] = fcount;
+        free(gtrue); free(gcols); free(gtop); free(merged);
+
+        z = (vsdlss_sn_symbolic *)calloc(1, sizeof(*z));
+        if (!z) goto fail;
+        z->n = n; z->count = groups;
     }
-    z->column_start[++z->count] = n;
+    z->column_start = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
     z->row_ptr = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
     z->panel_offset = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
-    z->update_ptr = (csi *)malloc((size_t)(z->count + 1) * sizeof(csi));
-    if (!z->row_ptr || !z->panel_offset || !z->update_ptr) {
-        status = VSDLSS_ERR_OOM; goto fail;
-    }
-    z->row_ptr[0] = z->panel_offset[0] = z->update_ptr[0] = 0;
-    for (sn = 0; sn < z->count; ++sn) {
-        csi begin = z->column_start[sn], end = z->column_start[sn + 1];
-        csi width = end - begin;
-        csi ext = z->l_col_ptr[end - 1 + 1] - z->l_col_ptr[end - 1] - 1;
-        csi rows, panel_size, triangle;
-        if (!checked_add(external_total, ext, &external_total) ||
-            !checked_add(width, ext, &rows) || !checked_mul(rows, width, &panel_size) ||
-            !checked_add(panel_total, panel_size, &panel_total) ||
-            ext == INT64_MAX || !checked_mul(compact?0:ext, ext + 1, &triangle)) {
-            status = VSDLSS_ERR_OOM; goto fail;
+    z->sn_parent = (csi *)malloc((size_t)z->count * sizeof(csi));
+    z->blk_ptr = (csi *)calloc((size_t)z->count + 1, sizeof(csi));
+    if (!z->column_start || !z->row_ptr || !z->panel_offset || !z->sn_parent ||
+        !z->blk_ptr) goto fail;
+    z->row_ptr[0] = z->panel_offset[0] = 0;
+    {
+        csi strict_nnz = 0;
+        for (s = 0; s < z->count; ++s) {
+            csi top = gstart[s + 1] - 1, width, ext, rows, size;
+            z->column_start[s] = fstart[gstart[s]];
+            width = fstart[top + 1] - fstart[gstart[s]];
+            ext = fptr[top + 1] - fptr[top];
+            if (!checked_add(z->row_ptr[s], ext, &z->row_ptr[s + 1]) ||
+                !checked_add(width, ext, &rows) ||
+                !checked_mul(rows, width, &size) ||
+                !checked_add(z->panel_offset[s], size, &z->panel_offset[s + 1]) ||
+                !trapezoid(width, ext, &size) ||
+                !checked_add(z->l_nnz, size, &z->l_nnz)) goto fail;
+            if (rows > z->max_rows) z->max_rows = rows;
         }
-        triangle /= 2;
-        if (!checked_add(update_total, triangle, &update_total)) {
-            status = VSDLSS_ERR_OOM; goto fail;
-        }
-        z->row_ptr[sn + 1] = external_total;
-        z->panel_offset[sn + 1] = panel_total;
-        z->update_ptr[sn + 1] = update_total;
+        z->column_start[z->count] = n;
+        for (j = 0; j < n; ++j) strict_nnz += cc[j];
+        z->relaxed_zeros = z->l_nnz - strict_nnz;
     }
-    if (!checked_count(external_total, sizeof(csi)) ||
-        !checked_count(panel_total, sizeof(csi)) ||
-        !checked_count(update_total, sizeof(csi))) { status = VSDLSS_ERR_OOM; goto fail; }
-    if (external_total)
-        z->row_index = (csi *)malloc((size_t)external_total * sizeof(csi));
-    z->l_panel_slot = (csi *)malloc((size_t)z->l_nnz * sizeof(csi));
-    if (update_total)
-        z->update_target = (csi *)malloc((size_t)update_total * sizeof(csi));
-    if ((external_total && !z->row_index) || !z->l_panel_slot ||
-        (update_total && !z->update_target)) { status = VSDLSS_ERR_OOM; goto fail; }
+    if (!checked_count(z->row_ptr[z->count], sizeof(csi)) ||
+        !checked_count(z->panel_offset[z->count], sizeof(double))) goto fail;
+    z->row_index = (csi *)malloc((size_t)(z->row_ptr[z->count] ? z->row_ptr[z->count] : 1) *
+                                 sizeof(csi));
+    owner = (csi *)malloc((size_t)n * sizeof(csi));
+    if (!z->row_index || !owner) goto fail;
+    for (s = 0; s < z->count; ++s) {
+        csi top = gstart[s + 1] - 1;
+        memcpy(z->row_index + z->row_ptr[s], frows + fptr[top],
+               (size_t)(fptr[top + 1] - fptr[top]) * sizeof(csi));
+        for (j = z->column_start[s]; j < z->column_start[s + 1]; ++j) owner[j] = s;
+    }
 
-    /* Panel-slot and update-target construction touch only per-supernode
-     * output slices (l_panel_slot follows l_col_ptr, update_target follows
-     * update_ptr), so both loops are data parallel over supernodes.  Both
-     * inner searches walk two ascending index lists, so a single advancing
-     * cursor replaces the former per-entry binary search: L column patterns
-     * and the external row list R are stored in increasing row order.
-     * Only integer indices are produced here; numeric results are unchanged. */
-    total = z->update_ptr[z->count];
-    {
-    int bad = 0;
-    int nt = vsdlss_parallel_width((double)z->l_nnz + (double)total);
-    if (nt > z->count) nt = (int)z->count;
-    (void)nt;
-    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
-    {
-        VSDLSS_OMP(omp master)
-        vsdlss_parallel_observe();
-        VSDLSS_OMP(omp for schedule(guided))
-        for (csi t = 0; t < z->count; ++t) {
-            csi begin = z->column_start[t], end = z->column_start[t + 1];
-            csi width = end - begin, ext = z->row_ptr[t + 1] - z->row_ptr[t];
-            csi rows = width + ext, jj, pp;
-            csi *R = z->row_index ? z->row_index + z->row_ptr[t] : NULL;
-            if (ext)
-                memcpy(R, z->l_row_index + z->l_col_ptr[end - 1] + 1,
-                       (size_t)ext * sizeof(csi));
-            for (jj = begin; jj < end; ++jj) {
-                csi cursor2 = 0;
-                for (pp = z->l_col_ptr[jj]; pp < z->l_col_ptr[jj + 1]; ++pp) {
-                    csi row = z->l_row_index[pp], local_row;
-                    if (row < end) local_row = row - begin;
-                    else {
-                        while (cursor2 < ext && R[cursor2] < row) ++cursor2;
-                        if (cursor2 == ext || R[cursor2] != row) { bad = 1; break; }
-                        local_row = width + cursor2;
-                    }
-                    z->l_panel_slot[pp] = z->panel_offset[t] + (jj - begin) * rows + local_row;
-                }
-                if (bad) break;
-            }
+    /* 5. source blocks, grouped by target and sorted by source. */
+    total = 0;
+    for (s = 0; s < z->count; ++s) {
+        const csi *R = z->row_index + z->row_ptr[s];
+        csi ext = z->row_ptr[s + 1] - z->row_ptr[s];
+        z->sn_parent[s] = ext ? owner[R[0]] : -1;
+        for (k = 0; k < ext;) {
+            csi d = owner[R[k]], e = k + 1;
+            if (d <= s) { status = VSDLSS_ERR_INVALID; goto fail; }
+            while (e < ext && owner[R[e]] == d) ++e;
+            z->blk_ptr[d + 1]++; ++total; k = e;
         }
     }
-    if (bad) { status = VSDLSS_ERR_INVALID; goto fail; }
-    if (!compact) {
-        VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
-        {
-            VSDLSS_OMP(omp master)
-            vsdlss_parallel_observe();
-            VSDLSS_OMP(omp for schedule(guided))
-            for (csi t = 0; t < z->count; ++t) {
-                csi ext = z->row_ptr[t + 1] - z->row_ptr[t], q, r;
-                const csi *R = z->row_index ? z->row_index + z->row_ptr[t] : NULL;
-                csi out = z->update_ptr[t];
-                for (q = 0; q < ext; ++q) {
-                    csi col = R[q], lo = z->l_col_ptr[col], hi = z->l_col_ptr[col + 1];
-                    for (r = q; r < ext; ++r) {
-                        csi row = R[r];
-                        while (lo < hi && z->l_row_index[lo] < row) ++lo;
-                        if (lo == hi || z->l_row_index[lo] != row) { bad = 1; break; }
-                        z->update_target[out++] = z->l_panel_slot[lo];
-                    }
-                    if (bad) break;
-                }
-            }
+    for (s = 0; s < z->count; ++s) z->blk_ptr[s + 1] += z->blk_ptr[s];
+    z->blk_src = (csi *)malloc((size_t)(total ? total : 1) * sizeof(csi));
+    z->blk_first = (csi *)malloc((size_t)(total ? total : 1) * sizeof(csi));
+    z->blk_end = (csi *)malloc((size_t)(total ? total : 1) * sizeof(csi));
+    if (!z->blk_src || !z->blk_first || !z->blk_end) goto fail;
+    for (s = 0; s < z->count; ++s) mark[s] = z->blk_ptr[s];
+    for (s = 0; s < z->count; ++s) {
+        const csi *R = z->row_index + z->row_ptr[s];
+        csi ext = z->row_ptr[s + 1] - z->row_ptr[s];
+        for (k = 0; k < ext;) {
+            csi d = owner[R[k]], e = k + 1, at;
+            while (e < ext && owner[R[e]] == d) ++e;
+            at = mark[d]++;
+            z->blk_src[at] = s; z->blk_first[at] = k; z->blk_end[at] = e; k = e;
         }
-        if (bad) { status = VSDLSS_ERR_INVALID; goto fail; }
     }
-    }
-    free(stack); free(mark); free(count); free(cursor);
-    *out = z; return VSDLSS_OK;
+    status = VSDLSS_OK;
 fail:
-    free(stack); free(mark); free(count); free(cursor);
-    vsdlss_sn_symbolic_free(z); return status;
+    vsdlss_spfree(AT);
+    free(parent); free(post); free(cc); free(fstart); free(fparent); free(fowner);
+    free(fptr); free(frows); free(head); free(next); free(mark); free(gstart);
+    free(owner);
+    if (status != VSDLSS_OK) { vsdlss_sn_symbolic_free(z); return status; }
+    *out = z; return VSDLSS_OK;
 }
 
 vsdlss_status vsdlss_sn_analyze(const vsdlss *A, vsdlss_sn_symbolic **out)
-{ return analyze(A,out,0); }
-vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *A, vsdlss_sn_symbolic **out)
-{ return analyze(A,out,1); }
+{ return analyze(A, out, 0); }
+vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *A, vsdlss_sn_symbolic **out)
+{ return analyze(A, out, 1); }

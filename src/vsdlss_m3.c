@@ -42,9 +42,11 @@ static vsdlss_status factor_component(vsdlss_m3_factor *factor,const vsdlss *nor
         if(cf->reduction->core_n && !factor->disk_mode) {
             status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
             if(status!=VSDLSS_OK) goto component_fail;
+            status=vsdlss_postorder_permutation(cf->reduction->core,cf->q,pinv);
+            if(status!=VSDLSS_OK) goto component_fail;
             permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
             if(!permuted) {status=VSDLSS_ERR_OOM;goto component_fail;}
-            status=vsdlss_sn_analyze(permuted,&symbolic);
+            status=vsdlss_sn_analyze_relaxed(permuted,&symbolic);
             if(status==VSDLSS_OK) status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
         }
 component_fail:
@@ -194,6 +196,41 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
     free(global); return status;
 }
 
+/* A batch of right-hand sides through every component: gather/reduce each
+ * RHS, run one batched supernodal solve per component, then recover.  The
+ * per-RHS arithmetic is that of solve_component, so results are identical. */
+static vsdlss_status solve_batch(const vsdlss_m3_factor *f,csi nrhs,const double *rhs,
+                                 csi ldrhs,double *dest,csi lddest)
+{
+    vsdlss_status st=VSDLSS_OK;
+    for(csi c=0;c<f->count&&st==VSDLSS_OK;c++){
+        const vsdlss_m3_component_factor *cf=f->component+c;
+        const csi begin=f->components->offset[c],cn=cf->n,core=cf->reduction->core_n;
+        const csi cnt=cf->reduction->count;
+        double *local=malloc((size_t)cn*sizeof(double)),*local_x=malloc((size_t)cn*sizeof(double));
+        double *core_rhs=core?malloc((size_t)core*sizeof(double)):NULL;
+        double *perm=core?malloc((size_t)core*(size_t)nrhs*sizeof(double)):NULL;
+        double *saved=cnt?malloc((size_t)cnt*(size_t)nrhs*sizeof(double)):NULL;
+        if(!local||!local_x||(core&&(!core_rhs||!perm))||(cnt&&!saved)){st=VSDLSS_ERR_OOM;goto next;}
+        for(csi r=0;r<nrhs&&st==VSDLSS_OK;r++){
+            const double *b=rhs+(size_t)r*ldrhs;
+            for(csi k=0;k<cn;k++)local[k]=b[f->components->vertices[begin+k]];
+            st=vsdlss_reduce_rhs(cf->reduction,local,core_rhs,cnt?saved+(size_t)r*cnt:NULL);
+            if(st==VSDLSS_OK&&core)for(csi k=0;k<core;k++)perm[(size_t)r*core+k]=core_rhs[cf->q[k]];
+        }
+        if(st==VSDLSS_OK&&core)st=vsdlss_sn_solve_batch(cf->numeric,nrhs,perm,core);
+        for(csi r=0;r<nrhs&&st==VSDLSS_OK;r++){
+            double *x=dest+(size_t)r*lddest;
+            if(core)for(csi k=0;k<core;k++)core_rhs[cf->q[k]]=perm[(size_t)r*core+k];
+            st=vsdlss_reduce_recover(cf->reduction,cnt?saved+(size_t)r*cnt:NULL,core_rhs,local_x);
+            if(st==VSDLSS_OK)for(csi k=0;k<cn;k++)x[f->components->vertices[begin+k]]=local_x[k];
+        }
+next:
+        free(local);free(local_x);free(core_rhs);free(perm);free(saved);
+    }
+    return st;
+}
+
 vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
     const double *rhs,csi ldrhs,double *solution,csi ldsolution)
 {
@@ -210,14 +247,19 @@ vsdlss_status vsdlss_m3_solve_many(const vsdlss_m3_factor *f,csi nrhs,
     int nt=vsdlss_parallel_width((double)f->n*nrhs*256);
     if(nt>nrhs)nt=(int)nrhs;
     (void)nt;
+    /* Contiguous groups of right-hand sides, one batched solve per group;
+     * `work` is private per RHS, so no extra staging is needed. */
+    csi groups=nt>1?nt:1;
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
     {
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
-        /* `work` is already private per RHS, so skip the per-RHS staging
-         * buffer and memcpy that vsdlss_m3_solve would add. */
-        VSDLSS_OMP(omp for schedule(dynamic,1))
-        for(csi r=0;r<nrhs;r++)results[r]=solve_into(f,rhs+(size_t)r*ldrhs,work+(size_t)r*f->n);
+        VSDLSS_OMP(omp for schedule(static,1))
+        for(csi g=0;g<groups;g++){
+            csi r0=nrhs*g/groups,r1=nrhs*(g+1)/groups;
+            if(r1>r0)results[r0]=solve_batch(f,r1-r0,rhs+(size_t)r0*ldrhs,ldrhs,
+                                             work+(size_t)r0*f->n,f->n);
+        }
     }
     for(csi r=0;r<nrhs;r++)if(results[r]!=VSDLSS_OK){status=results[r];break;}
     if(status==VSDLSS_OK)for(csi r=0;r<nrhs;r++)

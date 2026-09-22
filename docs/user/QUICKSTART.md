@@ -20,7 +20,7 @@ make -j4 smoke
 | 命令 | 内容 |
 |---|---|
 | `make smoke` | 四种公开求解入口的最小已知解测试 |
-| `make test` | 全部回归：输入、排序、低度处理、因子/残差、微内核、M4、DAG、M5 gate |
+| `make test` | 全部回归：输入、排序、低度处理、因子/残差、稠密内核、M4、树调度、随机超节点回归、M5 gate |
 | `make test-m3` | M3 因子与恢复、分配失败注入 |
 | `make test-m4 test-m4-panels` | 磁盘分块、保存/重开与 I/O 故障 |
 | `make test-reduced-dag` | 混合空/非空核心、预算、恢复、单分量 DAG 一致性 |
@@ -55,7 +55,7 @@ python3 test/gen_sparse.py demo 10
 ./vsdlss_solver --disk-budget 1048576 --load-factor demo.factor demo
 ```
 
-load-factor 的 job 必须对应原因子矩阵；维度相同不能证明矩阵相同。文件为本项目 v2 格式，不兼容原版私有格式。组合 M4 reduced 不支持 save/load。DAG 是实验性内存分解路径，用 `--m3 --dag --threads 4` 显式启用；默认关闭，小矩阵上可能显著变慢。
+load-factor 的 job 必须对应原因子矩阵；维度相同不能证明矩阵相同。文件为本项目 v2 格式，不兼容原版私有格式。组合 M4 reduced 不支持 save/load。`--dag` 仍被接受，但自 2026-09-21 重构起多线程内存分解总是使用子树 + 树顶调度，该开关不再改变结果或路径。
 
 ## 4. C 接口契约
 
@@ -83,7 +83,7 @@ order：0 默认 MLD，1 RCM，2 自然序，3 最小度，4 MLD，5 AMD（新�
 
 多 RHS：`vsdlss_m3_solve_many(f,nrhs,rhs,ldrhs,out,ldout)`，按列存放，每列为一个长度 n 的 RHS，两个 leading dimension 均至少 n，nrhs 至少 1。输出整批成功后提交。M4 reduced 对象不得传入此入口；M4 和 M4 reduced 同一因子不支持外部并发调用。
 
-`vsdlss_set_num_threads(n)` 是调用线程局部设置，默认 1；先检查返回状态。`vsdlss_parallel_last_team_size()` 是观察到的最大线程组，不是利用率。`vsdlss_set_dag_enabled(1)` 只打开内存数值分解 DAG。
+`vsdlss_set_num_threads(n)` 是调用线程局部设置，默认 1；先检查返回状态。`vsdlss_parallel_last_team_size()` 是观察到的最大线程组，不是利用率。`vsdlss_set_dag_enabled` 仅为兼容保留，不影响当前分解路径。
 
 M4 budget 限制磁盘数值工作区及其约定元数据，不是进程总内存上限。M4 reduced 的 disk_budget 是所有子因子的该工作区之和，预处理、核心矩阵和恢复向量额外驻留。budget 太小会失败；不要将磁盘模式理解为任意矩阵都能装入该内存。临时目录必须存在且可写；可通过 CLI --temp-dir 或 API directory 指定。
 
@@ -112,4 +112,4 @@ make dist
 
 静态库不意味着所有运行时静态链接：默认仍需平台的 libm/OpenMP 运行时。这里交付源码发行包和构建方法，不声明跨平台二进制 ABI 稳定，也不擅自增加许可证授权。
 
-发布验收：解压包 → make clean → make smoke → make test；在接收方目标平台重复验证。DAG 保持默认关闭。M5 测试通过只表示适配器/gate 自检通过，不表示原版兼容已验收。
+发布验收：解压包 → make clean → make smoke → make test；在接收方目标平台重复验证。M5 测试通过只表示适配器/gate 自检通过，不表示原版兼容已验收。

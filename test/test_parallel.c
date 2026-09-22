@@ -31,12 +31,6 @@ static int panel_tile_boundaries(void)
             a[rows-1]=NAN;
             CHECK(vsdlss_panel_factor(a,rows,width)==VSDLSS_ERR_NONFINITE);
         }
-        for(csi i=0;i<rows;i++) {
-            double expected=0;
-            for(csi k=0;k<width;k++)expected+=l[k*rows+i]*l[k*rows+i];
-            double got=vsdlss_panel_dot(l,rows,width,i,i);
-            CHECK(memcmp(&expected,&got,sizeof(double))==0);
-        }
         free(l);free(a);
     }
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);return 0;
