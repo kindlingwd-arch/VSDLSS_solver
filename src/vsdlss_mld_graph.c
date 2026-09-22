@@ -10,6 +10,14 @@ struct vsdlss_mld_level {
 };
 
 typedef struct edge_record { csi a,b,w; } edge_record;
+typedef struct degree_key { csi degree,original,vertex; } degree_key;
+
+static int degree_compare(const void *x,const void *y)
+{
+    const degree_key *a=x,*b=y;
+    if(a->degree!=b->degree)return (a->degree>b->degree)-(a->degree<b->degree);
+    return (a->original>b->original)-(a->original<b->original);
+}
 
 static int edge_compare(const void *x,const void *y)
 {
@@ -77,21 +85,34 @@ static vsdlss_status make_level(csi n,const csi *vw,const csi *orig,
     free(cursor); *out=g; return VSDLSS_OK;
 }
 
-vsdlss_status vsdlss_mld_level_build(const vsdlss *A,const csi *vertices,csi count,
-                                      vsdlss_mld_level **out)
+/* `local` is an n-array of -1 supplied by the caller (or NULL to allocate);
+ * it is restored to -1 before returning, so recursive callers can reuse one
+ * workspace instead of paying O(n) per subgraph. */
+vsdlss_status vsdlss_mld_level_build_ws(const vsdlss *A,const csi *vertices,csi count,
+                                         csi *local_ws,vsdlss_mld_level **out)
 {
-    csi *local=NULL,*vw=NULL,*orig=NULL,col,p,m=0; edge_record *e=NULL; vsdlss_status s;
+    csi *local=local_ws,*vw=NULL,*orig=NULL,col,p,m=0,set=0; edge_record *e=NULL; vsdlss_status s;
     if (!A||!out||count<0||count>A->n) return VSDLSS_ERR_INVALID;
     *out=NULL;
-    local=malloc((size_t)A->n*sizeof(csi)); vw=malloc((size_t)count*sizeof(csi)); orig=malloc((size_t)count*sizeof(csi));
-    e=malloc((size_t)A->p[A->n]*sizeof(*e));
-    if ((!local&&A->n)||(!vw&&count)||(!orig&&count)||(!e&&A->p[A->n]>0)) { s=VSDLSS_ERR_OOM; goto done; }
-    for (col=0;col<A->n;col++) local[col]=-1;
-    for (col=0;col<count;col++) { csi v=vertices?vertices[col]:col; if(v<0||v>=A->n||local[v]>=0){s=VSDLSS_ERR_INVALID;goto done;} local[v]=col;vw[col]=1;orig[col]=v; }
+    if(!local){local=malloc((size_t)(A->n?A->n:1)*sizeof(csi));if(local)for(col=0;col<A->n;col++)local[col]=-1;}
+    vw=malloc((size_t)(count?count:1)*sizeof(csi)); orig=malloc((size_t)(count?count:1)*sizeof(csi));
+    if (!local||!vw||!orig) { s=VSDLSS_ERR_OOM; goto done; }
+    for (col=0;col<count;col++) { csi v=vertices?vertices[col]:col; if(v<0||v>=A->n||local[v]>=0){s=VSDLSS_ERR_INVALID;goto done;} local[v]=col;vw[col]=1;orig[col]=v;set++; }
+    for (col=0;col<count;col++) { csi old=orig[col]; for(p=A->p[old];p<A->p[old+1];p++) if(A->i[p]!=old&&local[A->i[p]]>=0) m++; }
+    e=malloc((size_t)(m?m:1)*sizeof(*e));
+    if(!e){s=VSDLSS_ERR_OOM;goto done;}
+    m=0;
     for (col=0;col<count;col++) { csi old=orig[col]; for(p=A->p[old];p<A->p[old+1];p++){csi row=A->i[p]; if(row!=old&&local[row]>=0){csi a=col,b=local[row];if(a>b){csi t=a;a=b;b=t;} e[m++]=(edge_record){a,b,1};}} }
     s=make_level(count,vw,orig,e,m,out);
-done: free(local);free(vw);free(orig);free(e);return s;
+done:
+    if(local){for(col=0;col<set;col++)local[orig[col]]=-1;}
+    if(local!=local_ws)free(local);
+    free(vw);free(orig);free(e);return s;
 }
+
+vsdlss_status vsdlss_mld_level_build(const vsdlss *A,const csi *vertices,csi count,
+                                      vsdlss_mld_level **out)
+{ return vsdlss_mld_level_build_ws(A,vertices,count,NULL,out); }
 
 vsdlss_status vsdlss_mld_coarsen_one(vsdlss_mld_level *f,vsdlss_mld_level **out)
 {
@@ -104,10 +125,22 @@ vsdlss_status vsdlss_mld_coarsen_one(vsdlss_mld_level *f,vsdlss_mld_level **out)
     for(k=0;k<f->n;k++)total+=f->vertex_weight[k];
     target=f->n/2; if(target<1)target=1;
     cap=(3*total+target-1)/target; if(cap<2)cap=2;
-    for(k=1;k<f->n;k++){csi v=order[k],d=f->offset[v+1]-f->offset[v],x=k;while(x&&((f->offset[order[x-1]+1]-f->offset[order[x-1]]>d)||((f->offset[order[x-1]+1]-f->offset[order[x-1]]==d)&&f->original[order[x-1]]>f->original[v]))){order[x]=order[x-1];x--;}order[x]=v;}
+    /* Visit order: ascending degree, ties by original id.  Original ids are
+     * unique, so this total order equals the former insertion sort's. */
+    {
+        degree_key *key=malloc((size_t)(f->n?f->n:1)*sizeof(*key));
+        if(!key){s=VSDLSS_ERR_OOM;goto done;}
+        for(k=0;k<f->n;k++){key[k].degree=f->offset[k+1]-f->offset[k];key[k].original=f->original[k];key[k].vertex=k;}
+        qsort(key,(size_t)f->n,sizeof(*key),degree_compare);
+        for(k=0;k<f->n;k++)order[k]=key[k].vertex;
+        free(key);
+    }
     for(k=0;k<f->n;k++){csi v=order[k],best=-1,bw=-1;if(mate[v]>=0)continue;for(j=f->offset[v];j<f->offset[v+1];j++){csi w=f->neighbor[j];if(mate[w]<0&&f->vertex_weight[v]+f->vertex_weight[w]<=cap&&(f->edge_weight[j]>bw||(f->edge_weight[j]==bw&&f->original[w]<(best<0?INT64_MAX:f->original[best])))){best=w;bw=f->edge_weight[j];}}mate[v]=v;if(best>=0)mate[best]=v;}
     f->map=malloc((size_t)f->n*sizeof(csi)); if(!f->map&&f->n){s=VSDLSS_ERR_OOM;goto done;}
-    for(k=0;k<f->n;k++)if(mate[k]==k){f->map[k]=nc;for(j=0;j<f->n;j++)if(j!=k&&mate[j]==k)f->map[j]=nc;nc++;}
+    /* Coarse ids in increasing order of the representative (mate[k]==k);
+     * a matched partner points at its representative. */
+    for(k=0;k<f->n;k++)if(mate[k]==k)f->map[k]=nc++;
+    for(k=0;k<f->n;k++)if(mate[k]!=k)f->map[k]=f->map[mate[k]];
     vw=calloc((size_t)nc,sizeof(csi));orig=malloc((size_t)nc*sizeof(csi));e=malloc((size_t)(f->nz/2)*sizeof(*e));if((!vw&&nc)||(!orig&&nc)||(!e&&f->nz)){s=VSDLSS_ERR_OOM;goto done;}
     for(k=0;k<nc;k++)orig[k]=INT64_MAX;
     for(k=0;k<f->n;k++){csi c=f->map[k];vw[c]+=f->vertex_weight[k];if(f->original[k]<orig[c])orig[c]=f->original[k];}

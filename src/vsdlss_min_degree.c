@@ -3,25 +3,40 @@
 #include <limits.h>
 #include <string.h>
 
-vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
-                                       csi count, csi *order)
+static int csi_less(const void *a, const void *b)
 {
-    csi *map = NULL, *next = NULL, *local_q = NULL;
+    csi x = *(const csi *)a, y = *(const csi *)b;
+    return (x > y) - (x < y);
+}
+
+/* Subgraph columns are visited in increasing global index, exactly as the
+ * former full 0..n-1 scan did, so the subgraph and the order are unchanged;
+ * only the O(n) scan and map setup per call are gone. */
+vsdlss_status vsdlss_min_degree_subset_ws(const vsdlss *A, const csi *vertices,
+                                          csi count, csi *order, csi *map_ws)
+{
+    csi *map = map_ws, *next = NULL, *local_q = NULL, *cols = NULL;
     vsdlss *sub = NULL;
-    csi k, col, p, nz = count;
+    csi k, c, p, nz = count, set = 0;
     vsdlss_status status = VSDLSS_ERR_OOM;
     if (!A || !vertices || !order || count < 1 || count > A->n) return VSDLSS_ERR_INVALID;
-    map = (csi *)malloc((size_t)A->n * sizeof(csi));
-    if (!map) goto done;
-    for (k = 0; k < A->n; ++k) map[k] = -1;
+    if (!map) {
+        map = (csi *)malloc((size_t)A->n * sizeof(csi));
+        if (!map) goto done;
+        for (k = 0; k < A->n; ++k) map[k] = -1;
+    }
+    cols = (csi *)malloc((size_t)count * sizeof(csi));
+    if (!cols) goto done;
     for (k = 0; k < count; ++k) {
         if (vertices[k] < 0 || vertices[k] >= A->n || map[vertices[k]] >= 0) {
             status = VSDLSS_ERR_INVALID;
             goto done;
         }
-        map[vertices[k]] = k;
+        map[vertices[k]] = k; cols[set++] = vertices[k];
     }
-    for (col = 0; col < A->n; ++col) if (map[col] >= 0) {
+    qsort(cols, (size_t)count, sizeof(csi), csi_less);
+    for (c = 0; c < count; ++c) {
+        csi col = cols[c];
         for (p = A->p[col]; p < A->p[col + 1]; ++p)
             if (A->i[p] != col && map[A->i[p]] >= 0) {
                 if (nz == INT64_MAX) goto done;
@@ -32,7 +47,8 @@ vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
     next = (csi *)calloc((size_t)count, sizeof(csi));
     if (!sub || !next) goto done;
     for (k = 0; k < count; ++k) next[k] = 1;
-    for (col = 0; col < A->n; ++col) if (map[col] >= 0) {
+    for (c = 0; c < count; ++c) {
+        csi col = cols[c];
         for (p = A->p[col]; p < A->p[col + 1]; ++p) if (A->i[p] != col && map[A->i[p]] >= 0) {
             csi a = map[A->i[p]], b = map[col];
             next[a > b ? a : b]++;
@@ -46,7 +62,8 @@ vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
         sub->i[at] = k;
         sub->x[at] = 1.0;
     }
-    for (col = 0; col < A->n; ++col) if (map[col] >= 0) {
+    for (c = 0; c < count; ++c) {
+        csi col = cols[c];
         for (p = A->p[col]; p < A->p[col + 1]; ++p) if (A->i[p] != col && map[A->i[p]] >= 0) {
             csi a = map[A->i[p]], b = map[col], upper_col = a > b ? a : b;
             csi at = next[upper_col]++;
@@ -58,8 +75,16 @@ vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
     if (status != VSDLSS_OK) goto done;
     for (k = 0; k < count; ++k) order[k] = vertices[local_q[k]];
 done:
-    free(map); free(next); free(local_q); vsdlss_spfree(sub);
+    if (map) for (k = 0; k < set; ++k) map[cols[k]] = -1;
+    if (map != map_ws) free(map);
+    free(cols); free(next); free(local_q); vsdlss_spfree(sub);
     return status;
+}
+
+vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
+                                       csi count, csi *order)
+{
+    return vsdlss_min_degree_subset_ws(A, vertices, count, order, NULL);
 }
 
 vsdlss_status vsdlss_min_degree_order(const vsdlss *A, csi **q,

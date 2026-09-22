@@ -7,6 +7,7 @@ typedef struct mld_context {
     const vsdlss *A;
     const vsdlss_graph *graph;
     csi *member, *distance, *queue;
+    csi *map;              /* n-array of -1 shared by subgraph builders */
     csi generation, separators;
 } mld_context;
 
@@ -145,7 +146,7 @@ static vsdlss_status partition_connected(mld_context *ctx, const csi *v, csi n,
     *left = *right = *separator = 0;
     level = (vsdlss_mld_level **)calloc((size_t)n + 1, sizeof(*level));
     if (!level) return VSDLSS_ERR_OOM;
-    status = vsdlss_mld_level_build(ctx->A, v, n, &level[0]);
+    status = vsdlss_mld_level_build_ws(ctx->A, v, n, ctx->map, &level[0]);
     if (status != VSDLSS_OK) goto multilevel_done;
     while (vsdlss_mld_level_vertices(level[depth]) > 32) {
         csi fine_n = vsdlss_mld_level_vertices(level[depth]);
@@ -232,7 +233,7 @@ static vsdlss_status order_connected(mld_context *ctx, const csi *v, csi n,
     csi left, right, separator, li = 0, ri = 0, si = 0, k;
     vsdlss_status status;
     if (n <= 32) {
-        status = vsdlss_min_degree_subset(ctx->A, v, n, out);
+        status = vsdlss_min_degree_subset_ws(ctx->A, v, n, out, ctx->map);
         if (status == VSDLSS_OK) *written = n;
         return status;
     }
@@ -266,7 +267,7 @@ static vsdlss_status order_connected(mld_context *ctx, const csi *v, csi n,
         if (status != VSDLSS_OK) goto done;
         *written += emitted;
     }
-    status = vsdlss_min_degree_subset(ctx->A, sv, separator, out + *written);
+    status = vsdlss_min_degree_subset_ws(ctx->A, sv, separator, out + *written, ctx->map);
     if (status == VSDLSS_OK) *written += separator;
 done:
     free(side); free(lv); free(rv); free(sv);
@@ -324,12 +325,15 @@ static vsdlss_status context_init(const vsdlss *A, mld_context *ctx,
     ctx->member = (csi *)calloc((size_t)A->n, sizeof(csi));
     ctx->distance = (csi *)malloc((size_t)A->n * sizeof(csi));
     ctx->queue = (csi *)malloc((size_t)A->n * sizeof(csi));
-    return (!ctx->member || !ctx->distance || !ctx->queue) ? VSDLSS_ERR_OOM : VSDLSS_OK;
+    ctx->map = (csi *)malloc((size_t)A->n * sizeof(csi));
+    if (!ctx->member || !ctx->distance || !ctx->queue || !ctx->map) return VSDLSS_ERR_OOM;
+    for (csi k = 0; k < A->n; ++k) ctx->map[k] = -1;
+    return VSDLSS_OK;
 }
 
 static void context_finish(mld_context *ctx, vsdlss_graph *graph)
 {
-    free(ctx->member); free(ctx->distance); free(ctx->queue);
+    free(ctx->member); free(ctx->distance); free(ctx->queue); free(ctx->map);
     vsdlss_graph_free(graph);
 }
 

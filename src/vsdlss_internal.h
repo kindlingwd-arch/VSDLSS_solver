@@ -20,6 +20,9 @@ vsdlss_status vsdlss_min_degree_order(const vsdlss *A, csi **q,
                                       vsdlss_order_stats *stats);
 vsdlss_status vsdlss_min_degree_subset(const vsdlss *A, const csi *vertices,
                                        csi count, csi *order);
+/* map_ws: n-array of -1 (restored on return) to avoid O(n) setup per call. */
+vsdlss_status vsdlss_min_degree_subset_ws(const vsdlss *A, const csi *vertices,
+                                          csi count, csi *order, csi *map_ws);
 vsdlss_status vsdlss_amd_order(const vsdlss *A, csi **q,
                                vsdlss_order_stats *stats);
 vsdlss_status vsdlss_mld_order(const vsdlss *A, csi **q,
@@ -29,6 +32,9 @@ vsdlss_status vsdlss_mld_top_partition(const vsdlss *A, signed char *side,
 
 vsdlss_status vsdlss_mld_level_build(const vsdlss *A, const csi *vertices,
                                       csi count, vsdlss_mld_level **out);
+vsdlss_status vsdlss_mld_level_build_ws(const vsdlss *A, const csi *vertices,
+                                         csi count, csi *local_ws,
+                                         vsdlss_mld_level **out);
 void vsdlss_mld_level_free(vsdlss_mld_level *level);
 csi vsdlss_mld_level_vertices(const vsdlss_mld_level *level);
 csi vsdlss_mld_level_edges(const vsdlss_mld_level *level);
