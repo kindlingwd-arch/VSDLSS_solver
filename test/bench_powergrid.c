@@ -140,6 +140,30 @@ int main(int argc,char **argv)
     if(st!=VSDLSS_OK){printf("solve_many failed\n");return 1;}
     printf("order=%d threads=%d factor=%.3fs solve1=%.3fs solve%d=%.3fs core_nnzL=%.3gM backward_error=%.2e\n",
            order,threads,tf,ts,nrhs,tm,lnz*1e-6,eta);
+    csi *packed_to_global=malloc((size_t)n*sizeof(csi));
+    double *packed_rhs=malloc((size_t)n*sizeof(double)),*packed_x=malloc((size_t)n*sizeof(double));
+    if(!packed_to_global||!packed_rhs||!packed_x||
+       vsdlss_m3_export_packed_permutation(f,packed_to_global,n)!=VSDLSS_OK){puts("packed setup failed");return 1;}
+    for(csi k=0;k<n;k++)packed_rhs[k]=b[packed_to_global[k]];
+    double ordinary_times[6],packed_times[6];
+    for(int rep=0;rep<7;rep++)for(int side=0;side<2;side++){
+        int use_packed=(rep+side)&1;
+        t=now();st=use_packed?vsdlss_m3_solve_packed(f,packed_rhs,packed_x)
+                         :vsdlss_m3_solve(f,b,x);
+        double elapsed=now()-t;
+        if(st!=VSDLSS_OK){printf("paired solve failed: %s\n",vsdlss_status_string(st));return 1;}
+        if(rep>0){if(use_packed)packed_times[rep-1]=elapsed;else ordinary_times[rep-1]=elapsed;}
+    }
+    for(csi k=0;k<n;k++)if(memcmp(packed_x+k,x+packed_to_global[k],sizeof(double))){
+        puts("packed solution differs from ordinary solution");return 1;
+    }
+    for(int i=1;i<6;i++)for(int j=i;j>0;j--){
+        if(ordinary_times[j]<ordinary_times[j-1]){double v=ordinary_times[j];ordinary_times[j]=ordinary_times[j-1];ordinary_times[j-1]=v;}
+        if(packed_times[j]<packed_times[j-1]){double v=packed_times[j];packed_times[j]=packed_times[j-1];packed_times[j-1]=v;}
+    }
+    printf("# paired: ordinary_median=%.5fs packed_median=%.5fs checked=bitwise (alternating order, 6 each, packing excluded)\n",
+           (ordinary_times[2]+ordinary_times[3])*0.5,(packed_times[2]+packed_times[3])*0.5);
+    free(packed_to_global);free(packed_rhs);free(packed_x);
     vsdlss_m3_factor_free(f);vsdlss_spfree(A);free(b);free(x);
     return 0;
 }
