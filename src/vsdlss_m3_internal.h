@@ -20,6 +20,12 @@ typedef struct vsdlss_elim_record {
     double pivot, multiplier[3];
 } vsdlss_elim_record;
 
+typedef struct vsdlss_pk_seg {
+    csi k0, count, nbn;
+    uint32_t *head, *nb;
+    double *val;
+} vsdlss_pk_seg;
+
 typedef struct vsdlss_reduction {
     csi n, count, core_n;
     vsdlss_elim_record *records;
@@ -30,6 +36,16 @@ typedef struct vsdlss_reduction {
      * blocks can be replayed concurrently; the rest follow sequentially. */
     csi blocks;
     csi *block_ptr;
+    /* Packed replay form (records is then NULL): segments pk[0..pk_count)
+     * cover records [pk[s].k0, pk[s].k0 + pk[s].count) in order.  When the
+     * reduction is blocked, segment b < blocks is block b and the last one
+     * holds the sequential tail.  Within a segment, record i has head[i] =
+     * vertex | degree << 30, neighbours nb[o..o+d) and pivot, multipliers
+     * val[i+o], val[i+o+1..i+o+d] (o = sum of the degrees before i).  Packed
+     * records were validated (indices in range, pivots and multipliers
+     * finite, pivots nonzero), so replay needs no per-entry checks. */
+    csi pk_count;
+    struct vsdlss_pk_seg *pk;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -77,7 +93,7 @@ typedef struct vsdlss_m3_component_factor {
     csi *gather;                 /* NULL, or global vertex of each local index */
     vsdlss_m4_factor *disk;
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
-    csi *q;                      /* q[new] = old for the reduced core */
+    csi *core_map;               /* local vertex of each (permuted) core unknown */
     vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
     /* Solve workspace allocated with the factor, so repeated solves do not
      * allocate (and fault in) large buffers.  A solve takes it with an
@@ -90,8 +106,6 @@ typedef struct vsdlss_m3_component_factor {
 struct vsdlss_m3_factor {
     csi n, count;
     int disk_mode;
-    double *ws_global;                   /* staging buffer for vsdlss_m3_solve */
-    atomic_int ws_busy;
     vsdlss_components *components;       /* owns global/local maps */
     vsdlss_m3_component_factor *component; /* count owned entries */
 };
@@ -148,6 +162,19 @@ void vsdlss_reduction_free(vsdlss_reduction *);
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 /* Non-transactional in-place variants for callers with private buffers. */
+/* Replaces records by the packed form (about half the bytes; the solve's
+ * reduction replay is bandwidth bound).  Keeps records, returning OK, when
+ * they cannot be packed (n > 2^30, invalid entries); OOM leaves r as is. */
+vsdlss_status vsdlss_reduce_pack(vsdlss_reduction *);
+/* vsdlss_reduce_run producing the packed form directly (same result as
+ * vsdlss_reduce_run followed by vsdlss_reduce_pack, without compacting). */
+typedef struct { double *local, *saved, *core; } vsdlss_reduce_ws;
+/* ws (optional) receives solve buffers of n, count and core_n doubles taken
+ * over from the reduction's own arrays (NULL when a size is 0). */
+vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *, vsdlss_reduction **,
+                                       vsdlss_reduce_ws *ws);
+/* work must be finite on entry (callers check while gathering); overflow in
+ * the replay shows up as a non-finite core RHS or in the backward pass. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);

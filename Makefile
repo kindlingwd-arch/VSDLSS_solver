@@ -189,4 +189,8 @@ bench_pg_profile: test/bench_pg_profile.c $(LIBSRCS) include/vsdlss.h src/vsdlss
 bench-pg-profile: bench_pg_profile
 	VSDLSS_TRACE=1 ./bench_pg_profile 5 2 1 1
 
-.PHONY: bench-pg-profile
+# Same histogram as two separate nets (VDD 52% / GND 48%): two components
+bench-pg-vddgnd: bench_pg_profile
+	PG_NETS=2 VSDLSS_TRACE=1 ./bench_pg_profile 5 2 1 1
+
+.PHONY: bench-pg-profile bench-pg-vddgnd

@@ -1,4 +1,5 @@
 #include "vsdlss_m3_internal.h"
+#include "vsdlss_parallel.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -117,8 +118,8 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int rela
     if (!cc || !AT) goto fail;
 
     /* 2. maximal supernodes over the given column order. */
-    fstart = (csi *)malloc((size_t)(n + 1) * sizeof(csi));
-    fowner = (csi *)malloc((size_t)n * sizeof(csi));
+    fstart = (csi *)vsdlss_big_malloc((size_t)(n + 1) * sizeof(csi));
+    fowner = (csi *)vsdlss_big_malloc((size_t)n * sizeof(csi));
     if (!fstart || !fowner) goto fail;
     for (j = 0; j < n; ++j) {
         if (cc[j] < 1 || cc[j] > n - j) { status = VSDLSS_ERR_INVALID; goto fail; }
@@ -131,7 +132,7 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int rela
     fptr = (csi *)malloc((size_t)(fcount + 1) * sizeof(csi));
     head = (csi *)malloc((size_t)fcount * sizeof(csi));
     next = (csi *)malloc((size_t)fcount * sizeof(csi));
-    mark = (csi *)malloc((size_t)n * sizeof(csi));
+    mark = (csi *)vsdlss_big_malloc((size_t)n * sizeof(csi));
     if (!fparent || !fptr || !head || !next || !mark) goto fail;
     fptr[0] = 0;
     for (s = 0; s < fcount; ++s) {
@@ -141,7 +142,7 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int rela
         head[s] = -1;
     }
     if (!checked_count(fptr[fcount], sizeof(csi))) goto fail;
-    frows = (csi *)malloc((size_t)(fptr[fcount] ? fptr[fcount] : 1) * sizeof(csi));
+    frows = (csi *)vsdlss_big_malloc((size_t)(fptr[fcount] ? fptr[fcount] : 1) * sizeof(csi));
     if (!frows) goto fail;
     for (s = fcount - 1; s >= 0; --s)
         if (fparent[s] >= 0) { next[s] = head[fparent[s]]; head[fparent[s]] = s; }
@@ -240,9 +241,9 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int rela
     }
     if (!checked_count(z->row_ptr[z->count], sizeof(csi)) ||
         !checked_count(z->panel_offset[z->count], sizeof(double))) goto fail;
-    z->row_index = (csi *)malloc((size_t)(z->row_ptr[z->count] ? z->row_ptr[z->count] : 1) *
+    z->row_index = (csi *)vsdlss_big_malloc((size_t)(z->row_ptr[z->count] ? z->row_ptr[z->count] : 1) *
                                  sizeof(csi));
-    owner = (csi *)malloc((size_t)n * sizeof(csi));
+    owner = (csi *)vsdlss_big_malloc((size_t)n * sizeof(csi));
     if (!z->row_index || !owner) goto fail;
     for (s = 0; s < z->count; ++s) {
         csi top = gstart[s + 1] - 1;

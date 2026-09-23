@@ -32,6 +32,7 @@
  */
 
 #include "vsdlss_internal.h"
+#include "vsdlss_parallel.h"
 
 #include <limits.h>
 #include <math.h>
@@ -80,8 +81,8 @@ static vsdlss_status amd_build_graph(const vsdlss *A, csi **out_p, csi **out_i,
 {
     csi n = A->n, j, p, cnz = 0, t, *Cp = NULL, *Ci = NULL, *cursor = NULL;
     if ((uint64_t)(n + 1) > SIZE_MAX / sizeof(csi)) return VSDLSS_ERR_OOM;
-    Cp = (csi *)calloc((size_t)n + 1, sizeof(csi));
-    cursor = (csi *)malloc((size_t)n * sizeof(csi));
+    Cp = (csi *)vsdlss_big_calloc((size_t)n + 1, sizeof(csi));
+    cursor = (csi *)vsdlss_big_malloc((size_t)n * sizeof(csi));
     if (!Cp || !cursor) { free(Cp); free(cursor); return VSDLSS_ERR_OOM; }
     for (j = 0; j < n; ++j)
         for (p = A->p[j]; p < A->p[j + 1]; ++p) {
@@ -100,7 +101,7 @@ static vsdlss_status amd_build_graph(const vsdlss *A, csi **out_p, csi **out_i,
     t = cnz + cnz / 5 + 2 * n;
     if (t < 1) t = 1;
     if ((uint64_t)t > SIZE_MAX / sizeof(csi)) { free(Cp); free(cursor); return VSDLSS_ERR_OOM; }
-    Ci = (csi *)malloc((size_t)t * sizeof(csi));
+    Ci = (csi *)vsdlss_big_malloc((size_t)t * sizeof(csi));
     if (!Ci) { free(Cp); free(cursor); return VSDLSS_ERR_OOM; }
     {   /* prefix sum in place: Cp[j] holds the count, becomes the start */
         csi total = 0;
@@ -139,8 +140,8 @@ vsdlss_status vsdlss_amd_order(const vsdlss *A, csi **out_q,
     status = amd_build_graph(A, &Cp, &Ci, &nzmax);
     if (status != VSDLSS_OK) return status;
     cnz = Cp[n];
-    P = (csi *)malloc((size_t)(n + 1) * sizeof(csi));
-    W = (csi *)malloc((size_t)(n + 1) * 8 * sizeof(csi));
+    P = (csi *)vsdlss_big_malloc((size_t)(n + 1) * sizeof(csi));
+    W = (csi *)vsdlss_big_malloc((size_t)(n + 1) * 8 * sizeof(csi));
     if (!P || !W) { free(P); free(W); free(Cp); free(Ci); return VSDLSS_ERR_OOM; }
     len = W; nv = W + (n + 1); next = W + 2 * (n + 1); head = W + 3 * (n + 1);
     elen = W + 4 * (n + 1); degree = W + 5 * (n + 1); w = W + 6 * (n + 1);
@@ -364,7 +365,7 @@ vsdlss_status vsdlss_amd_order(const vsdlss *A, csi **out_q,
         stats->separator_count = 0;
     }
     {   /* P is `last`'s storage; hand back exactly the first n entries. */
-        csi *q = (csi *)malloc((size_t)n * sizeof(csi));
+        csi *q = (csi *)vsdlss_big_malloc((size_t)n * sizeof(csi));
         if (!q) { status = VSDLSS_ERR_OOM; goto done; }
         memcpy(q, P, (size_t)n * sizeof(csi));
         *out_q = q;

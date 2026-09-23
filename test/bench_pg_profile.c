@@ -1,6 +1,7 @@
 /* Power-grid benchmark built to a prescribed node-degree histogram.
  *
  *   ./bench_pg_profile [order] [threads] [nrhs] [shuffle] [N d1 d2 d3 d4 d5 d6p]
+ *   PG_NETS=2 [PG_SPLIT=0.52] ./bench_pg_profile ...   separate VDD / GND nets
  *
  * Counts are exact numbers of nodes with degree 1, 2, 3, 4, 5 and >= 6
  * (off-diagonal neighbours).  Defaults are the customer case: N = 22875397,
@@ -30,6 +31,13 @@ static double now(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);retu
 static uint64_t rng=0x9E3779B97F4A7C15ULL;
 static uint64_t rnd(void){rng^=rng<<13;rng^=rng>>7;rng^=rng<<17;return rng;}
 static double uni(double a,double b){return a+(b-a)*(double)(rnd()>>11)*(1.0/9007199254740992.0);}
+static long anon_huge_mb(void)
+{
+    FILE *f=fopen("/proc/self/smaps_rollup","r"); char line[256]; long kb=-1;
+    if(!f)return -1;
+    while(fgets(line,sizeof line,f)) if(!strncmp(line,"AnonHugePages:",14)){kb=atol(line+14);break;}
+    fclose(f); return kb/1024;
+}
 static long peak_rss_mb(void)
 {
     FILE *f=fopen("/proc/self/status","r"); char line[256]; long kb=-1;
@@ -39,24 +47,28 @@ static long peak_rss_mb(void)
 }
 
 typedef struct { csi *a,*b; double *g; csi m,cap; } edges;
-static void add(edges *E,csi a,csi b,double g){E->a[E->m]=a;E->b[E->m]=b;E->g[E->m]=g;E->m++;}
-
-int main(int argc,char **argv)
+static void add(edges *E,csi a,csi b,double g)
 {
-    int order=argc>1?atoi(argv[1]):5, threads=argc>2?atoi(argv[2]):1;
-    int nrhs=argc>3?atoi(argv[3]):1, shuffle=argc>4?atoi(argv[4]):1;
-    csi N=22875397,D1=2561262,D2=15270759,D3=5000468,D4=42895,D5=10,D6=3;
-    if(argc>11){N=atoll(argv[5]);D1=atoll(argv[6]);D2=atoll(argv[7]);D3=atoll(argv[8]);
-        D4=atoll(argv[9]);D5=atoll(argv[10]);D6=atoll(argv[11]);}
-    if(D6!=3||D5<0||D4<47){fprintf(stderr,"generator expects d6p=3 and d4>=47\n");return 2;}
-    double t0=now();
+    if(E->m>=E->cap){fprintf(stderr,"edge capacity exceeded\n");exit(1);}
+    E->a[E->m]=a;E->b[E->m]=b;E->g[E->m]=g;E->m++;
+}
 
-    /* Lattice: interior junctions I must satisfy
-     *   deg3 = (I - D4 - D5) + D1   (hosts of taps are degree-3 wire nodes). */
-    /* Degree-sum parity: 3 supply nodes of degree 8/8/10 (26 pads), and one
-     * wire node carrying two taps (degree 4), so taps use D1-1 hosts.  Then
-     *   deg3 = (I - (D4-1) - D5) + (D1-2) single-tap hosts. */
-    csi I_target=D3-D1+D4+D5+1;
+/* One net (one connected grid).  sdeg: degrees of the D6 supply nodes; dbl:
+ * whether one wire node carries two taps (degree 4), used for parity. */
+typedef struct { csi N,D1,D2,D3,D4,D5,D6; int dbl; csi sdeg[3]; csi R,C; } spec_t;
+
+static csi pads_of(const spec_t *s){csi p=0;for(csi k=0;k<s->D6;k++)p+=s->sdeg[k];return p;}
+
+/* Appends the edges of one net with node ids base..base+N-1 and sets their
+ * ground conductances.  Returns 0 on success. */
+static int gen_net(spec_t *s,csi base,edges *E,double *ground)
+{
+    const csi D1=s->D1,D2=s->D2,D3=s->D3,D4=s->D4,D5=s->D5,N=s->N;
+    const csi pads=pads_of(s),dbl=s->dbl;
+    if(s->D6<1||s->D6>3||D5<0||D4<pads+2*D5+dbl){fprintf(stderr,"unsupported degree profile\n");return 2;}
+    /* Lattice: junctions of degree 3 must satisfy
+     *   deg3 = (I - (D4-dbl) - D5) + (D1-2*dbl) single-tap hosts. */
+    csi I_target=D3-D1+D4+D5+dbl;
     /* R even and C odd keep every boundary junction at degree >= 2.  Choose
      * the smallest such lattice with an even surplus X of degree-3 junctions;
      * X/2 interior vertical edges are then removed (each turns two degree-3
@@ -75,6 +87,7 @@ int main(int argc,char **argv)
         }
     }
     if(X<0){fprintf(stderr,"no lattice found\n");return 2;}
+    s->R=R;s->C=C;
     csi J=R*C;
     unsigned char *cut=calloc((size_t)J,1);      /* vertical edge below v removed */
     if(!cut){puts("alloc failed");return 1;}
@@ -101,64 +114,102 @@ int main(int argc,char **argv)
     }
     csi lat[4]={0};
     for(csi v=0;v<J;v++)lat[jdeg[v]<3?jdeg[v]:3]++;
-    /* Junction degrees before extras: lat[3] of degree 3, lat[2] of degree 2 (and a few 1). */
-    csi S=(D4-26-20-1)/2;   /* straps; 26 pads, 20 partners, 1 double-tap host */
-    if(2*S+47!=D4){fprintf(stderr,"d4 parity unsupported\n");return 2;}
-    /* Wire nodes: d2 = plain wire nodes + degree-2 junctions; hosts = D1. */
-    csi supply=3, H=D1-1, T=D2-lat[2]+H, extra_deg3_junctions=lat[3]-(D4+D5);
+    /* Straps; pads, 2*D5 strap partners and the double-tap host are degree 4. */
+    csi S=(D4-pads-2*D5-dbl)/2;
+    if(2*S+pads+2*D5+dbl!=D4){fprintf(stderr,"d4 parity unsupported\n");return 2;}
+    /* Wire nodes: d2 = plain wire nodes + degree-2 junctions; hosts = D1-dbl. */
+    csi supply=s->D6, H=D1-dbl, T=D2-lat[2]+H;
     csi n=J+T+D1+supply;
     if(n!=N) {
         /* Absorb the lattice rounding in the wire count so N is exact. */
         csi diff=N-n; T+=diff; n=N;
     }
-    (void)extra_deg3_junctions;
-    csi base=T/El, rem=T%El;
-    csi mcap=El*(base+2)+D1+S+20+25+16;
-    edges E={malloc((size_t)mcap*sizeof(csi)),malloc((size_t)mcap*sizeof(csi)),malloc((size_t)mcap*sizeof(double)),0,mcap};
-    double *ground=calloc((size_t)n,sizeof(double));
-    if(!E.a||!E.b||!E.g||!ground){puts("alloc failed");return 1;}
+    csi ebase=T/El, rem=T%El;
 
     /* Wires with taps: wire node t (0..T-1) hosts a tap iff the running share
-     * of D1 over T steps up, which spreads exactly D1 taps evenly. */
+     * of H over T steps up, which spreads the taps evenly. */
     csi wire=J, tap=J+T, t=0, e=0, taps=0;
     for(csi r=0;r<R;r++)for(csi c=0;c<C;c++)for(int dir=0;dir<2;dir++){
         csi v=r*C+c,w;
         if(dir==0){ if(c+1>=C)continue; w=v+1; }
         else { if(!VERT(r,c))continue; w=v+C; }
-        csi len=base+(e<rem); e++;
+        csi len=ebase+(e<rem); e++;
         csi prev=v;
         for(csi k=0;k<len;k++){
             csi node=wire++;
-            add(&E,prev,node,uni(0.5,2.0));
+            add(E,base+prev,base+node,uni(0.5,2.0));
             if((csi)((double)(t+1)*H/T)>(csi)((double)t*H/T)){
-                int two=taps==0;   /* the first host carries two taps */
-                for(int q=0;q<1+two;q++){add(&E,node,tap,uni(0.05,0.5));ground[tap]=1e-3;tap++;taps++;}
+                int two=dbl&&taps==0;   /* the first host may carry two taps */
+                for(int q=0;q<1+two;q++){add(E,base+node,base+tap,uni(0.05,0.5));ground[base+tap]=1e-3;tap++;taps++;}
             }
             t++; prev=node;
         }
-        add(&E,prev,w,uni(0.5,2.0));
+        add(E,base+prev,base+w,uni(0.5,2.0));
     }
     /* Extras on interior degree-3 junctions, spread with a stride. */
     unsigned char *used=calloc((size_t)J,1);
-    csi made=0; visit=0;
+    if(!used){puts("alloc failed");return 1;}
+    visit=0;
 #define NEXT_FREE(v) do{ for(;;){ if(visit>J){fprintf(stderr,"cannot place straps\n");return 2;} \
         v=NEXT_POS(); if(jdeg[v]==3&&!used[v]&&v%C+2<C&&jdeg[v+2]==3&&!used[v+2]) break; } }while(0)
-    for(csi s=0;s<S;s++){csi v;NEXT_FREE(v);used[v]=used[v+2]=1;add(&E,v,v+2,1.0);made++;}
-    for(csi s=0;s<D5;s++){ /* junction with two straps: partners on both sides */
+    for(csi q=0;q<S;q++){csi v;NEXT_FREE(v);used[v]=used[v+2]=1;add(E,base+v,base+v+2,1.0);}
+    for(csi q=0;q<D5;q++){ /* junction with two straps: partners on both sides */
         csi v;
         for(;;){NEXT_FREE(v); if(v%C>=2&&jdeg[v-2]==3&&!used[v-2])break;}
-        used[v]=used[v+2]=used[v-2]=1; add(&E,v,v+2,1.0); add(&E,v,v-2,1.0);
+        used[v]=used[v+2]=used[v-2]=1; add(E,base+v,base+v+2,1.0); add(E,base+v,base+v-2,1.0);
     }
-    csi sdeg[3]={8,8,10};
-    for(csi s=0;s<3;s++){
-        csi sn=J+T+D1+s; ground[sn]=100.0;
-        for(csi k=0;k<sdeg[s];k++){
+    for(csi q=0;q<supply;q++){
+        csi sn=J+T+D1+q; ground[base+sn]=100.0;
+        for(csi k=0;k<s->sdeg[q];k++){
             if(visit>J){fprintf(stderr,"cannot place pads\n");return 2;}
             csi v=NEXT_POS();
-            if(jdeg[v]!=3||used[v]){k--;continue;} used[v]=1; add(&E,sn,v,5.0);}
+            if(jdeg[v]!=3||used[v]){k--;continue;} used[v]=1; add(E,base+sn,base+v,5.0);}
     }
+#undef NEXT_FREE
+#undef VERT
+#undef NEXT_POS
     free(used); free(jdeg); free(cut);
     if(wire!=J+T||tap!=J+T+D1){fprintf(stderr,"generator bookkeeping failed %lld %lld\n",(long long)(wire-J-T),(long long)(tap-J-T-D1));return 1;}
+    return 0;
+}
+
+int main(int argc,char **argv)
+{
+    int order=argc>1?atoi(argv[1]):5, threads=argc>2?atoi(argv[2]):1;
+    int nrhs=argc>3?atoi(argv[3]):1, shuffle=argc>4?atoi(argv[4]):1;
+    csi N=22875397,D1=2561262,D2=15270759,D3=5000468,D4=42895,D5=10,D6=3;
+    if(argc>11){N=atoll(argv[5]);D1=atoll(argv[6]);D2=atoll(argv[7]);D3=atoll(argv[8]);
+        D4=atoll(argv[9]);D5=atoll(argv[10]);D6=atoll(argv[11]);}
+    /* PG_NETS=2: separate VDD and GND nets (two connected components), the
+     * histogram split PG_SPLIT : 1-PG_SPLIT (default 0.52). */
+    const char *env=getenv("PG_NETS"); int nets=env?atoi(env):1;
+    env=getenv("PG_SPLIT"); double split=env?atof(env):0.52;
+    if(D6!=3||(nets!=1&&nets!=2)||!(split>0.05&&split<0.95)){fprintf(stderr,"generator expects d6p=3, PG_NETS 1 or 2\n");return 2;}
+    spec_t sp[2]; memset(sp,0,sizeof sp);
+    if(nets==1){ sp[0]=(spec_t){N,D1,D2,D3,D4,D5,3,1,{8,8,10},0,0}; }
+    else {
+        /* VDD: 2 supply nodes (8, 8) and the double-tap host; GND: 1 supply
+         * node (10).  D4 parity per net is fixed by pads + dbl, and D1+D3+D5
+         * must be even per net (degree sum). */
+        spec_t *a=sp,*b=sp+1;
+        a->D1=(csi)llround(split*D1); a->D2=(csi)llround(split*D2); a->D3=(csi)llround(split*D3);
+        a->D4=(csi)llround(split*D4); a->D5=D5/2; a->D6=2; a->dbl=1; a->sdeg[0]=8; a->sdeg[1]=8;
+        if(!(a->D4&1))a->D4++;
+        if((a->D1+a->D3+a->D5)&1)a->D3++;
+        a->N=a->D1+a->D2+a->D3+a->D4+a->D5+a->D6;
+        *b=(spec_t){N-a->N,D1-a->D1,D2-a->D2,D3-a->D3,D4-a->D4,D5-a->D5,1,0,{10,0,0},0,0};
+        if((b->D4&1)||((b->D1+b->D3+b->D5)&1)){fprintf(stderr,"cannot split histogram with valid parity\n");return 2;}
+    }
+    double t0=now();
+    csi n=N, degsum=0;
+    for(int k=0;k<nets;k++)degsum+=sp[k].D1+2*sp[k].D2+3*sp[k].D3+4*sp[k].D4+5*sp[k].D5+pads_of(sp+k);
+    csi mcap=degsum/2+64;
+    edges E={malloc((size_t)mcap*sizeof(csi)),malloc((size_t)mcap*sizeof(csi)),malloc((size_t)mcap*sizeof(double)),0,mcap};
+    double *ground=calloc((size_t)n,sizeof(double));
+    if(!E.a||!E.b||!E.g||!ground){puts("alloc failed");return 1;}
+    csi base=0;
+    for(int k=0;k<nets;k++){ int rc=gen_net(sp+k,base,&E,ground); if(rc)return rc; base+=sp[k].N; }
+    csi R=sp[0].R,C=sp[0].C;
 
     /* Histogram of the generated graph. */
     csi *deg=calloc((size_t)n,sizeof(csi)), hist[7]={0}, maxdeg=0;
@@ -166,19 +217,21 @@ int main(int argc,char **argv)
     for(csi v=0;v<n;v++){if(deg[v]>maxdeg)maxdeg=deg[v];hist[deg[v]<6?deg[v]:6]++;}
     free(deg);
 
-    /* Upper CSC with shuffled numbering. */
+    /* Upper CSC with shuffled numbering (the two nets are interleaved). */
     csi *perm=malloc((size_t)n*sizeof(csi));
+    if(!perm){puts("alloc failed");return 1;}
     for(csi i=0;i<n;i++)perm[i]=i;
     if(shuffle)for(csi i=n-1;i>0;i--){csi j=(csi)(rnd()%(uint64_t)(i+1)),x=perm[i];perm[i]=perm[j];perm[j]=x;}
     vsdlss *A=vsdlss_spalloc(n,n,n+E.m,1,0);
     double *diag=calloc((size_t)n,sizeof(double));
-    if(!A||!diag||!perm){puts("alloc failed");return 1;}
+    if(!A||!diag){puts("alloc failed");return 1;}
     memset(A->p,0,(size_t)(n+1)*sizeof(csi));
     for(csi k=0;k<E.m;k++){csi a=perm[E.a[k]],b=perm[E.b[k]];A->p[(a>b?a:b)+1]++;diag[a]+=E.g[k];diag[b]+=E.g[k];}
     for(csi i=0;i<n;i++){diag[perm[i]]+=ground[i];A->p[i+1]++;}
     free(ground);
     for(csi j=0;j<n;j++)A->p[j+1]+=A->p[j];
     csi *cur=malloc((size_t)n*sizeof(csi));
+    if(!cur){puts("alloc failed");return 1;}
     for(csi j=0;j<n;j++)cur[j]=A->p[j];
     for(csi k=0;k<E.m;k++){csi a=perm[E.a[k]],b=perm[E.b[k]],col=a>b?a:b;A->i[cur[col]]=a<b?a:b;A->x[cur[col]++]=-E.g[k];}
     for(csi j=0;j<n;j++){A->i[cur[j]]=j;A->x[cur[j]++]=diag[j];}
@@ -186,6 +239,8 @@ int main(int argc,char **argv)
     free(cur);free(diag);free(perm);free(E.a);free(E.b);free(E.g);
     double tgen=now()-t0;
 
+    if(nets==2)printf("# nets: VDD n=%lld lattice=%lldx%lld  GND n=%lld lattice=%lldx%lld\n",
+                      (long long)sp[0].N,(long long)sp[0].R,(long long)sp[0].C,(long long)sp[1].N,(long long)sp[1].R,(long long)sp[1].C);
     printf("# pg_profile n=%lld edges=%lld nnz_upper=%lld nnz_full=%lld max_degree=%lld lattice=%lldx%lld gen=%.1fs\n",
            (long long)n,(long long)m,(long long)(m+n),(long long)(2*m+n),(long long)maxdeg,(long long)R,(long long)C,tgen);
     printf("# degree  target:   d1=%lld d2=%lld d3=%lld d4=%lld d5=%lld d6+=%lld\n",(long long)D1,(long long)D2,(long long)D3,(long long)D4,(long long)D5,(long long)D6);
@@ -219,8 +274,8 @@ int main(int argc,char **argv)
     double eta;vsdlss_backward_error(A,x,b,&eta);
     tt=now();st=vsdlss_m3_solve_many(f,nrhs,b,n,x,n);double tm=now()-tt;
     if(st!=VSDLSS_OK){printf("solve_many failed: %s\n",vsdlss_status_string(st));return 1;}
-    printf("# solve: first=%.2fs warm=%.2fs batch%d=%.2fs (%.2fs/RHS) backward_error=%.2e peak_rss=%ld MB\n",
-           ts,warm,nrhs,tm,tm/nrhs,eta,peak_rss_mb());
+    printf("# solve: first=%.2fs warm=%.2fs batch%d=%.2fs (%.2fs/RHS) backward_error=%.2e peak_rss=%ld MB huge_pages=%ld MB\n",
+           ts,warm,nrhs,tm,tm/nrhs,eta,peak_rss_mb(),anon_huge_mb());
     vsdlss_m3_factor_free(f);vsdlss_spfree(A);free(b);free(x);
     return 0;
 }

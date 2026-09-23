@@ -146,12 +146,101 @@ static int solve_kernel(void)
     }
     free(a);free(x);free(ref);free(index);return 0;
 }
+
+/* Two power-grid-like nets (chains with taps between junctions), plus
+ * isolated vertices and pairs, numbered in shuffled order.  Upper CSC with
+ * sorted columns. */
+static vsdlss *two_nets(void)
+{
+    enum { G=40, CH=4 };
+    csi cap=2*(2*G*G*(CH+2)+G*G)+2000, m=0, n=0;
+    csi *ea=malloc(cap*sizeof(csi)),*eb=malloc(cap*sizeof(csi));
+    if(!ea||!eb) return NULL;
+    for(int net=0;net<2;net++){
+        csi g=G-net*7, base=n; n+=g*g;
+        for(csi y=0;y<g;y++)for(csi x=0;x<g;x++)for(int d=0;d<2;d++){
+            csi x2=x+(d==0),y2=y+(d==1); if(x2>=g||y2>=g) continue;
+            csi prev=base+y*g+x;
+            for(csi c=0;c<CH;c++){ csi node=n++; ea[m]=prev; eb[m++]=node;
+                if(c==1){ ea[m]=node; eb[m++]=n++; } prev=node; }
+            ea[m]=prev; eb[m++]=base+y2*g+x2;
+        }
+    }
+    for(int k=0;k<100;k++){ ea[m]=n; eb[m++]=n+1; n+=2; }
+    n+=300;                                     /* isolated vertices */
+    csi *perm=malloc(n*sizeof(csi)); uint64_t r=12345;
+    for(csi i=0;i<n;i++) perm[i]=i;
+    for(csi i=n-1;i>0;i--){ r^=r<<13; r^=r>>7; r^=r<<17; csi j=(csi)(r%(uint64_t)(i+1)),t=perm[i]; perm[i]=perm[j]; perm[j]=t; }
+    vsdlss *A=vsdlss_spalloc(n,n,n+m,1,0); csi *cnt=calloc(n+1,sizeof(csi));
+    if(!A||!cnt||!perm) return NULL;
+    for(csi k=0;k<m;k++){ csi a=perm[ea[k]],b=perm[eb[k]]; cnt[(a>b?a:b)+1]++; }
+    for(csi j=0;j<n;j++) cnt[j+1]+=cnt[j]+1;
+    memcpy(A->p,cnt,(n+1)*sizeof(csi));
+    for(csi j=0;j<n;j++){ A->i[cnt[j]]=j; A->x[cnt[j]++]=10.0+j%7; }   /* diagonal first */
+    for(csi k=0;k<m;k++){ csi a=perm[ea[k]],b=perm[eb[k]],col=a>b?a:b; A->i[cnt[col]]=a<b?a:b; A->x[cnt[col]++]=-1.0-0.001*(double)(k%97); }
+    for(csi j=0;j<n;j++)                           /* sort each column by row */
+        for(csi p=A->p[j]+1;p<A->p[j+1];p++) for(csi q=p;q>A->p[j]&&A->i[q]<A->i[q-1];q--){
+            csi ti=A->i[q]; double tx=A->x[q]; A->i[q]=A->i[q-1]; A->x[q]=A->x[q-1]; A->i[q-1]=ti; A->x[q-1]=tx; }
+    free(ea); free(eb); free(perm); free(cnt); return A;
+}
+
+/* Components, BFS order and weighted adjacency are identical for 1, 3 and 4
+ * threads (serial BFS vs union-find + concurrent BFS, row-range fill). */
+static int components_threads_equal(void)
+{
+    vsdlss *A=two_nets(); CHECK(A);
+    const csi n=A->n;
+    vsdlss_components *c1=NULL,*c2=NULL; vsdlss_wgraph *g1=NULL,*g2=NULL;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_components_build_graph(A,&c1,&g1)==VSDLSS_OK);
+    CHECK(c1->count==2+100+300);
+    for(int t=3;t<=4;t++){
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        CHECK(vsdlss_components_build_graph(A,&c2,&g2)==VSDLSS_OK);
+        CHECK(c2->count==c1->count);
+        CHECK(memcmp(c1->offset,c2->offset,(c1->count+1)*sizeof(csi))==0);
+        CHECK(memcmp(c1->vertices,c2->vertices,n*sizeof(csi))==0);
+        CHECK(memcmp(c1->component_of,c2->component_of,n*sizeof(csi))==0);
+        CHECK(memcmp(c1->local_of,c2->local_of,n*sizeof(csi))==0);
+        CHECK(memcmp(c1->order,c2->order,n*sizeof(csi))==0);
+        CHECK(memcmp(g1->ptr,g2->ptr,(n+1)*sizeof(csi))==0);
+        CHECK(memcmp(g1->idx,g2->idx,g1->ptr[n]*sizeof(csi))==0);
+        CHECK(memcmp(g1->val,g2->val,g1->ptr[n]*sizeof(double))==0);
+        CHECK(memcmp(g1->diag,g2->diag,n*sizeof(double))==0);
+        vsdlss_components_free(c2); vsdlss_wgraph_free(g2); c2=NULL; g2=NULL;
+    }
+    /* Full factor/solve with the two nets as concurrent components. */
+    double *b=malloc(n*8),*x1=malloc(n*8),*x2=malloc(n*8); CHECK(b&&x1&&x2);
+    for(csi i=0;i<n;i++) b[i]=sin(0.01*(double)i)+0.5;
+    vsdlss_m3_factor *f=NULL;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK); CHECK(vsdlss_m3_solve(f,b,x1)==VSDLSS_OK);
+    vsdlss_m3_factor_free(f); f=NULL;
+    for(int t=2;t<=4;t++){
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        CHECK(vsdlss_m3_solve(f,b,x2)==VSDLSS_OK);
+        CHECK(memcmp(x1,x2,n*8)==0);
+        memcpy(x2,b,n*8); CHECK(vsdlss_m3_solve(f,x2,x2)==VSDLSS_OK);   /* rhs aliases solution */
+        CHECK(memcmp(x1,x2,n*8)==0);
+        for(csi i=0;i<n;i++) x2[i]=77;
+        b[n/2]=INFINITY;
+        CHECK(vsdlss_m3_solve(f,b,x2)==VSDLSS_ERR_NONFINITE);
+        for(csi i=0;i<n;i++) CHECK(x2[i]==77);
+        b[n/2]=sin(0.01*(double)(n/2))+0.5;
+        vsdlss_m3_factor_free(f); f=NULL;
+    }
+    double eta; CHECK(vsdlss_backward_error(A,x1,b,&eta)==VSDLSS_OK&&eta<1e-13);
+    vsdlss_components_free(c1); vsdlss_wgraph_free(g1); vsdlss_spfree(A); free(b); free(x1); free(x2);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(panel_tile_boundaries()==0);
     CHECK(kernels()==0);
     if(vsdlss_parallel_enabled()){
-        CHECK(components_and_rhs()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);
+        CHECK(components_and_rhs()==0);CHECK(components_threads_equal()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);
     }
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     puts("test_parallel: ALL OK");return 0;

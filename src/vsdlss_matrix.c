@@ -114,7 +114,7 @@ vsdlss_status vsdlss_normalize_upper(const vsdlss *A, vsdlss **out)
     }
     if (!checked_bytes(max_col > 0 ? max_col : 1, sizeof(matrix_entry), &bytes))
         return VSDLSS_ERR_INVALID;
-    len = (csi *)malloc((size_t)(A->n + 1) * sizeof(csi));
+    len = (csi *)vsdlss_big_malloc((size_t)(A->n + 1) * sizeof(csi));
     C = vsdlss_spalloc(A->n, A->n, A->p[A->n], 1, 0);
     if (!len || !C) { free(len); vsdlss_spfree(C); return VSDLSS_ERR_OOM; }
     nt = vsdlss_parallel_width((double)A->p[A->n] * 4);

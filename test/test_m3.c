@@ -299,17 +299,17 @@ static int test_reduction_rhs_nonempty_core_and_transactions(void)
     vsdlss_reduction_free(r);
 
     { vsdlss_elim_record record={0,1,{1,0,0},1,{2,0,0}};
-      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL};
+      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL,0,NULL};
       double huge[]={DBL_MAX,DBL_MAX}, outcore[]={8}, outsaved[]={9};
       CHECK(vsdlss_reduce_rhs(&fake,huge,outcore,outsaved)==VSDLSS_ERR_NONFINITE);
       CHECK(outcore[0]==8 && outsaved[0]==9); }
-    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL};
+    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL,0,NULL};
       double rhs[]={3,4}, core_only[2], recovered[2];
       CHECK(vsdlss_reduce_rhs(&no_elimination,rhs,core_only,NULL)==VSDLSS_OK);
       CHECK(core_only[0]==3 && core_only[1]==4);
       CHECK(vsdlss_reduce_recover(&no_elimination,NULL,core_only,recovered)==VSDLSS_OK);
       CHECK(recovered[0]==3 && recovered[1]==4); }
-    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL};
+    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL,0,NULL};
       CHECK(vsdlss_reduce_rhs(&empty,NULL,NULL,NULL)==VSDLSS_OK);
       CHECK(vsdlss_reduce_recover(&empty,NULL,NULL,NULL)==VSDLSS_OK); }
     return 0;
@@ -792,9 +792,84 @@ static int test_m3_reorder_paths_and_allocation_failures(void)
     vsdlss_spfree(A);return 0;
 }
 
+/* The packed replay form (built directly by vsdlss_reduce_run_packed, or
+ * from records by vsdlss_reduce_pack) replays exactly like the records. */
+static int test_packed_reduction_matches_records(void)
+{
+    test_edge edge[1600]; csi e=0,n,x,y,k; vsdlss *A;
+    const csi G=6; csi next=G*G;
+    for(y=0;y<G;y++)for(x=0;x<G;x++)for(int dir=0;dir<2;dir++){
+        csi x2=x+(dir==0),y2=y+(dir==1),prev=y*G+x;
+        if(x2>=G||y2>=G)continue;
+        for(int c=0;c<5;c++){csi node=next++;edge[e++]=(test_edge){prev,node,1.0+0.01*(double)e};
+            if(c==2){edge[e++]=(test_edge){node,next,0.3};next++;} prev=node;}
+        edge[e++]=(test_edge){prev,y2*G+x2,0.9};
+    }
+    n=next; A=make_laplacian(n,edge,e); CHECK(A);
+    for(int blocked=0;blocked<2;blocked++){
+        vsdlss_reduction *r1=NULL,*r2=NULL,*r3=NULL; vsdlss_reduce_input *in=NULL;
+        vsdlss_reduce_block=blocked?64:((csi)1<<16);
+        CHECK(vsdlss_reduce(A,&r1)==VSDLSS_OK && r1->records);
+        CHECK(vsdlss_reduce(A,&r3)==VSDLSS_OK && vsdlss_reduce_pack(r3)==VSDLSS_OK);
+        CHECK(vsdlss_reduce_prepare_csc(A,&in)==VSDLSS_OK && vsdlss_reduce_run_packed(in,&r2,NULL)==VSDLSS_OK);
+        CHECK(!r2->records && !r3->records && r2->pk && r3->pk);
+        CHECK(r1->count==r2->count && r1->count==r3->count && r1->core_n==r2->core_n && r1->count>n/2);
+        CHECK(r1->blocks==r2->blocks && (blocked?r1->blocks>1:r1->blocks==0));
+        CHECK(memcmp(r1->block_ptr,r2->block_ptr,(size_t)(r1->blocks+1)*sizeof(csi))==0);
+        CHECK(r2->pk_count==(blocked?r2->blocks+1:1) && r3->pk_count==r2->pk_count);
+        CHECK(memcmp(r1->core_vertices,r2->core_vertices,(size_t)r1->core_n*sizeof(csi))==0);
+        CHECK(r1->core->p[r1->core_n]==r2->core->p[r2->core_n]);
+        CHECK(memcmp(r1->core->i,r2->core->i,(size_t)r1->core->p[r1->core_n]*sizeof(csi))==0);
+        CHECK(memcmp(r1->core->x,r2->core->x,(size_t)r1->core->p[r1->core_n]*sizeof(double))==0);
+        for(csi q=0;q<r2->pk_count;q++){
+            const vsdlss_pk_seg *a=r2->pk+q,*b=r3->pk+q;
+            CHECK(a->k0==b->k0 && a->count==b->count && a->nbn==b->nbn);
+            if(a->count){
+                CHECK(memcmp(a->head,b->head,(size_t)a->count*4)==0 && memcmp(a->nb,b->nb,(size_t)a->nbn*4)==0);
+                CHECK(memcmp(a->val,b->val,(size_t)(a->count+a->nbn)*8)==0);
+            }
+        }
+        double *b=malloc(n*8),*core1=malloc(n*8),*core2=malloc(n*8),*s1=malloc(n*8),*s2=malloc(n*8);
+        double *w=malloc(n*8),*x1=malloc(n*8),*x2=malloc(n*8),*cs=malloc(n*8);
+        CHECK(b&&core1&&core2&&s1&&s2&&w&&x1&&x2&&cs);
+        for(k=0;k<n;k++) b[k]=sin(0.7*(double)k)+0.1;
+        CHECK(vsdlss_reduce_rhs(r1,b,core1,s1)==VSDLSS_OK);
+        CHECK(vsdlss_reduce_rhs(r2,b,core2,s2)==VSDLSS_OK);          /* cursor path */
+        CHECK(memcmp(core1,core2,(size_t)r1->core_n*8)==0 && memcmp(s1,s2,(size_t)r1->count*8)==0);
+        memcpy(w,b,n*8);
+        CHECK(vsdlss_reduce_forward_inplace(r2,w,s2)==VSDLSS_OK);
+        CHECK(memcmp(s1,s2,(size_t)r1->count*8)==0);
+        for(k=0;k<r1->core_n;k++) CHECK(w[r2->core_vertices[k]]==core1[k]);
+        for(k=0;k<r1->core_n;k++) cs[k]=0.5*core1[k]-0.25;
+        CHECK(vsdlss_reduce_recover(r1,s1,cs,x1)==VSDLSS_OK);
+        CHECK(vsdlss_reduce_recover(r2,s1,cs,x2)==VSDLSS_OK);         /* cursor path */
+        CHECK(memcmp(x1,x2,n*8)==0);
+        for(k=0;k<r1->core_n;k++) w[r2->core_vertices[k]]=cs[k];
+        CHECK(vsdlss_reduce_backward_inplace(r2,s2,w)==VSDLSS_OK);
+        CHECK(memcmp(x1,w,n*8)==0);
+        /* Overflow in the replay is reported by the backward pass. */
+        for(k=0;k<n;k++) w[k]=DBL_MAX;
+        CHECK(vsdlss_reduce_forward_inplace(r2,w,s2)==VSDLSS_OK);
+        for(k=0;k<r1->core_n;k++) w[r2->core_vertices[k]]=1.0;
+        CHECK(vsdlss_reduce_backward_inplace(r2,s2,w)==VSDLSS_ERR_NONFINITE);
+        free(b);free(core1);free(core2);free(s1);free(s2);free(w);free(x1);free(x2);free(cs);
+        vsdlss_reduction_free(r1);vsdlss_reduction_free(r2);vsdlss_reduction_free(r3);
+    }
+    vsdlss_reduce_block=(csi)1<<16;
+    /* Through the facade: an overflowing RHS fails and leaves x untouched. */
+    { vsdlss_m3_factor *f=NULL; double *b=malloc(n*8),*xo=malloc(n*8); CHECK(b&&xo);
+      CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+      for(k=0;k<n;k++){ b[k]=DBL_MAX; xo[k]=5; }
+      CHECK(vsdlss_m3_solve(f,b,xo)==VSDLSS_ERR_NONFINITE);
+      for(k=0;k<n;k++) CHECK(xo[k]==5);
+      vsdlss_m3_factor_free(f); free(b); free(xo); }
+    vsdlss_spfree(A); return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
+    CHECK(test_packed_reduction_matches_records()==0);
     CHECK(test_isolate_single_component_and_zero_edge()==0);
     CHECK(test_invalid_inputs_leave_outputs_null()==0);
     CHECK(test_large_sparse_diagonal()==0);

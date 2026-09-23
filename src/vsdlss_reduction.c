@@ -161,6 +161,10 @@ void vsdlss_reduction_free(vsdlss_reduction *reduction)
 {
     if(!reduction) return;
     free(reduction->records); free(reduction->core_vertices); free(reduction->block_ptr);
+    if(reduction->pk) for(csi q=0;q<reduction->pk_count;q++) {
+        free(reduction->pk[q].head); free(reduction->pk[q].nb); free(reduction->pk[q].val);
+    }
+    free(reduction->pk);
     vsdlss_spfree(reduction->core); free(reduction);
 }
 
@@ -168,7 +172,51 @@ static int valid_reduction_shape(const vsdlss_reduction *r)
 {
     return r && r->n>=0 && r->count>=0 && r->core_n>=0 &&
            r->count<=r->n && r->core_n==r->n-r->count &&
-           (!r->count || r->records) && (!r->core_n || r->core_vertices);
+           (!r->count || r->records || (r->pk && r->pk_count>0)) &&
+           (!r->core_n || r->core_vertices);
+}
+
+#define PK_VMASK 0x3fffffffu
+
+/* Sequential access to record k in struct form: direct for unpacked
+ * reductions, otherwise decoded through a cursor over the packed segments
+ * (next: increasing k from a zeroed cursor; prev: decreasing k from
+ * pk_cursor_end). */
+typedef struct { csi s, i, o; } pk_cursor;
+
+static void decode(const vsdlss_pk_seg *g, csi i, csi o, vsdlss_elim_record *t)
+{
+    uint32_t h=g->head[i]; csi d=(csi)(h>>30);
+    t->vertex=(csi)(h&PK_VMASK); t->degree=d; t->pivot=g->val[i+o];
+    for(csi j=0;j<d;j++) { t->neighbor[j]=g->nb[o+j]; t->multiplier[j]=g->val[i+o+1+j]; }
+}
+
+static const vsdlss_elim_record *next_record(const vsdlss_reduction *r, csi k, pk_cursor *c,
+                                             vsdlss_elim_record *t)
+{
+    if(r->records) return r->records+k;
+    while(c->i>=r->pk[c->s].count) { c->s++; c->i=0; c->o=0; }
+    decode(r->pk+c->s,c->i,c->o,t);
+    c->o+=t->degree; c->i++;
+    return t;
+}
+
+static pk_cursor pk_cursor_end(const vsdlss_reduction *r)
+{
+    pk_cursor c={0,0,0};
+    if(!r->records && r->pk_count) { c.s=r->pk_count-1; c.i=r->pk[c.s].count; c.o=r->pk[c.s].nbn; }
+    return c;
+}
+
+static const vsdlss_elim_record *prev_record(const vsdlss_reduction *r, csi k, pk_cursor *c,
+                                             vsdlss_elim_record *t)
+{
+    const vsdlss_pk_seg *g;
+    if(r->records) return r->records+k;
+    while(c->i==0) { c->s--; c->i=r->pk[c->s].count; c->o=r->pk[c->s].nbn; }
+    g=r->pk+c->s; c->i--; c->o-=(csi)(g->head[c->i]>>30);
+    decode(g,c->i,c->o,t);
+    return t;
 }
 
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *r, const double *b,
@@ -191,8 +239,9 @@ vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *r, const double *b,
         if(!isfinite(b[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
         work[k]=b[k];
     }
+    pk_cursor cur={0,0,0}; vsdlss_elim_record tmp;
     for(k=0;k<r->count;k++) {
-        const vsdlss_elim_record *record=r->records+k;
+        const vsdlss_elim_record *record=next_record(r,k,&cur,&tmp);
         if(record->vertex<0 || record->vertex>=r->n || record->degree<0 ||
            record->degree>3) {status=VSDLSS_ERR_INVALID;goto done;}
         next_saved[k]=work[record->vertex];
@@ -245,8 +294,9 @@ vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *r,
         if(!isfinite(core_solution[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
         core_copy[k]=core_solution[k]; next_x[vertex]=core_copy[k];
     }
+    pk_cursor cur=pk_cursor_end(r); vsdlss_elim_record tmp;
     for(k=r->count;k>0;k--) {
-        const vsdlss_elim_record *record=r->records+(k-1); double value;
+        const vsdlss_elim_record *record=prev_record(r,k-1,&cur,&tmp); double value;
         if(record->vertex<0 || record->vertex>=r->n || record->degree<0 ||
            record->degree>3) {status=VSDLSS_ERR_INVALID;goto done;}
         if(!isfinite(record->pivot)) {status=VSDLSS_ERR_NONFINITE;goto done;}
@@ -318,6 +368,46 @@ static int blocks_valid(const vsdlss_reduction *r)
 static vsdlss_status status_of(int bad)
 { return bad==0?VSDLSS_OK:(bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE; }
 
+/* Packed replay of one segment (saved points at the segment's first
+ * record).  Same operations, in the same order, as forward_record /
+ * backward_record. */
+static void forward_seg(const vsdlss_pk_seg *g, double *restrict work, double *restrict saved)
+{
+    const uint32_t *restrict head=g->head, *restrict nb=g->nb;
+    const double *restrict val=g->val;
+    csi o=0;
+    for(csi i=0;i<g->count;i++) {
+        uint32_t h=head[i]; csi d=(csi)(h>>30);
+        const double *m=val+i+o+1; const uint32_t *w=nb+o;
+        double s=saved[i]=work[h&PK_VMASK];
+        for(csi j=0;j<d;j++) { double update=m[j]*s; work[w[j]]-=update; }
+        o+=d;
+    }
+}
+
+/* Returns 0 when a recovered value is not finite. */
+static int backward_seg(const vsdlss_pk_seg *g, const double *restrict saved, double *restrict x)
+{
+    const uint32_t *restrict head=g->head, *restrict nb=g->nb;
+    const double *restrict val=g->val;
+    csi o=g->nbn; int ok=1;
+    for(csi i=g->count;i>0;) {
+        i--;
+        uint32_t h=head[i]; csi d=(csi)(h>>30);
+        o-=d;
+        const double *v=val+i+o; const uint32_t *w=nb+o;
+        double value=saved[i]/v[0];
+        for(csi j=0;j<d;j++) { double update=v[1+j]*x[w[j]]; value-=update; }
+        ok&=isfinite(value)!=0;
+        x[h&PK_VMASK]=value;
+    }
+    return ok;
+}
+
+/* Blocked packed layout: one segment per block plus the sequential tail. */
+static int pk_blocked(const vsdlss_reduction *r)
+{ return r->blocks>=1 && r->pk_count==r->blocks+1 && blocks_valid(r); }
+
 /* In-place forms used by the M3 solve, whose buffers are private: work
  * holds the component RHS and is updated exactly as vsdlss_reduce_rhs updates
  * its internal copy; afterwards work[core_vertices[k]] is the core RHS.
@@ -331,9 +421,18 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
     if(!valid_reduction_shape(r) || (!work && r->n) || (!saved && r->count)) return VSDLSS_ERR_INVALID;
     nt=vsdlss_parallel_width((double)r->n*4);
     (void)nt;
-    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static) reduction(|:bad))
-    for(csi i=0;i<r->n;i++) if(!isfinite(work[i])) bad|=2;
-    if(bad) return VSDLSS_ERR_NONFINITE;
+    if(!r->records && r->count) {
+        const vsdlss_pk_seg *pk=r->pk; csi q0=0;
+        if(pk_blocked(r)) {
+            int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
+            (void)bt;
+            VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4))
+            for(csi b=0;b<r->blocks;b++) forward_seg(pk+b,work,saved+pk[b].k0);
+            q0=r->blocks;
+        }
+        for(csi q=q0;q<r->pk_count;q++) forward_seg(pk+q,work,saved+pk[q].k0);
+        return VSDLSS_OK;
+    }
     if(blocks_valid(r)) {
         int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
         (void)bt;
@@ -359,18 +458,93 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
         if(vertex<0 || vertex>=r->n) return VSDLSS_ERR_INVALID;
         if(!isfinite(x[vertex])) return VSDLSS_ERR_NONFINITE;
     }
+    nt=vsdlss_parallel_width((double)r->n*4);
+    (void)nt;
+    if(!r->records && r->count) {
+        const vsdlss_pk_seg *pk=r->pk; int ok=1; csi q0=pk_blocked(r)?r->blocks:0;
+        for(csi q=r->pk_count;q>q0;q--) ok&=backward_seg(pk+q-1,saved+pk[q-1].k0,x);
+        if(q0) {
+            int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
+            (void)bt;
+            VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4) reduction(&:ok))
+            for(csi b=0;b<r->blocks;b++) ok&=backward_seg(pk+b,saved+pk[b].k0,x);
+        }
+        return ok?VSDLSS_OK:VSDLSS_ERR_NONFINITE;
+    }
     int blocked=blocks_valid(r);
     if(blocked) stop=r->block_ptr[r->blocks];
     for(k=r->count;k>stop;k--) { bad=backward_record(r,k-1,saved,x); if(bad) return status_of(bad); }
     if(blocked) {
-        nt=vsdlss_parallel_width((double)r->n*4);
-        if(nt>r->blocks) nt=(int)r->blocks;
-        (void)nt;
-        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,4) reduction(|:bad))
+        int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
+        (void)bt;
+        VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4) reduction(|:bad))
         for(csi b=0;b<r->blocks;b++)
             for(csi q=r->block_ptr[b+1];q>r->block_ptr[b]&&!bad;q--) bad|=backward_record(r,q-1,saved,x);
         if(bad) return status_of(bad);
     }
+    return VSDLSS_OK;
+}
+
+static int record_valid(const vsdlss_reduction *r, const vsdlss_elim_record *e)
+{
+    if(e->vertex<0 || e->vertex>=r->n || e->degree<0 || e->degree>3) return 0;
+    if(!isfinite(e->pivot) || e->pivot==0.0) return 0;
+    for(csi j=0;j<e->degree;j++)
+        if(e->neighbor[j]<0 || e->neighbor[j]>=r->n || !isfinite(e->multiplier[j])) return 0;
+    return 1;
+}
+
+/* Packs rec[0..cnt) into *g (first record index k0).  INVALID when a
+ * record fails validation. */
+static vsdlss_status pack_segment(const vsdlss_reduction *r, const vsdlss_elim_record *rec,
+                                  csi cnt, csi k0, vsdlss_pk_seg *g)
+{
+    csi nbn=0;
+    memset(g,0,sizeof(*g)); g->k0=k0;
+    for(csi i=0;i<cnt;i++) { if(!record_valid(r,rec+i)) return VSDLSS_ERR_INVALID; nbn+=rec[i].degree; }
+    if(!cnt) return VSDLSS_OK;
+    uint32_t *head=(uint32_t *)malloc((size_t)cnt*sizeof(uint32_t));
+    uint32_t *nb=(uint32_t *)malloc((size_t)(nbn?nbn:1)*sizeof(uint32_t));
+    double *val=(double *)malloc((size_t)(cnt+nbn)*sizeof(double));
+    if(!head||!nb||!val) { free(head); free(nb); free(val); return VSDLSS_ERR_OOM; }
+    for(csi i=0,o=0;i<cnt;i++) {
+        const vsdlss_elim_record *e=rec+i;
+        head[i]=(uint32_t)e->vertex|((uint32_t)e->degree<<30);
+        val[i+o]=e->pivot;
+        for(csi j=0;j<e->degree;j++) { nb[o+j]=(uint32_t)e->neighbor[j]; val[i+o+1+j]=e->multiplier[j]; }
+        o+=e->degree;
+    }
+    g->count=cnt; g->nbn=nbn; g->head=head; g->nb=nb; g->val=val;
+    return VSDLSS_OK;
+}
+
+static void free_segments(vsdlss_reduction *r)
+{
+    if(r->pk) for(csi q=0;q<r->pk_count;q++) { free(r->pk[q].head); free(r->pk[q].nb); free(r->pk[q].val); }
+    free(r->pk); r->pk=NULL; r->pk_count=0;
+}
+
+vsdlss_status vsdlss_reduce_pack(vsdlss_reduction *r)
+{
+    if(!r) return VSDLSS_ERR_INVALID;
+    if(!r->records || !r->count || r->n>(csi)PK_VMASK+1) return VSDLSS_OK;
+    const int blocked=blocks_valid(r);
+    const csi segs=blocked?r->blocks+1:1;       /* last segment: sequential tail */
+    vsdlss_status st=VSDLSS_OK;
+    r->pk=(vsdlss_pk_seg *)calloc((size_t)segs,sizeof(*r->pk));
+    if(!r->pk) return VSDLSS_ERR_OOM;
+    r->pk_count=segs;
+    int nt=vsdlss_parallel_width((double)r->count*8); (void)nt;
+    int bad=0;       /* bit 0: invalid, bit 1: out of memory */
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,8) reduction(|:bad))
+    for(csi q=0;q<segs;q++) {
+        csi lo=blocked?r->block_ptr[q]:0;
+        csi hi=blocked?(q<r->blocks?r->block_ptr[q+1]:r->count):r->count;
+        vsdlss_status e=pack_segment(r,r->records+lo,hi-lo,lo,r->pk+q);
+        if(e==VSDLSS_ERR_INVALID) bad|=1; else if(e!=VSDLSS_OK) bad|=2;
+    }
+    if(bad) { free_segments(r); st=(bad&2)?VSDLSS_ERR_OOM:VSDLSS_OK; return st; }
+    free(r->records); r->records=NULL;
     return VSDLSS_OK;
 }
 
@@ -484,8 +658,8 @@ static vsdlss_status input_alloc(csi n, vsdlss_reduce_input **out)
     in=(vsdlss_reduce_input *)calloc(1,sizeof(*in));
     if(!in) return VSDLSS_ERR_OOM;
     in->n=n;
-    in->adj=(numeric_list *)calloc((size_t)n,sizeof(numeric_list));
-    in->diag=(double *)calloc((size_t)n,sizeof(double));
+    in->adj=(numeric_list *)vsdlss_big_calloc((size_t)n,sizeof(numeric_list));
+    in->diag=(double *)vsdlss_big_calloc((size_t)n,sizeof(double));
     if(!in->adj||!in->diag) { vsdlss_reduce_input_free(in); return VSDLSS_ERR_OOM; }
     *out=in; return VSDLSS_OK;
 }
@@ -500,7 +674,7 @@ static vsdlss_status input_place(vsdlss_reduce_input *in)
     }
     in->base.used=used; in->base.capacity=used>0?used:1;
     if(!checked_count(in->base.capacity,sizeof(numeric_edge))) return VSDLSS_ERR_OOM;
-    in->base.edge=(numeric_edge *)malloc((size_t)in->base.capacity*sizeof(numeric_edge));
+    in->base.edge=(numeric_edge *)vsdlss_big_malloc((size_t)in->base.capacity*sizeof(numeric_edge));
     return in->base.edge?VSDLSS_OK:VSDLSS_ERR_OOM;
 }
 
@@ -597,12 +771,27 @@ vsdlss_status vsdlss_reduce_prepare_graph(const csi *ptr, const csi *idx, const 
     *out=in; return VSDLSS_OK;
 }
 
+static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction **out, int pack,
+                                     vsdlss_reduce_ws *ws);
 vsdlss_status vsdlss_reduce_run(vsdlss_reduce_input *in, vsdlss_reduction **out)
+{ return reduce_run_impl(in,out,0,NULL); }
+vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *in, vsdlss_reduction **out,
+                                       vsdlss_reduce_ws *ws)
+{ return reduce_run_impl(in,out,1,ws); }
+
+/* pack: blocked reductions build the packed segments straight from each
+ * block's records (a per-thread scratch of one block) and from the tail, so
+ * the n-record array is never allocated; the result equals vsdlss_reduce_run
+ * followed by vsdlss_reduce_pack. */
+static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction **out, int pack,
+                                     vsdlss_reduce_ws *ws)
 {
     vsdlss_reduction *r=NULL; numeric_list *adj; double *diag;
     unsigned char *active=NULL; csi *local=NULL; vsdlss_status status=VSDLSS_OK;
     edge_arena *ar=NULL; csi blocks=0, narenas=0;
+    csi *made=NULL; vsdlss_elim_record *tail=NULL; int direct=0;
     csi n,col,k,v,core_n,nnz,at;
+    if(ws) memset(ws,0,sizeof(*ws));
     if(!out) { vsdlss_reduce_input_free(in); return VSDLSS_ERR_INVALID; }
     *out=NULL;
     if(!in) return VSDLSS_ERR_INVALID;
@@ -610,16 +799,24 @@ vsdlss_status vsdlss_reduce_run(vsdlss_reduce_input *in, vsdlss_reduction **out)
     blocks=n>=2*REDUCE_BLOCK ? (n+REDUCE_BLOCK-1)/REDUCE_BLOCK : 0;
     if(blocks+2>MAX_ARENAS) { status=VSDLSS_ERR_OOM; goto fail; }   /* > 4e9 vertices */
     narenas=blocks+2;      /* 0 = initial lists, 1..blocks, blocks+1 = sequential */
+    direct=pack && blocks && n<=(csi)PK_VMASK+1;
     r=(vsdlss_reduction *)calloc(1,sizeof(*r));
-    active=(unsigned char *)malloc((size_t)n);
+    active=(unsigned char *)vsdlss_big_malloc((size_t)n);
     ar=(edge_arena *)calloc((size_t)narenas,sizeof(*ar));
     if(!r||!active||!ar) { status=VSDLSS_ERR_OOM; goto fail; }
     ar[0]=in->base; in->base.edge=NULL;      /* arena 0 now owned here */
     r->n=n; memset(active,1,(size_t)n);
     if ((uint64_t)n > SIZE_MAX / sizeof(*r->records)) {status=VSDLSS_ERR_OOM;goto fail;}
-    r->records=(vsdlss_elim_record *)malloc((size_t)n*sizeof(*r->records));
+    if(direct) {
+        r->pk=(vsdlss_pk_seg *)calloc((size_t)(blocks+1),sizeof(*r->pk));
+        if(!r->pk) { status=VSDLSS_ERR_OOM; goto fail; }
+        r->pk_count=blocks+1;
+    } else {
+        r->records=(vsdlss_elim_record *)vsdlss_big_malloc((size_t)n*sizeof(*r->records));
+        if(!r->records) { status=VSDLSS_ERR_OOM; goto fail; }
+    }
     r->block_ptr=(csi *)malloc((size_t)(blocks+1)*sizeof(csi));
-    if(!r->records||!r->block_ptr) { status=VSDLSS_ERR_OOM; goto fail; }
+    if(!r->block_ptr) { status=VSDLSS_ERR_OOM; goto fail; }
     r->blocks=blocks;
 
     {
@@ -627,44 +824,70 @@ vsdlss_status vsdlss_reduce_run(vsdlss_reduce_input *in, vsdlss_reduction **out)
         csi total=0;
         r->block_ptr[0]=0;
         if(blocks) {
-            /* Parallel pass: block b records go to records[b*BLOCK ..], a slice
-             * no other block uses; they are compacted in block order after.
-             * block_ptr keeps the ranges: records of different blocks touch
-             * disjoint vertices, which the solve exploits. */
-            csi *made=(csi *)calloc((size_t)blocks,sizeof(csi));
+            /* Parallel pass: block b eliminates only vertices whose
+             * neighbours all lie in the block, so blocks touch disjoint
+             * vertices (the solve replays them concurrently).  Records go to
+             * records[b*BLOCK ..], compacted in block order afterwards, or
+             * (direct) to a per-thread scratch packed into segment b. */
             vsdlss_status *res=(vsdlss_status *)calloc((size_t)blocks,sizeof(*res));
-            int nt=vsdlss_parallel_width((double)n*64);
-            if(!made||!res) { free(made); free(res); status=VSDLSS_ERR_OOM; goto fail; }
+            int nt=vsdlss_parallel_width((double)n*64), scratch_failed=0;
+            made=(csi *)calloc((size_t)blocks,sizeof(csi));
+            if(!made||!res) { free(res); status=VSDLSS_ERR_OOM; goto fail; }
             if(nt>blocks) nt=(int)blocks;
             (void)nt;
-            VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1))
-            for(csi bl=0;bl<blocks;bl++) {
-                csi lo=bl*REDUCE_BLOCK, hi=lo+REDUCE_BLOCK<n?lo+REDUCE_BLOCK:n;
-                res[bl]=eliminate_range(&z,bl+1,lo,hi,1,lo,&made[bl]);
+            VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:scratch_failed))
+            {
+                reduce_state zl=z; vsdlss_elim_record *scratch=NULL;
+                if(direct) {
+                    scratch=(vsdlss_elim_record *)malloc((size_t)REDUCE_BLOCK*sizeof(*scratch));
+                    if(!scratch) scratch_failed=1;
+                    zl.records=scratch;
+                }
+                VSDLSS_OMP(omp for schedule(dynamic,1))
+                for(csi bl=0;bl<blocks;bl++) {
+                    csi lo=bl*REDUCE_BLOCK, hi=lo+REDUCE_BLOCK<n?lo+REDUCE_BLOCK:n;
+                    if(direct && !scratch) { res[bl]=VSDLSS_ERR_OOM; continue; }
+                    res[bl]=eliminate_range(&zl,bl+1,lo,hi,1,direct?0:lo,&made[bl]);
+                    if(direct && res[bl]==VSDLSS_OK) res[bl]=pack_segment(r,scratch,made[bl],0,r->pk+bl);
+                }
+                free(scratch);
             }
             for(csi bl=0;bl<blocks;bl++) if(res[bl]!=VSDLSS_OK) { status=res[bl]; break; }
-            if(status==VSDLSS_OK) for(csi bl=0;bl<blocks;bl++) {
-                if(total!=bl*REDUCE_BLOCK)
+            free(res);
+            if(status==VSDLSS_OK && scratch_failed) status=VSDLSS_ERR_OOM;
+            if(status!=VSDLSS_OK) goto fail;
+            for(csi bl=0;bl<blocks;bl++) {
+                if(direct) r->pk[bl].k0=total;
+                else if(total!=bl*REDUCE_BLOCK)
                     memmove(r->records+total,r->records+bl*REDUCE_BLOCK,(size_t)made[bl]*sizeof(*r->records));
                 total+=made[bl];
                 r->block_ptr[bl+1]=total;
             }
-            free(made); free(res);
-            if(status!=VSDLSS_OK) goto fail;
         }
-        /* Sequential pass over everything that is left. */
+        /* Sequential pass over everything that is left (direct: into a
+         * scratch of the remaining size, packed as the last segment). */
         {
             csi more=0;
-            status=eliminate_range(&z,narenas-1,0,n,0,total,&more);
+            if(direct) {
+                tail=(vsdlss_elim_record *)vsdlss_big_malloc((size_t)(n-total>0?n-total:1)*sizeof(*tail));
+                if(!tail) {status=VSDLSS_ERR_OOM;goto fail;}
+                z.records=tail;
+            }
+            status=eliminate_range(&z,narenas-1,0,n,0,direct?0:total,&more);
             if(status!=VSDLSS_OK) goto fail;
+            if(direct) {
+                status=pack_segment(r,tail,more,total,r->pk+blocks);
+                if(status!=VSDLSS_OK) goto fail;
+                free(tail); tail=NULL;
+            }
             total+=more;
         }
         r->count=total;
     }
     r->core_n=core_n=n-r->count;
     if(core_n) {
-        r->core_vertices=(csi *)malloc((size_t)core_n*sizeof(csi));
-        local=(csi *)malloc((size_t)n*sizeof(csi));
+        r->core_vertices=(csi *)vsdlss_big_malloc((size_t)core_n*sizeof(csi));
+        local=(csi *)vsdlss_big_malloc((size_t)n*sizeof(csi));
         if(!r->core_vertices || !local) {status=VSDLSS_ERR_OOM;goto fail;}
         nnz=core_n;
         for(v=0;v<n;v++) if(active[v]) {
@@ -688,18 +911,44 @@ vsdlss_status vsdlss_reduce_run(vsdlss_reduce_input *in, vsdlss_reduction **out)
         }
     }
     /* Trim the record array to what was used. */
-    if(r->count<n) {
+    if(r->records && r->count<n) {
         vsdlss_elim_record *t=(vsdlss_elim_record *)realloc(r->records,(size_t)(r->count?r->count:1)*sizeof(*r->records));
         if(!t) {status=VSDLSS_ERR_OOM;goto fail;}   /* keeps allocation failures uniform */
         r->records=t;
     }
     if(!r->count) { free(r->records); r->records=NULL; }
+    if(ws) {
+        /* Hand the solve its buffers from arrays this reduction already
+         * touched (the diagonal, the list headers, the core index map):
+         * fresh allocations would page-fault on the first solve. */
+        ws->local=in->diag; in->diag=NULL;                         /* n doubles */
+        if(r->count) {                              /* 16n bytes >= 8 count */
+            double *t=(double *)realloc(in->adj,(size_t)r->count*sizeof(double));
+            if(!t) { status=VSDLSS_ERR_OOM; goto ws_fail; }
+            ws->saved=t; in->adj=NULL;
+        }
+        if(core_n) {                                 /* local: n csi >= core_n */
+            double *t=(double *)realloc(local,(size_t)core_n*sizeof(double));
+            if(!t) { status=VSDLSS_ERR_OOM; goto ws_fail; }
+            ws->core=t; local=NULL;
+        }
+    }
     for(k=0;k<narenas;k++) free(ar[k].edge);
-    free(ar); free(active); free(local); vsdlss_reduce_input_free(in);
+    free(ar); free(active); free(local); free(made); vsdlss_reduce_input_free(in);
+    if(pack && !direct) {
+        status=vsdlss_reduce_pack(r);
+        if(status!=VSDLSS_OK) {
+            vsdlss_reduction_free(r);
+            if(ws) { free(ws->local); free(ws->saved); free(ws->core); memset(ws,0,sizeof(*ws)); }
+            return status;
+        }
+    }
     *out=r; return VSDLSS_OK;
+ws_fail:
+    free(ws->local); free(ws->saved); free(ws->core); memset(ws,0,sizeof(*ws));
 fail:
     if(ar) for(k=0;k<narenas;k++) free(ar[k].edge);
-    free(ar); free(active); free(local); vsdlss_reduce_input_free(in);
+    free(ar); free(active); free(local); free(made); free(tail); vsdlss_reduce_input_free(in);
     vsdlss_reduction_free(r); return status;
 }
 

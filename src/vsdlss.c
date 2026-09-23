@@ -17,6 +17,7 @@
  */
 
 #include "vsdlss.h"
+#include "vsdlss_parallel.h"
 #include "vsdlss_internal.h"
 
 static csi vsdlss_tdfs(csi j, csi k, csi *head, const csi *next, csi *post, csi *stack);
@@ -29,12 +30,12 @@ csi vsdlss_leaf(csi i, csi j, const csi *first, csi *maxfirst,
 void *vsdlss_malloc(csi n, size_t size)
 {
     if (n < 0 || (size && (uint64_t)n > SIZE_MAX / size)) return NULL;
-    return malloc(size && n ? (size_t)n * size : 1);
+    return vsdlss_big_malloc(size && n ? (size_t)n * size : 1);
 }
 void *vsdlss_calloc(csi n, size_t size)
 {
     if (n < 0 || (size && (uint64_t)n > SIZE_MAX / size)) return NULL;
-    return calloc(n > 0 ? (size_t)n : 1, size);
+    return vsdlss_big_calloc(n > 0 ? (size_t)n : 1, size);
 }
 void *vsdlss_free(void *p) { if (p) free(p); return NULL; }
 void *vsdlss_realloc(void *p, csi n, size_t size, csi *ok)
