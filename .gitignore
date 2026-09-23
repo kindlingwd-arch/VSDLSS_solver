@@ -42,3 +42,4 @@
 /bench_ibmpg
 /bench_dense
 /bench_cholmod
+/bench_pardiso

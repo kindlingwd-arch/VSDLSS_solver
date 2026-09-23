@@ -7,6 +7,11 @@
 #include <string.h>
 
 #define CHECK(e) do{if(!(e)){fprintf(stderr,"supernodal line %d: %s\n",__LINE__,#e);return 1;}}while(0)
+#ifdef VSDLSS_METIS
+#define MAX_ORDER 6      /* 6 = METIS on the core */
+#else
+#define MAX_ORDER 5
+#endif
 
 static unsigned rng=12345u;
 static unsigned next_rand(void){rng=rng*1664525u+1013904223u;return rng>>8;}
@@ -49,7 +54,7 @@ static int one_matrix(vsdlss *A)
     double *b=malloc((size_t)n*sizeof(double)),*x1=malloc((size_t)n*sizeof(double)),*xt=malloc((size_t)n*sizeof(double));
     CHECK(b&&x1&&xt);
     for(csi i=0;i<n;i++)b[i]=sin(0.37*(double)i)+0.1;
-    for(int order=0;order<=5;order++){
+    for(int order=0;order<=MAX_ORDER;order++){
         /* exact minimum degree builds explicit cliques: keep it to small n */
         if(order==3&&n>1000)continue;
         for(int nt=1;nt<=4;nt*=2){
@@ -151,7 +156,7 @@ static int large_powergrid(void)
     double *xt=malloc((size_t)n*nrhs*sizeof(double)),*xm=malloc((size_t)n*nrhs*sizeof(double));
     CHECK(b&&x1&&xt&&xm);
     for(csi i=0;i<n*nrhs;i++)b[i]=cos(0.001*(double)i)-0.5;
-    for(int order=0;order<=5;order+=5){
+    for(int order=0;order<=MAX_ORDER;order+=(order==0?5:1)){
         for(int nt=1;nt<=4;nt*=2){
             vsdlss_m3_factor *f=NULL;double eta;
             if(nt>1&&!vsdlss_parallel_enabled())break;
@@ -191,6 +196,6 @@ int main(int argc,char **argv)
     }
     CHECK(large_powergrid()==0);
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    puts("test_supernodal: random SPD, orders 0-5, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction: ALL OK");
+    printf("test_supernodal: random SPD, orders 0-%d, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction: ALL OK\n",MAX_ORDER);
     return 0;
 }

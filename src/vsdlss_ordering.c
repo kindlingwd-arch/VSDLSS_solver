@@ -3,6 +3,68 @@
 
 #include <string.h>
 
+#ifdef VSDLSS_METIS
+/* Optional METIS nested dissection (order 6; build with -DVSDLSS_METIS and a
+ * METIS 5 whose idx_t is 64-bit, the width of csi). */
+#include "metis.h"
+#include "vsdlss_parallel.h"
+#if IDXTYPEWIDTH != 64
+#error "VSDLSS_METIS needs METIS built with IDXTYPEWIDTH 64"
+#endif
+static vsdlss_status metis_order(const vsdlss *A, csi **q)
+{
+    const csi n = A->n;
+    csi *deg = (csi *)calloc((size_t)n + 1, sizeof(csi));
+    if (!deg) return VSDLSS_ERR_OOM;
+    for (csi j = 0; j < n; ++j)
+        for (csi p = A->p[j]; p < A->p[j + 1]; ++p)
+            if (A->i[p] != j) { deg[A->i[p] + 1]++; deg[j + 1]++; }
+    for (csi j = 0; j < n; ++j) deg[j + 1] += deg[j];
+    idx_t *xadj = (idx_t *)malloc(((size_t)n + 1) * sizeof(idx_t));
+    idx_t *adj = (idx_t *)malloc(((size_t)deg[n] ? (size_t)deg[n] : 1) * sizeof(idx_t));
+    idx_t *perm = (idx_t *)malloc((size_t)n * sizeof(idx_t));
+    idx_t *iperm = (idx_t *)malloc((size_t)n * sizeof(idx_t));
+    if (!xadj || !adj || !perm || !iperm) {
+        free(deg); free(xadj); free(adj); free(perm); free(iperm); return VSDLSS_ERR_OOM;
+    }
+    for (csi j = 0; j <= n; ++j) xadj[j] = deg[j];
+    for (csi j = 0; j < n; ++j)
+        for (csi p = A->p[j]; p < A->p[j + 1]; ++p) {
+            csi i = A->i[p];
+            if (i != j) { adj[deg[i]++] = j; adj[deg[j]++] = i; }
+        }
+    free(deg);
+    idx_t nv = n, options[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(options);
+    options[METIS_OPTION_NUMBERING] = 0;
+    options[METIS_OPTION_SEED] = 1;           /* reproducible orderings */
+    {   /* Tuning knobs for experiments (METIS defaults otherwise). */
+        const char *e;
+        if ((e = getenv("VSDLSS_METIS_NITER")) && atoi(e) > 0) options[METIS_OPTION_NITER] = atoi(e);
+        if ((e = getenv("VSDLSS_METIS_CTYPE")) && *e) options[METIS_OPTION_CTYPE] = atoi(e);
+        if ((e = getenv("VSDLSS_METIS_RTYPE")) && *e) options[METIS_OPTION_RTYPE] = atoi(e);
+    }
+    int rc;
+#ifdef VSDLSS_METIS_THREADSAFE
+    /* METIS built with thread-local GKlib random state: calls may overlap. */
+    rc = METIS_NodeND(&nv, xadj, adj, NULL, options, perm, iperm);
+#else
+    /* Stock METIS 5.1 keeps its random-number state in GKlib globals, so
+     * concurrent calls from different components race on it: orderings then
+     * depend on thread timing and the state can even be indexed out of
+     * range.  Serialize the calls; each reseeds, so results are the same for
+     * every thread count. */
+    VSDLSS_OMP(omp critical(vsdlss_metis))
+    rc = METIS_NodeND(&nv, xadj, adj, NULL, options, perm, iperm);
+#endif
+    free(xadj); free(adj); free(iperm);
+    if (rc != METIS_OK) { free(perm); return rc == METIS_ERROR_MEMORY ? VSDLSS_ERR_OOM : VSDLSS_ERR_INVALID; }
+    /* METIS: row k of the permuted matrix is row perm[k], i.e. q[new] = old. */
+    *q = (csi *)perm;
+    return VSDLSS_OK;
+}
+#endif
+
 vsdlss_status vsdlss_validate_permutation(const csi *q, const csi *pinv, csi n)
 {
     unsigned char *seen;
@@ -169,6 +231,12 @@ vsdlss_status vsdlss_order_analyze(const vsdlss *A, int order,
         status = vsdlss_mld_order(A, &local_q, &local_stats);
         if (status != VSDLSS_OK) return status;
     }
+#ifdef VSDLSS_METIS
+    else if (order == 6) {
+        status = metis_order(A, &local_q);
+        if (status != VSDLSS_OK) return status;
+    }
+#endif
     else return VSDLSS_ERR_UNSUPPORTED;
     if (!local_q) return VSDLSS_ERR_OOM;
     local_pinv = (csi *)malloc((size_t)A->n * sizeof(csi));

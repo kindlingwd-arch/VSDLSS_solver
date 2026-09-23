@@ -19,6 +19,23 @@ ifeq ($(BLAS),1)
 PARFLAGS += -DVSDLSS_BLAS
 LDLIBS += $(BLAS_LIBS)
 endif
+# Optional METIS nested dissection for the M3 core (ordering 6):
+#   make METIS=1 METIS_CFLAGS='-I<metis>/include' METIS_LIBS='-L<metis>/lib -lmetis'
+# METIS must be built with 64-bit idx_t.  Stock METIS 5.1 keeps its random
+# state in globals, so calls from concurrent components are serialized; set
+# METIS_THREADSAFE=1 for a METIS built with -DUSE_GKRAND and thread-local
+# GKlib random state, which lets VDD/GND orderings run concurrently.
+METIS ?= 0
+METIS_CFLAGS ?=
+METIS_LIBS ?= -lmetis
+METIS_THREADSAFE ?= 0
+ifeq ($(METIS),1)
+PARFLAGS += -DVSDLSS_METIS $(METIS_CFLAGS)
+LDLIBS += $(METIS_LIBS)
+ifeq ($(METIS_THREADSAFE),1)
+PARFLAGS += -DVSDLSS_METIS_THREADSAFE
+endif
+endif
 
 LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c \
@@ -86,7 +103,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod bench_pardiso test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -231,3 +248,9 @@ bench_cholmod: test/bench_cholmod.c
 	$(CC) -O2 $(PARFLAGS) $(CHOLMOD_CFLAGS) -o $@ test/bench_cholmod.c $(CHOLMOD_LIBS) $(BLAS_LIBS) -lm
 
 .PHONY: bench-pg-solve
+
+# MKL PARDISO on a PG_DUMP file:
+#   make bench_pardiso PARDISO_LIBS='-L<mkl>/lib -lmkl_rt -Wl,--no-as-needed -lgomp -lm'
+PARDISO_LIBS ?= -lmkl_rt -Wl,--no-as-needed -lgomp -lm -ldl -lpthread
+bench_pardiso: test/bench_pardiso.c
+	$(CC) -O2 -std=c11 -fopenmp -o $@ test/bench_pardiso.c $(PARDISO_LIBS)

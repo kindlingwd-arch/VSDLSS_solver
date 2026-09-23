@@ -5,6 +5,7 @@
  *   env: PG_THREADS="1 2 4 8"  PG_REPS=15  PG_SHUFFLE=1 (random numbering)
  *        PG_STATS=1   netlist / matrix / factor / conditioning report only
  *        PG_DUMP=file write the assembled system for bench_cholmod and exit
+ *        PG_ORDER=k   ordering passed to vsdlss_factorize_m3 (default 0 = AMD)
  * The benchmarks (SPICE netlists and reference solutions) are published at
  * https://web.ece.ucsb.edu/~lip/PGBenchmarks/ibmpgbench.html (Nassif,
  * ASP-DAC 2008); they are not part of this repository.
@@ -144,7 +145,7 @@ static void run_stats(csi N,const elist *R,const elist *I,const elist *V,const c
     /* 3. Solver view: reduction, core, supernodes, fill, tree, flops. */
     vsdlss_set_num_threads(1);
     vsdlss_m3_factor *F=NULL; double t=now();
-    if(vsdlss_factorize_m3(A,0,&F)!=VSDLSS_OK)die("factorize failed");
+    if(vsdlss_factorize_m3(A,getenv("PG_ORDER")?atoi(getenv("PG_ORDER")):0,&F)!=VSDLSS_OK)die("factorize failed");
     double tf=now()-t;
     printf("\n[3] solver view (AMD, 1 thread, factor %.2fs): %lld components\n",tf,(long long)F->count);
     csi order[4]={0}; int no=0;                     /* the four largest components */
@@ -313,7 +314,7 @@ int main(int argc,char **argv)
     for(char *tok=strtok(buf," ");tok;tok=strtok(NULL," ")){
         int t=atoi(tok); if(vsdlss_set_num_threads(t)!=VSDLSS_OK)die("bad thread count");
         vsdlss_m3_factor *F=NULL; double a=now();
-        if(vsdlss_factorize_m3(A,0,&F)!=VSDLSS_OK)die("factorize failed");
+        if(vsdlss_factorize_m3(A,getenv("PG_ORDER")?atoi(getenv("PG_ORDER")):0,&F)!=VSDLSS_OK)die("factorize failed");
         double tf=now()-a;
         csi core=0,lnz=0; for(csi c=0;c<F->count;c++){core+=F->component[c].reduction->core_n;if(F->component[c].numeric)lnz+=F->component[c].numeric->l_nnz;}
         double ts[256],ti[256];

@@ -180,3 +180,9 @@ M4 显式数值工作区不随线程数增加，但 OpenMP 运行库/线程栈�
 BLAS 必须线程安全并在求解器内单线程运行（OpenBLAS 需 `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`，或用 MKL sequential）；
 此时各线程数结果相同，但与内置内核不逐位相同。IBM 电源网格基准上分解快 1.4–3.5 倍、求解时间减少 10–40%；
 实测、与 CHOLMOD 的对比和注意事项见 [perf-solve-blas-20260923](docs/reconstruction/perf-solve-blas-20260923.md)。
+
+可选 METIS：`make METIS=1 METIS_CFLAGS=... METIS_LIBS=...`（默认关闭，需 64 位 idx_t）后，排序 6 对低度消元后的核心
+做 METIS 嵌套剖分。相比 AMD，L 少 22–48%，求解快约 20–30%（网格型数据近 2 倍），数值分解快 2–3 倍，但排序每个网多几秒，
+适合同一矩阵反复求解或内存紧张的场景。METIS 5.1 的随机数为全局状态，默认串行调用；以 `-DUSE_GKRAND` 且线程局部随机状态
+编译的 METIS 可加 `METIS_THREADSAFE=1` 让 VDD/GND 并发排序。与 MKL PARDISO 的对比和实测见
+[metis-ordering-20260924](docs/reconstruction/metis-ordering-20260924.md)。

@@ -175,11 +175,16 @@ int main(void)
     {
         vsdlss *A = from_edges(4, (csi[]){0,1, 1,2, 2,3}, 3);
         csi *q = NULL, *pinv = NULL;
-        CHECK(vsdlss_order(A, 6, &q, &pinv) == VSDLSS_ERR_UNSUPPORTED);
+#ifdef VSDLSS_METIS
+        const int unknown = 7;          /* 6 selects METIS in this build */
+#else
+        const int unknown = 6;
+#endif
+        CHECK(vsdlss_order(A, unknown, &q, &pinv) == VSDLSS_ERR_UNSUPPORTED);
         CHECK(q == NULL && pinv == NULL);
         {
             vsdlss_m3_factor *m3 = NULL;
-            CHECK(vsdlss_factorize_m3(A, 6, &m3) == VSDLSS_ERR_UNSUPPORTED);
+            CHECK(vsdlss_factorize_m3(A, unknown, &m3) == VSDLSS_ERR_UNSUPPORTED);
             CHECK(m3 == NULL);
         }
         vsdlss_spfree(A);
