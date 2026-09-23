@@ -163,6 +163,23 @@ int main(int argc,char **argv)
     }
     printf("# paired: ordinary_median=%.5fs packed_median=%.5fs checked=bitwise (alternating order, 6 each, packing excluded)\n",
            (ordinary_times[2]+ordinary_times[3])*0.5,(packed_times[2]+packed_times[3])*0.5);
+    if(getenv("PG_SOLVE_SWEEP"))for(int step=0;step<4;step++){
+        int width=getenv("PG_SOLVE_SWEEP_REVERSE")?(8>>step):(1<<step);
+        if(vsdlss_set_num_threads(width)!=VSDLSS_OK)return 1;
+        double samples[6];
+        for(int rep=0;rep<7;rep++){
+            t=now();st=vsdlss_m3_solve_packed(f,packed_rhs,packed_x);
+            double elapsed=now()-t;
+            if(st!=VSDLSS_OK)return 1;
+            if(rep>0)samples[rep-1]=elapsed;
+        }
+        for(csi k=0;k<n;k++)if(memcmp(packed_x+k,x+packed_to_global[k],sizeof(double)))return 1;
+        for(int i=1;i<6;i++)for(int j=i;j>0&&samples[j]<samples[j-1];j--){
+            double v=samples[j];samples[j]=samples[j-1];samples[j-1]=v;
+        }
+        printf("# solve sweep: threads=%d packed_median=%.5fs checked=bitwise (same factor, 6 calls)\n",
+               width,(samples[2]+samples[3])*0.5);
+    }
     free(packed_to_global);free(packed_rhs);free(packed_x);
     vsdlss_m3_factor_free(f);vsdlss_spfree(A);free(b);free(x);
     return 0;
