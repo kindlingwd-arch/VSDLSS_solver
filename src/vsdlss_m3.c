@@ -418,6 +418,7 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
     double t0=trace_now();
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
+    t0=trace_now();
     run_components(factor,factor->disk_mode,scatter_local,&ctx,results);
     TRACE("solve: scatter",t0);
 done:
