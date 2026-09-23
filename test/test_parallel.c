@@ -69,8 +69,46 @@ static vsdlss *matrix(csi n,csi components)
     }
     A->p[n]=p;return A;
 }
+static int packed_rhs(const vsdlss_m3_factor *f, const double *rhs, csi n)
+{
+    csi *perm=malloc((size_t)n*sizeof(*perm));
+    unsigned char *seen=calloc((size_t)n,1);
+    double *packed=malloc((size_t)n*sizeof(*packed));
+    double *got=malloc((size_t)n*sizeof(*got));
+    double *ordinary=malloc((size_t)n*sizeof(*ordinary));
+    CHECK(perm&&seen&&packed&&got&&ordinary);
+    CHECK(vsdlss_m3_export_packed_permutation(f,perm,n)==VSDLSS_OK);
+    for(csi k=0;k<n;k++){
+        CHECK(perm[k]>=0&&perm[k]<n&&!seen[perm[k]]);
+        seen[perm[k]]=1;packed[k]=rhs[perm[k]];
+    }
+    CHECK(vsdlss_m3_solve(f,rhs,ordinary)==VSDLSS_OK);
+    CHECK(vsdlss_m3_solve_packed(f,packed,got)==VSDLSS_OK);
+    for(csi k=0;k<n;k++)CHECK(memcmp(got+k,ordinary+perm[k],sizeof(double))==0);
+    CHECK(vsdlss_m3_solve_packed(f,packed,packed)==VSDLSS_OK);
+    CHECK(memcmp(got,packed,(size_t)n*sizeof(double))==0);
+    CHECK(vsdlss_m3_export_packed_permutation(f,perm,n-1)==VSDLSS_ERR_INVALID);
+    for(csi k=0;k<n;k++)got[k]=91;
+    packed[n-1]=NAN;
+    CHECK(vsdlss_m3_solve_packed(f,packed,got)==VSDLSS_ERR_NONFINITE);
+    for(csi k=0;k<n;k++)CHECK(got[k]==91);
+    free(perm);free(seen);free(packed);free(got);free(ordinary);return 0;
+}
+static int packed_empty_core(void)
+{
+    csi p[]={0,1,3,5,6},i[]={0,0,1,1,2,3};
+    double x[]={2,-1,3,-1,2,4},truth[]={1,2,3,4},rhs[4];
+    vsdlss A={6,4,4,p,i,x,-1};vsdlss_m3_factor *f=NULL;
+    CHECK(vsdlss_spmv_sym_upper(&A,truth,rhs)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(&A,5,&f)==VSDLSS_OK);
+    CHECK(f->count==2&&f->component[0].reduction->core_n==0&&
+          f->component[1].reduction->core_n==0);
+    CHECK(packed_rhs(f,rhs,4)==0);
+    vsdlss_m3_factor_free(f);return 0;
+}
 static int components_and_rhs(void)
 {
+    CHECK(packed_empty_core()==0);
     const csi n=512,ld=515;vsdlss *A=matrix(n,4);CHECK(A);
     double *truth=malloc(n*8),*rhs=malloc(ld*4*8),*out=malloc(ld*4*8),*ref=malloc(ld*4*8);CHECK(truth&&rhs&&out&&ref);
     for(int r=0;r<4;r++){
@@ -80,11 +118,13 @@ static int components_and_rhs(void)
     vsdlss_m3_factor *f=NULL;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     CHECK(vsdlss_factorize_m3(A,2,&f)==VSDLSS_OK);
+    CHECK(packed_rhs(f,rhs,n)==0);
     CHECK(vsdlss_m3_solve_many(f,4,rhs,ld,ref,ld)==VSDLSS_OK);
     vsdlss_m3_factor_free(f);f=NULL;
     for(int threads=2;threads<=4;threads*=2){
         CHECK(vsdlss_set_num_threads(threads)==VSDLSS_OK);
         CHECK(vsdlss_factorize_m3(A,2,&f)==VSDLSS_OK);
+        CHECK(packed_rhs(f,rhs,n)==0);
         CHECK(vsdlss_parallel_last_team_size()>1);
         CHECK(vsdlss_m3_solve_many(f,4,rhs,ld,out,ld)==VSDLSS_OK);
         for(int r=0;r<4;r++){

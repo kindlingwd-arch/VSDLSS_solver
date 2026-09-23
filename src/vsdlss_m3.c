@@ -308,6 +308,7 @@ typedef struct { double *local, *saved, *core, *core_x; int own; } solve_ws;
 
 typedef struct {
     const vsdlss_m3_factor *f; const double *rhs; double *out; solve_ws *ws;
+    int packed;
 } solve_ctx;
 
 static const csi *component_map(const vsdlss_m3_factor *f, csi c)
@@ -353,13 +354,16 @@ static vsdlss_status solve_local(void *vctx, csi c)
     const vsdlss_m3_component_factor *cf=x->f->component+c;
     const vsdlss_reduction *r=cf->reduction;
     const csi core=r->core_n, cn=cf->n, *map=component_map(x->f,c);
-    const double *rhs=x->rhs; solve_ws *w=x->ws+c;
+    const double *rhs=x->rhs; const csi begin=x->f->components->offset[c]; solve_ws *w=x->ws+c;
     double *local=w->local, *core_b=w->core;
     vsdlss_status status; int bad=0;
     int gt=vsdlss_parallel_width((double)cn*4); (void)gt;
     double t0=trace_now();
     VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
-    for(csi i=0;i<cn;i++) { double v=rhs[map[i]]; local[i]=v; bad|=!isfinite(v); }
+    for(csi i=0;i<cn;i++) {
+        double v=rhs[x->packed?begin+i:map[i]];
+        local[i]=v; bad|=!isfinite(v);
+    }
     if(bad) return VSDLSS_ERR_NONFINITE;
     TRACE("solve: gather",t0);
     status=vsdlss_reduce_forward_inplace(r,local,w->saved);
@@ -393,15 +397,16 @@ static vsdlss_status scatter_local(void *vctx, csi c)
 {
     const solve_ctx *x=(const solve_ctx*)vctx;
     const csi cn=x->f->component[c].n, *map=component_map(x->f,c);
+    const csi begin=x->f->components->offset[c];
     const double *local=x->ws[c].local; double *out=x->out;
     int gt=vsdlss_parallel_width((double)cn*4); (void)gt;
     VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
-    for(csi i=0;i<cn;i++) out[map[i]]=local[i];
+    for(csi i=0;i<cn;i++) out[x->packed?begin+i:map[i]]=local[i];
     return VSDLSS_OK;
 }
 
-vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
-                              const double *rhs, double *solution)
+static vsdlss_status solve_shared(const vsdlss_m3_factor *factor,
+                                  const double *rhs, double *solution, int packed)
 {
     vsdlss_status status=VSDLSS_OK, *results=NULL; solve_ws *ws=NULL; csi c, taken=0;
     if(!factor || !factor->components || !factor->component || !rhs || !solution)
@@ -414,7 +419,7 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
         status=ws_acquire(factor,taken,ws+taken);
         if(status!=VSDLSS_OK) goto done;
     }
-    solve_ctx ctx={factor,rhs,solution,ws};
+    solve_ctx ctx={factor,rhs,solution,ws,packed};
     double t0=trace_now();
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
@@ -425,6 +430,27 @@ done:
     if(ws) for(c=0;c<taken;c++) ws_release(factor,c,ws+c);
     free(ws); free(results);
     return status;
+}
+
+vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
+                              const double *rhs, double *solution)
+{ return solve_shared(factor,rhs,solution,0); }
+
+vsdlss_status vsdlss_m3_solve_packed(const vsdlss_m3_factor *factor,
+                                     const double *rhs, double *solution)
+{ return solve_shared(factor,rhs,solution,1); }
+
+vsdlss_status vsdlss_m3_export_packed_permutation(const vsdlss_m3_factor *f,
+                                                   csi *packed_to_global, csi length)
+{
+    if(!f||!f->components||!f->component||!packed_to_global||length<f->n)
+        return VSDLSS_ERR_INVALID;
+    for(csi c=0;c<f->count;c++) {
+        const csi begin=f->components->offset[c], end=f->components->offset[c+1];
+        const csi *map=component_map(f,c);
+        for(csi i=0;i<end-begin;i++) packed_to_global[begin+i]=map[i];
+    }
+    return VSDLSS_OK;
 }
 
 /* A batch of right-hand sides through every component: per RHS gather and

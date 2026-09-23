@@ -274,8 +274,48 @@ int main(int argc,char **argv)
     double eta;vsdlss_backward_error(A,x,b,&eta);
     tt=now();st=vsdlss_m3_solve_many(f,nrhs,b,n,x,n);double tm=now()-tt;
     if(st!=VSDLSS_OK){printf("solve_many failed: %s\n",vsdlss_status_string(st));return 1;}
-    printf("# solve: first=%.2fs warm=%.2fs batch%d=%.2fs (%.2fs/RHS) backward_error=%.2e peak_rss=%ld MB huge_pages=%ld MB\n",
+    printf("# solve: first=%.5fs warm=%.5fs batch%d=%.5fs (%.5fs/RHS) backward_error=%.2e peak_rss=%ld MB huge_pages=%ld MB\n",
            ts,warm,nrhs,tm,tm/nrhs,eta,peak_rss_mb(),anon_huge_mb());
+    csi *packed_to_global=malloc((size_t)n*sizeof(csi));
+    double *packed_rhs=malloc((size_t)n*sizeof(double));
+    double *packed_solution=malloc((size_t)n*sizeof(double));
+    if(!packed_to_global||!packed_rhs||!packed_solution||
+       vsdlss_m3_export_packed_permutation(f,packed_to_global,n)!=VSDLSS_OK){puts("packed setup failed");return 1;}
+    for(csi k=0;k<n;k++)packed_rhs[k]=b[packed_to_global[k]];
+    double packed_warm=1e30;
+    for(int rep=0;rep<4;rep++){
+        tt=now();st=vsdlss_m3_solve_packed(f,packed_rhs,packed_solution);
+        double w=now()-tt;
+        if(st!=VSDLSS_OK){printf("packed solve failed: %s\n",vsdlss_status_string(st));return 1;}
+        if(rep>0&&w<packed_warm)packed_warm=w;
+    }
+    for(csi k=0;k<n;k++)if(memcmp(packed_solution+k,x+packed_to_global[k],sizeof(double))){
+        puts("packed solve differs from original order");return 1;
+    }
+    printf("# packed: warm=%.5fs checked=bitwise (permutation construction excluded)\n",packed_warm);
+    /* Alternate call order to limit hot-cache bias in the API comparison. */
+    double ordinary_times[6],packed_times[6];
+    for(int rep=0;rep<6;rep++)for(int side=0;side<2;side++){
+        int do_packed=(rep+side)&1;
+        tt=now();
+        st=do_packed?vsdlss_m3_solve_packed(f,packed_rhs,packed_solution)
+                    :vsdlss_m3_solve(f,b,x);
+        double elapsed=now()-tt;
+        if(st!=VSDLSS_OK){printf("paired solve failed: %s\n",vsdlss_status_string(st));return 1;}
+        if(do_packed)packed_times[rep]=elapsed;
+        else ordinary_times[rep]=elapsed;
+    }
+    for(int i=1;i<6;i++)for(int j=i;j>0;j--){
+        if(ordinary_times[j]<ordinary_times[j-1]){
+            double t=ordinary_times[j];ordinary_times[j]=ordinary_times[j-1];ordinary_times[j-1]=t;
+        }
+        if(packed_times[j]<packed_times[j-1]){
+            double t=packed_times[j];packed_times[j]=packed_times[j-1];packed_times[j-1]=t;
+        }
+    }
+    printf("# paired: ordinary_median=%.5fs packed_median=%.5fs (alternating order, 6 each)\n",
+           (ordinary_times[2]+ordinary_times[3])*0.5,(packed_times[2]+packed_times[3])*0.5);
+    free(packed_to_global);free(packed_rhs);free(packed_solution);
     vsdlss_m3_factor_free(f);vsdlss_spfree(A);free(b);free(x);
     return 0;
 }
