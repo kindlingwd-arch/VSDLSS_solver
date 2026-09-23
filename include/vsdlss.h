@@ -89,6 +89,17 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
                                   vsdlss_m3_factor **out);
 vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
                               const double *rhs, double *solution);
+/* Packed order concatenates the factor's component-local solve orders.
+ * Export packed_to_global[k] once, then supply rhs[k] in that order and
+ * receive solution[k] in the same order.  The map remains valid until the
+ * factor is freed.  Each solve preserves the output on error, and may alias
+ * rhs and solution.  A caller that already produces/consumes packed vectors
+ * avoids per-solve global gather/scatter; packing an ordinary vector inside
+ * the loop gives no such saving. */
+vsdlss_status vsdlss_m3_export_packed_permutation(const vsdlss_m3_factor *factor,
+                                                   csi *packed_to_global, csi length);
+vsdlss_status vsdlss_m3_solve_packed(const vsdlss_m3_factor *factor,
+                                    const double *rhs, double *solution);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
 /* M4: panel mode (width cap 8), scalar fallback for very small budgets.
  * Private temporary disk factor; no original-format compatibility.

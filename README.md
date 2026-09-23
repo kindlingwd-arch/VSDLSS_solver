@@ -4,7 +4,7 @@
 
 附件合并记录见 [第一批](docs/reconstruction/merge-20260922-a.md)、[第二批](docs/reconstruction/merge-20260922-b.md) 与 [第三批](docs/reconstruction/merge-20260923-c.md)。第二、三批合并后尚未执行构建与测试，复现命令见第三批记录。
 
-最新重构与实测结果见 [2026-09-21 左视超节点重构](docs/reconstruction/17-left-looking-refactor-20260921.md) 与 [2026-09-22 电源网格预处理优化](docs/reconstruction/18-powergrid-preprocessing-20260922.md)（`make bench-powergrid`）、[2026-09-22 单次分解/求解效率](docs/reconstruction/19-single-solve-efficiency-20260922.md)（`make bench-pg-profile`）、[2026-09-23 VDD/GND 双网络](docs/reconstruction/20-vdd-gnd-components-20260923.md)（`make bench-pg-vddgnd`）（此前的整合记录见 [16](docs/reconstruction/16-main-integration-20260921.md)）。M3 采用后序 + 宽松合并超节点与左视数值分解，M4 采用严格超节点；默认排序（`-p 0`）自 2026-09-22 起为 AMD，与 `-p 5` 相同；MLD 用 `-p 4` 显式选择。
+最新重构与实测结果见 [2026-09-21 左视超节点重构](docs/reconstruction/17-left-looking-refactor-20260921.md) 与 [2026-09-22 电源网格预处理优化](docs/reconstruction/18-powergrid-preprocessing-20260922.md)（`make bench-powergrid`）、[2026-09-22 单次分解/求解效率](docs/reconstruction/19-single-solve-efficiency-20260922.md)（`make bench-pg-profile`）、[2026-09-23 VDD/GND 双网络](docs/reconstruction/20-vdd-gnd-components-20260923.md)（`make bench-pg-vddgnd`）、[2026-09-23 打包编号 RHS 实验](docs/reconstruction/22-packed-rhs-solve-20260923.md)（此前的整合记录见 [16](docs/reconstruction/16-main-integration-20260921.md)）。M3 采用后序 + 宽松合并超节点与左视数值分解，M4 采用严格超节点；默认排序（`-p 0`）自 2026-09-22 起为 AMD，与 `-p 5` 相同；MLD 用 `-p 4` 显式选择。
 
 # VSDLSS Solver Reconstruction
 

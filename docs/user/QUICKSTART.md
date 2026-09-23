@@ -83,6 +83,10 @@ order：0 默认（AMD），1 RCM，2 自然序，3 最小度，4 MLD，5 AMD。
 
 多 RHS：`vsdlss_m3_solve_many(f,nrhs,rhs,ldrhs,out,ldout)`，按列存放，每列为一个长度 n 的 RHS，两个 leading dimension 均至少 n，nrhs 至少 1。输出整批成功后提交。M4 reduced 对象不得传入此入口；M4 和 M4 reduced 同一因子不支持外部并发调用。
 
+若上游能直接按因子内部顺序生成每次的 RHS，并按该顺序消费解，可使用 `vsdlss_m3_solve_packed(f,packed_rhs,packed_solution)` 跳过每次的全局编号 gather/scatter。分解后调用一次 `vsdlss_m3_export_packed_permutation(f,packed_to_global,n)`；第 k 个打包位置对应原节点 `packed_to_global[k]`。输入与输出都长为 n，允许同址，失败时输出保持不变，映射只在因子存活期间有效。例如原编号数据的对应关系为 `packed_rhs[k] = rhs[packed_to_global[k]]` 和 `solution[packed_to_global[k]] = packed_solution[k]`。如果每次仍需执行这两次转换，打包接口不保证端到端提速；优先让上游和下游直接沿用该编号。现有 `vsdlss_m3_solve` 无需改动。
+
+分解完成后仍可调用 `vsdlss_set_num_threads(solve_threads)` 调整后续回代的并行线程数，无需重新分解；在目标机器上用 `PG_SOLVE_SWEEP=1 ./bench_pg_profile 5 2 1 1`（双网加 `PG_NETS=2`）对**同一个因子**测试 1/2/4/8 线程并核对结果。大网格的适宜回代线程数可能与分解线程数不同；选择实测中位耗时较低且波动可接受的配置。
+
 `vsdlss_set_num_threads(n)` 是调用线程局部设置，默认 1；先检查返回状态。`vsdlss_parallel_last_team_size()` 是观察到的最大线程组，不是利用率。`vsdlss_set_dag_enabled` 仅为兼容保留，不影响当前分解路径。
 
 M4 budget 限制磁盘数值工作区及其约定元数据，不是进程总内存上限。M4 reduced 的 disk_budget 是所有子因子的该工作区之和，预处理、核心矩阵和恢复向量额外驻留。budget 太小会失败；不要将磁盘模式理解为任意矩阵都能装入该内存。临时目录必须存在且可写；可通过 CLI --temp-dir 或 API directory 指定。
