@@ -100,7 +100,7 @@ MLD 是与反编译证据对应的重建产物，保留为 `-p 4`。
 3. `vsdlss_backward_error(A, solution, rhs, &eta)`：独立计算后向误差。
 4. `vsdlss_factor_free(factor)`：释放因子拥有的全部资源。
 
-M3 对应入口为 `vsdlss_factorize_m3`、`vsdlss_m3_solve` 和 `vsdlss_m3_factor_free`。测试包含固定权重图 Laplacian+I 的独立稠密 oracle、M1/M3 对照、逐分配序号失败注入和事务检查；K5 固定为单一稠密超节点，三维网格还直接检查多个超节点、外部行和更新映射。测试分配器不属于公共 API。`bench-m3` 输出阶段时间、缩减度数、核心、超节点、面板、临时符号元数据、保留因子元数据、求解临时区峰值估算和两路后向误差。峰值覆盖 facade 数组与 `reduce_rhs`/`reduce_recover`/超节点求解的嵌套临时数组，明确排除保留因子、输入输出和分配器开销；它不是进程内存高水位，也不表示已经验证百万节点规模。
+M3 对应入口为 `vsdlss_factorize_m3`、`vsdlss_m3_solve` 和 `vsdlss_m3_factor_free`。反复求解时可用 `vsdlss_m3_internal_order` 取得因子内部编号，再以 `vsdlss_m3_solve_internal` 按内部编号传入右端项、取回解：结果与 `vsdlss_m3_solve` 逐位相同，省掉对调用者数组的随机 gather/写回（2288 万结点双网、2 线程：单次求解 0.57 s → 0.32 s）。测试包含固定权重图 Laplacian+I 的独立稠密 oracle、M1/M3 对照、逐分配序号失败注入和事务检查；K5 固定为单一稠密超节点，三维网格还直接检查多个超节点、外部行和更新映射。测试分配器不属于公共 API。`bench-m3` 输出阶段时间、缩减度数、核心、超节点、面板、临时符号元数据、保留因子元数据、求解临时区峰值估算和两路后向误差。峰值覆盖 facade 数组与 `reduce_rhs`/`reduce_recover`/超节点求解的嵌套临时数组，明确排除保留因子、输入输出和分配器开销；它不是进程内存高水位，也不表示已经验证百万节点规模。
 
 置换约定固定为 `q[new]=old`、`pinv[old]=new`，并由性质测试验证双射。
 
@@ -174,3 +174,9 @@ M4 显式数值工作区不随线程数增加，但 OpenMP 运行库/线程栈�
 [08-parallel-design.md](docs/reconstruction/08-parallel-design.md)；
 本轮并行效率优化的诊断、改动、实测与剩余瓶颈见
 [13-parallel-efficiency.md](docs/reconstruction/13-parallel-efficiency.md)。
+
+可选 BLAS：`make BLAS=1 BLAS_LIBS='-lopenblas'`（默认关闭）。宽超节点的分解改用 `dgemm`/`dpotrf`/`dtrsm`，
+三角求解改用 `dtrsv`/`dgemv`，阈值由 `VSDLSS_BLAS_MIN`、`VSDLSS_BLAS_SOLVE_MIN` 设置（面板宽度，默认 32，0 关闭）。
+BLAS 必须线程安全并在求解器内单线程运行（OpenBLAS 需 `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`，或用 MKL sequential）；
+此时各线程数结果相同，但与内置内核不逐位相同。IBM 电源网格基准上分解快 1.4–3.5 倍、求解时间减少 10–40%；
+实测、与 CHOLMOD 的对比和注意事项见 [perf-solve-blas-20260923](docs/reconstruction/perf-solve-blas-20260923.md)。

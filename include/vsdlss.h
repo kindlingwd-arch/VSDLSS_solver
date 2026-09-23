@@ -89,6 +89,18 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
                                   vsdlss_m3_factor **out);
 vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
                               const double *rhs, double *solution);
+/* Internal order: the factor's own numbering of the unknowns (connected
+ * components one after another, each in its elimination-friendly order).
+ * perm (length n) receives the original index of every internal position:
+ * internal vector v and original vector u relate by v[p] = u[perm[p]].
+ * vsdlss_m3_solve_internal takes rhs and returns solution in internal order;
+ * it gives bitwise the same numbers as vsdlss_m3_solve, without that call's
+ * random-access gather and write-back over the caller's arrays.  Callers
+ * that assemble right-hand sides and read results through perm once can use
+ * it for every solve.  Same failure contract as vsdlss_m3_solve. */
+vsdlss_status vsdlss_m3_internal_order(const vsdlss_m3_factor *factor, csi *perm);
+vsdlss_status vsdlss_m3_solve_internal(const vsdlss_m3_factor *factor,
+                                       const double *rhs, double *solution);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
 /* M4: panel mode (width cap 8), scalar fallback for very small budgets.
  * Private temporary disk factor; no original-format compatibility.

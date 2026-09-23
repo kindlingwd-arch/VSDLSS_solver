@@ -38,3 +38,7 @@
 /bench_sn
 /bench_powergrid
 /bench_pg_profile
+/bench_pg_solve
+/bench_ibmpg
+/bench_dense
+/bench_cholmod
