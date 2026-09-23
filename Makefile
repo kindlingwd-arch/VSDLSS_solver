@@ -6,6 +6,19 @@ OPENMP ?= 1
 ifeq ($(OPENMP),1)
 PARFLAGS := -fopenmp
 endif
+# Optional BLAS/LAPACK for wide supernodes (dgemm, dpotrf+dtrsm, dtrsv+dgemv):
+#   make BLAS=1 BLAS_LIBS='-lopenblas'
+# Runtime: VSDLSS_BLAS_MIN / VSDLSS_BLAS_SOLVE_MIN (panel width, default 32,
+# 0 disables).  The BLAS must be thread safe and single threaded inside the
+# solver (e.g. OpenBLAS with OPENBLAS_NUM_THREADS=1 and OMP_NUM_THREADS=1, or
+# MKL sequential); results then match for every solver thread count but are
+# not bitwise equal to the built-in kernels.
+BLAS ?= 0
+BLAS_LIBS ?= -lopenblas
+ifeq ($(BLAS),1)
+PARFLAGS += -DVSDLSS_BLAS
+LDLIBS += $(BLAS_LIBS)
+endif
 
 LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c \
@@ -73,7 +86,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -194,3 +207,27 @@ bench-pg-vddgnd: bench_pg_profile
 	PG_NETS=2 VSDLSS_TRACE=1 ./bench_pg_profile 5 2 1 1
 
 .PHONY: bench-pg-profile bench-pg-vddgnd
+
+# Single-solve scaling (one factor, several solve thread counts) and the
+# internal-order solve; PG_DUMP=file exports the system for bench_cholmod.
+bench_pg_solve: test/bench_pg_solve.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_pg_solve.c $(LIBSRCS) $(LDLIBS)
+
+bench-pg-solve: bench_pg_solve
+	PG_NETS=2 SOLVE_THREADS="1 2 4" ./bench_pg_solve 5 2 1 1
+
+# IBM power grid benchmarks (ibmpg1-6); netlists are downloaded separately.
+bench_ibmpg: test/bench_ibmpg.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_ibmpg.c $(LIBSRCS) $(LDLIBS)
+
+# Dense kernels against BLAS/LAPACK (needs BLAS=1).
+bench_dense: test/bench_dense.c src/vsdlss_dense.c src/vsdlss_parallel.c src/vsdlss_status.c src/vsdlss_dense.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_dense.c src/vsdlss_dense.c src/vsdlss_parallel.c src/vsdlss_status.c $(LDLIBS)
+
+# CHOLMOD on a PG_DUMP file: make bench_cholmod CHOLMOD_CFLAGS='-I...' CHOLMOD_LIBS='-lcholmod ...'
+CHOLMOD_CFLAGS ?=
+CHOLMOD_LIBS ?= -lcholmod -lamd -lcamd -lcolamd -lccolamd -lsuitesparseconfig
+bench_cholmod: test/bench_cholmod.c
+	$(CC) -O2 $(PARFLAGS) $(CHOLMOD_CFLAGS) -o $@ test/bench_cholmod.c $(CHOLMOD_LIBS) $(BLAS_LIBS) -lm
+
+.PHONY: bench-pg-solve

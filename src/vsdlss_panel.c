@@ -107,9 +107,71 @@ vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
 
 #include "vsdlss_small_solve.inc"
 
+#ifdef VSDLSS_BLAS
+/* Wide panels (at least VSDLSS_BLAS_SOLVE_MIN columns, default 32; 0
+ * disables) use dtrsv + dgemv.  Same pivot checks as the built-in path; a
+ * non-finite result is reported for J here and, for the external rows, by
+ * the caller's scan of the solution. */
+#include <limits.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+void dtrsv_(const char *, const char *, const char *, const int *, const double *,
+            const int *, double *, const int *);
+void dgemv_(const char *, const int *, const int *, const double *, const double *,
+            const int *, const double *, const int *, const double *, double *,
+            const int *);
+static csi solve_blas_min(void)
+{
+    static atomic_llong cached = -1;
+    long long v = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("VSDLSS_BLAS_SOLVE_MIN");
+        v = e ? atoll(e) : 32;
+        if (v < 0) v = 0;
+        atomic_store_explicit(&cached, v, memory_order_relaxed);
+    }
+    return (csi)v;
+}
+int vsdlss_panel_solve_uses_blas(void) { return solve_blas_min() > 0; }
+static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
+                                      csi ext, const csi *index, double *x, int back)
+{
+    const csi rows = width + ext;
+    int W = (int)width, E = (int)ext, LD = (int)rows, one = 1;
+    double p1 = 1.0, m1 = -1.0, zero = 0.0;
+    for (csi j = 0; j < width; j++) {
+        double d = a[j * rows + j];
+        if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
+    }
+    double stack[VSDLSS_SOLVE_GATHER];
+    double *t = ext <= VSDLSS_SOLVE_GATHER ? stack : (double *)malloc((size_t)ext * sizeof(double));
+    if (!t) return vsdlss_panel_solve_generic(a, begin, width, ext, index, x, back);
+    if (!back) {
+        dtrsv_("L", "N", "N", &W, a, &LD, x + begin, &one);
+        if (E) {
+            dgemv_("N", &E, &W, &p1, a + width, &LD, x + begin, &one, &zero, t, &one);
+            for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
+        }
+    } else {
+        if (E) {
+            for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
+            dgemv_("T", &E, &W, &m1, a + width, &LD, t, &one, &p1, x + begin, &one);
+        }
+        dtrsv_("L", "T", "N", &W, a, &LD, x + begin, &one);
+    }
+    if (t != stack) free(t);
+    for (csi j = 0; j < width; j++) if (!isfinite(x[begin + j])) return VSDLSS_ERR_NONFINITE;
+    return VSDLSS_OK;
+}
+#endif
+
 vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
                                 csi ext,const csi *index,double *x,int back)
 {
+#ifdef VSDLSS_BLAS
+    { csi m=solve_blas_min();
+      if(m && width>=m && width+ext<INT_MAX) return blas_panel_solve(a,begin,width,ext,index,x,back); }
+#endif
     /* Keep large external-row work on the existing parallel path. */
     if(vsdlss_parallel_width((double)width*ext)>1)
         return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,back);

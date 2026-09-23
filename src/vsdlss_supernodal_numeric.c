@@ -33,6 +33,39 @@
 #define SCATTER_MC 128
 #define SCATTER_NC 64
 
+/* Optional BLAS/LAPACK for wide panels (build with -DVSDLSS_BLAS and link a
+ * BLAS/LAPACK).  Source blocks at least VSDLSS_BLAS_MIN columns wide (default
+ * 32; 0 disables) are applied with dgemm and panels at least that wide are
+ * factored with dpotrf + dtrsm.  Results then depend on the BLAS library's
+ * operation order: reproducible for one build and library, but not bitwise
+ * equal to the built-in kernels.  Without VSDLSS_BLAS nothing changes. */
+#ifdef VSDLSS_BLAS
+void dgemm_(const char *, const char *, const int *, const int *, const int *,
+            const double *, const double *, const int *, const double *,
+            const int *, const double *, double *, const int *);
+void dpotrf_(const char *, const int *, double *, const int *, int *);
+void dtrsm_(const char *, const char *, const char *, const char *, const int *,
+            const int *, const double *, const double *, const int *, double *,
+            const int *);
+static csi blas_min_width(void)
+{
+    const char *e = getenv("VSDLSS_BLAS_MIN");
+    csi v = e ? (csi)atoll(e) : 32;
+    return v > 0 ? v : 0;
+}
+/* C(m x n) = beta C - A(m x k) B(n x k)^T; dimensions fit int by the caller. */
+static void blas_nt_sub(csi m, csi n, csi k, const double *A, csi lda,
+                        const double *B, csi ldb, double *C, csi ldc, double beta)
+{
+    int M = (int)m, N = (int)n, K = (int)k, la = (int)lda, lb = (int)ldb, lc = (int)ldc;
+    double alpha = -1.0;
+#ifdef VSDLSS_BLAS_SERIALIZE   /* diagnostic: for BLAS builds that are not thread safe */
+    VSDLSS_OMP(omp critical(vsdlss_blas))
+#endif
+    dgemm_("N", "T", &M, &N, &K, &alpha, A, &la, B, &lb, &beta, C, &lc);
+}
+#endif
+
 static int bytes_ok(csi n, size_t z) { return n >= 0 && (uint64_t)n <= SIZE_MAX / z; }
 
 static void *copy_array(const void *p, csi n, size_t z)
@@ -44,9 +77,12 @@ static void *copy_array(const void *p, csi n, size_t z)
     return q;
 }
 
+static void solve_tree_free(struct vsdlss_sn_solve_tree *st);
+
 void vsdlss_sn_factor_free(vsdlss_sn_factor *f)
 {
     if (!f) return;
+    solve_tree_free(f->solve_tree);
     free(f->column_start); free(f->row_ptr); free(f->row_index);
     free(f->panel_offset); free(f->panel_block);
     free(f->sn_parent); free(f->blk_ptr); free(f->blk_src); free(f->blk_first); free(f->blk_end);
@@ -104,6 +140,7 @@ typedef struct {
     vsdlss_sn_factor *f;
     const vsdlss_sn_symbolic *s;
     const vsdlss *lower;    /* transpose of A: column j holds rows i >= j */
+    csi blas_min;           /* 0: built-in kernels only */
 } context;
 
 static void workspace_free(workspace *w)
@@ -139,9 +176,21 @@ static void apply_rows(const context *c, workspace *w, csi sn, csi first,
     csi rd = f->column_start[d + 1] - bd + f->row_ptr[d + 1] - f->row_ptr[d];
     double *dst = f->panel + f->panel_offset[d];
     const csi *R = f->row_index + f->row_ptr[sn] + first;
+#ifdef VSDLSS_BLAS
+    const int blas = c->blas_min && ws >= c->blas_min;
+#endif
     if (contiguous) {
         /* Source rows are one run of target rows: subtract in place. */
         csi c0 = R[0] - bd;
+#ifdef VSDLSS_BLAS
+        /* dgemm also updates the entries above the diagonal of the target's
+         * diagonal block; nothing reads that strictly upper triangle. */
+        if (blas) {
+            blas_nt_sub(row_hi - row_lo, kk, ws, src + row_lo, rs, src, rs,
+                        dst + c0 * rd + w->rowmap[row_lo], rd, 1.0);
+            return;
+        }
+#endif
         vsdlss_gemm_nt_sub(row_hi - row_lo, kk, ws, src + row_lo, rs, src, rs,
                            dst + c0 * rd + w->rowmap[row_lo], rd, row_lo);
         return;
@@ -152,9 +201,16 @@ static void apply_rows(const context *c, workspace *w, csi sn, csi first,
         while (r < row_hi) {
             csi mc = row_hi - r < SCATTER_MC ? row_hi - r : SCATTER_MC;
             csi tri = r - c0;               /* keep entries with row >= col */
-            memset(w->tile, 0, (size_t)mc * (size_t)nc * sizeof(double));
-            vsdlss_gemm_nt_sub(mc, nc, ws, src + r, rs, src + c0, rs,
-                               w->tile, mc, tri);
+#ifdef VSDLSS_BLAS
+            if (blas)                       /* whole tile; the scatter keeps row >= col */
+                blas_nt_sub(mc, nc, ws, src + r, rs, src + c0, rs, w->tile, mc, 0.0);
+            else
+#endif
+            {
+                memset(w->tile, 0, (size_t)mc * (size_t)nc * sizeof(double));
+                vsdlss_gemm_nt_sub(mc, nc, ws, src + r, rs, src + c0, rs,
+                                   w->tile, mc, tri);
+            }
             for (csi j = 0; j < nc; ++j) {
                 double *col = dst + (R[c0 + j] - bd) * rd;
                 const double *t = w->tile + j * mc;
@@ -209,6 +265,16 @@ static vsdlss_status process_panel(const context *c, workspace *w, csi d, int in
         const csi chunk = 4 * SCATTER_MC;
         csi chunks = m / chunk + (m % chunk != 0);
         if (nt > chunks) nt = (int)chunks;
+#ifdef VSDLSS_BLAS
+        /* BLAS kernels may round differently depending on where a row falls
+         * in their register tiles, so a BLAS block is always cut at the same
+         * chunk boundaries, whether the chunks then run on one thread or on
+         * several: the factor stays the same for every thread count. */
+        if (nt <= 1 && c->blas_min && ws >= c->blas_min) {
+            for (csi r0 = 0; r0 < m; r0 += chunk)
+                apply_rows(c, w, sn, first, end, d, r0, r0 + chunk < m ? r0 + chunk : m, contiguous);
+        } else
+#endif
         if (nt <= 1) {
             apply_rows(c, w, sn, first, end, d, 0, m, contiguous);
         } else {
@@ -232,6 +298,23 @@ static vsdlss_status process_panel(const context *c, workspace *w, csi d, int in
     for (csi j = 0; j < wd; ++j)
         for (csi i = j; i < rd; ++i)
             if (!isfinite(panel[j * rd + i])) return VSDLSS_ERR_NONFINITE;
+#ifdef VSDLSS_BLAS
+    if (c->blas_min && wd >= c->blas_min) {
+        int W = (int)wd, E = (int)ext, LD = (int)rd, info = 0; double one = 1.0;
+#ifdef VSDLSS_BLAS_SERIALIZE
+        VSDLSS_OMP(omp critical(vsdlss_blas))
+#endif
+        {
+            dpotrf_("L", &W, panel, &LD, &info);
+            if (info == 0 && E > 0) dtrsm_("R", "L", "T", "N", &E, &W, &one, panel, &LD, panel + wd, &LD);
+        }
+        if (info != 0) return VSDLSS_ERR_NOT_POSDEF;
+        for (csi j = 0; j < wd; ++j)
+            for (csi i = j; i < rd; ++i)
+                if (!isfinite(panel[j * rd + i])) return VSDLSS_ERR_NONFINITE;
+        return VSDLSS_OK;
+    }
+#endif
     return vsdlss_panel_factor(panel, rd, wd);
 }
 
@@ -282,6 +365,68 @@ static int tree_build(const vsdlss_sn_factor *f, const csi *sn_parent, int solve
     }
     free(head); free(next); free(stack); free(pos);
     return k == count;
+}
+
+/* ---- Cached solve tree --------------------------------------------------
+ * The solve postorder depends only on the factor; the subtree split depends
+ * on the thread count as well.  Both are built once: the tree when the factor
+ * is made, a split the first time a solve uses that thread count (published
+ * with a compare-and-swap, so concurrent solves on one factor stay safe). */
+typedef struct {
+    csi nsub;
+    csi *sub;        /* nsub subtree roots */
+    csi *sub_end;    /* postorder position of each root */
+    char *in_sub;    /* count: panel belongs to a split subtree */
+} sn_split;
+
+#define SN_SPLIT_SLOTS 257
+struct vsdlss_sn_solve_tree {
+    tree_info t;
+    _Atomic(sn_split *) split[SN_SPLIT_SLOTS];   /* indexed by thread count */
+};
+
+static void split_free(sn_split *s)
+{ if (s) { free(s->sub); free(s->sub_end); free(s->in_sub); free(s); } }
+
+static void solve_tree_free(struct vsdlss_sn_solve_tree *st)
+{
+    if (!st) return;
+    tree_free(&st->t);
+    for (int i = 0; i < SN_SPLIT_SLOTS; ++i) split_free(atomic_load(&st->split[i]));
+    free(st);
+}
+
+static struct vsdlss_sn_solve_tree *solve_tree_new(const vsdlss_sn_factor *f)
+{
+    struct vsdlss_sn_solve_tree *st = malloc(sizeof(*st));
+    if (!st) return NULL;
+    for (int i = 0; i < SN_SPLIT_SLOTS; ++i) atomic_init(&st->split[i], NULL);
+    if (!tree_build(f, f->sn_parent, 1, &st->t)) { free(st); return NULL; }
+    return st;
+}
+
+/* Maximal subtrees with at most 1/(4 nt) of the solve work. */
+static sn_split *split_build(const vsdlss_sn_factor *f, const tree_info *t, int nt)
+{
+    csi count = f->count;
+    sn_split *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->sub = malloc((size_t)count * sizeof(csi));
+    s->sub_end = malloc((size_t)count * sizeof(csi));
+    s->in_sub = calloc((size_t)count, 1);
+    if (!s->sub || !s->sub_end || !s->in_sub) { split_free(s); return NULL; }
+    double total = 0;
+    for (csi d = 0; d < count; ++d) if (f->sn_parent[d] < 0) total += t->work[d];
+    double cap = total / (4.0 * nt);
+    for (csi k = count - 1; k >= 0; --k) {
+        csi d = t->order[k], p = f->sn_parent[d];
+        if (s->in_sub[d]) continue;
+        if (t->work[d] <= cap && (p < 0 || t->work[p] > cap)) {
+            s->sub[s->nsub] = d; s->sub_end[s->nsub] = k; s->nsub++;
+            for (csi q = t->first[d]; q <= k; ++q) s->in_sub[t->order[q]] = 1;
+        }
+    }
+    return s;
 }
 
 static vsdlss_status factor_tree(const context *c, workspace *ws, int nt)
@@ -421,7 +566,10 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
     if (!ws) goto fail;
     for (int i = 0; i < nws; ++i) if (!workspace_init(ws + i, f->n, s->max_rows)) goto fail;
     {
-        context c = { f, s, lower };
+        context c = { f, s, lower, 0 };
+#ifdef VSDLSS_BLAS
+        if (s->max_rows < INT_MAX) c.blas_min = blas_min_width();
+#endif
         if (nt > 1) st = factor_tree(&c, ws, nt);
         else {
             st = VSDLSS_OK;
@@ -431,7 +579,8 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
     }
     if (st != VSDLSS_OK) goto fail;
     for (int i = 0; i < nws; ++i) workspace_free(ws + i);
-    free(ws); vsdlss_spfree(lower);
+    free(ws); ws = NULL; nws = 0; vsdlss_spfree(lower); lower = NULL;
+    if (f->count > 1 && !(f->solve_tree = solve_tree_new(f))) { st = VSDLSS_ERR_OOM; goto fail; }
     *out = f; return VSDLSS_OK;
 fail:
     if (ws) for (int i = 0; i < nws; ++i) workspace_free(ws + i);
@@ -443,7 +592,15 @@ fail:
  * lands in J_d (sources ascending, columns j ascending per entry), then
  * solve the diagonal block.  For each entry this is exactly the operation
  * sequence of the push form in vsdlss_panel_solve, so results are bitwise
- * identical to the serial solve. */
+ * identical to the serial solve.
+ *
+ * The block update runs column-outer so the panel is read contiguously; an
+ * entry x[R[r]] still receives its subtractions in ascending j (R holds rows
+ * below the source's columns, so no x[bs + j] is among the targets), and each
+ * subtraction rounds to double either way, so the result is unchanged.
+ * Entries are not checked one by one: a non-finite value stays non-finite
+ * through every later subtraction and division, so the caller's single scan
+ * of the result reports it. */
 static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
 {
     csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
@@ -454,18 +611,16 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
         csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
         const double *as = f->panel + f->panel_offset[sn] + ws;
         const csi *R = f->row_index + f->row_ptr[sn];
-        for (csi r = f->blk_first[b]; r < f->blk_end[b]; ++r) {
-            double v = x[R[r]];
-            for (csi j = 0; j < ws; ++j) v -= as[j * rs + r] * x[bs + j];
-            x[R[r]] = v;
-            if (!isfinite(v)) return 2;
+        const csi r0 = f->blk_first[b], r1 = f->blk_end[b];
+        for (csi j = 0; j < ws; ++j) {
+            const double xj = x[bs + j], *col = as + j * rs;
+            for (csi r = r0; r < r1; ++r) x[R[r]] -= col[r] * xj;
         }
     }
     for (csi j = 0; j < wd; ++j) {
         double dj = a[j * rd + j];
         if (!isfinite(dj) || dj <= 0) return 1;
         x[bd + j] /= dj;
-        if (!isfinite(x[bd + j])) return 2;
         for (csi r = j + 1; r < wd; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
     }
     return 0;
@@ -481,79 +636,86 @@ static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
 }
 
 /* Tree-parallel solves: independent subtrees in parallel, the top of the
- * tree in order (forward: subtrees first; backward: top first). */
+ * tree in order (forward: subtrees first; backward: top first).  The tree
+ * and the split for nt come from the factor's cache when it has one. */
 static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
 {
-    csi count = f->count, nsub = 0;
-    tree_info t; csi *sub = NULL; char *in_sub = NULL; int bad = 0;
-    if (!tree_build(f, f->sn_parent, 1, &t)) return VSDLSS_ERR_OOM;
-    sub = malloc((size_t)count * sizeof(csi));
-    in_sub = calloc((size_t)count, 1);
-    if (!sub || !in_sub) { tree_free(&t); free(sub); free(in_sub); return VSDLSS_ERR_OOM; }
-    double total = 0;
-    for (csi d = 0; d < count; ++d) if (f->sn_parent[d] < 0) total += t.work[d];
-    double cap = total / (4.0 * nt);
-    for (csi k = count - 1; k >= 0; --k) {
-        csi d = t.order[k], p = f->sn_parent[d];
-        if (in_sub[d]) continue;
-        if (t.work[d] <= cap && (p < 0 || t.work[p] > cap)) {
-            sub[nsub++] = d;
-            for (csi q = t.first[d]; q <= k; ++q) in_sub[t.order[q]] = 1;
+    csi count = f->count;
+    tree_info local_t; const tree_info *t; int bad = 0;
+    sn_split *sp = NULL, *owned = NULL;
+    struct vsdlss_sn_solve_tree *cache = f->solve_tree;
+    if (cache) t = &cache->t;
+    else {
+        if (!tree_build(f, f->sn_parent, 1, &local_t)) return VSDLSS_ERR_OOM;
+        t = &local_t;
+    }
+    if (cache && nt < SN_SPLIT_SLOTS) sp = atomic_load(&cache->split[nt]);
+    if (!sp) {
+        owned = split_build(f, t, nt);
+        if (!owned) { if (!cache) tree_free(&local_t); return VSDLSS_ERR_OOM; }
+        sp = owned;
+        if (cache && nt < SN_SPLIT_SLOTS) {
+            sn_split *expect = NULL;
+            if (atomic_compare_exchange_strong(&cache->split[nt], &expect, owned)) owned = NULL;
+            else { split_free(owned); owned = NULL; sp = expect; }
         }
     }
+    const csi nsub = sp->nsub, *sub = sp->sub, *sub_end = sp->sub_end;
+    const char *in_sub = sp->in_sub;
     if (nt > nsub) nt = (int)(nsub ? nsub : 1);
     (void)nt;
     VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
-    for (csi i = 0; i < nsub; ++i) {
-        csi root = sub[i];
-        for (csi k = t.first[root]; !bad && t.order[k] != root; ++k) bad |= forward_pull(f, t.order[k], x);
-        if (!bad) bad |= forward_pull(f, root, x);
-    }
+    for (csi i = 0; i < nsub; ++i)
+        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
     for (csi k = 0; k < count && !bad; ++k)
-        if (!in_sub[t.order[k]]) bad |= forward_pull(f, t.order[k], x);
+        if (!in_sub[t->order[k]]) bad |= forward_pull(f, t->order[k], x);
     for (csi k = count - 1; k >= 0 && !bad; --k)
-        if (!in_sub[t.order[k]]) bad |= backward_panel(f, t.order[k], x);
+        if (!in_sub[t->order[k]]) bad |= backward_panel(f, t->order[k], x);
     if (!bad) {
+        /* The subtree is order[first[root] .. sub_end] with the root last;
+         * walk it backwards so parents precede children. */
         VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
-        for (csi i = 0; i < nsub; ++i) {
-            csi root = sub[i];
-            /* The subtree is order[first[root] .. pos(root)] with the root
-             * last; walk it backwards so parents precede children. */
-            csi pos = t.first[root];
-            while (t.order[pos] != root) ++pos;
-            for (csi k = pos; !bad && k >= t.first[root]; --k) bad |= backward_panel(f, t.order[k], x);
-        }
+        for (csi i = 0; i < nsub; ++i)
+            for (csi k = sub_end[i]; !bad && k >= t->first[sub[i]]; --k) bad |= backward_panel(f, t->order[k], x);
     }
-    tree_free(&t); free(sub); free(in_sub);
+    split_free(owned);
+    if (!cache) tree_free(&local_t);
     return bad == 0 ? VSDLSS_OK : (bad & 1) ? VSDLSS_ERR_INVALID : VSDLSS_ERR_NONFINITE;
+}
+
+vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
+{
+    if (!f || !x || f->n < 1) return VSDLSS_ERR_INVALID;
+    int nt = vsdlss_parallel_width((double)f->l_nnz * 2);
+#ifdef VSDLSS_BLAS
+    /* The tree schedule's pull-form forward step has no BLAS form with the
+     * same rounding as the panel solve, so with BLAS solves every thread
+     * count takes the serial path (results then match for all counts). */
+    if (vsdlss_panel_solve_uses_blas()) nt = 1;
+#endif
+    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) return solve_tree(f, x, nt);
+    for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
+        csi sn = back ? f->count - 1 - t : t;
+        csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+        csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
+        vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+            ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
+        if (st != VSDLSS_OK) return st;
+    }
+    return VSDLSS_OK;
 }
 
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *f, const double *rhs, double *out)
 {
-    double *x; csi sn, j;
+    double *x; csi j;
     if (!f || !rhs || !out || f->n < 1 || !bytes_ok(f->n, sizeof(double))) return VSDLSS_ERR_INVALID;
     x = malloc((size_t)f->n * sizeof(*x)); if (!x) return VSDLSS_ERR_OOM;
     for (j = 0; j < f->n; j++) {
         if (!isfinite(rhs[j])) { free(x); return VSDLSS_ERR_NONFINITE; }
         x[j] = rhs[j];
     }
-    {
-        int nt = vsdlss_parallel_width((double)f->l_nnz * 2);
-        if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) {
-            vsdlss_status st = solve_tree(f, x, nt);
-            if (st != VSDLSS_OK) { free(x); return st; }
-            for (j = 0; j < f->n; j++) if (!isfinite(x[j])) { free(x); return VSDLSS_ERR_NONFINITE; }
-            memcpy(out, x, (size_t)f->n * sizeof(*x)); free(x); return VSDLSS_OK;
-        }
-    }
-    for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
-        sn = back ? f->count - 1 - t : t;
-        csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
-        csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
-        vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
-            ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
-        if (st != VSDLSS_OK) { free(x); return st; }
-    }
+    vsdlss_status st = vsdlss_sn_solve_inplace(f, x);
+    if (st != VSDLSS_OK) { free(x); return st; }
     for (j = 0; j < f->n; j++) if (!isfinite(x[j])) { free(x); return VSDLSS_ERR_NONFINITE; }
     memcpy(out, x, (size_t)f->n * sizeof(*x)); free(x); return VSDLSS_OK;
 }

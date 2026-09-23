@@ -182,6 +182,10 @@ static int solve_kernel(void)
         CHECK(vsdlss_panel_solve(a,0,width,ext,index,ref,back)==VSDLSS_OK);
         CHECK(vsdlss_set_num_threads(4)==VSDLSS_OK);
         CHECK(vsdlss_panel_solve(a,0,width,ext,index,x,back)==VSDLSS_OK);
+#ifdef VSDLSS_BLAS
+        /* BLAS-solved panels run on one thread: same result, no team. */
+        if(vsdlss_panel_solve_uses_blas()) CHECK(memcmp(x,ref,rows*8)==0); else
+#endif
         CHECK(vsdlss_parallel_last_team_size()>1&&memcmp(x,ref,rows*8)==0);
     }
     free(a);free(x);free(ref);free(index);return 0;
@@ -275,10 +279,55 @@ static int components_threads_equal(void)
     return 0;
 }
 
+/* vsdlss_m3_solve_internal against vsdlss_m3_solve, both inverse-map
+ * encodings (32-bit codes, and 64-bit forced), for every thread count;
+ * aliasing and the failure contract as for vsdlss_m3_solve. */
+static int internal_order_solve(void)
+{
+    vsdlss *A=two_nets(); CHECK(A);
+    const csi n=A->n;
+    double *b=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8),*bi=malloc(n*8),*xi=malloc(n*8);
+    csi *perm=malloc(n*sizeof(csi)); char *seen=calloc(n,1);
+    CHECK(b&&ref&&x&&bi&&xi&&perm&&seen);
+    for(csi i=0;i<n;i++) b[i]=cos(0.013*(double)i)+0.25;
+    int maxt=vsdlss_parallel_enabled()?4:1, first=1;
+    for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+        vsdlss_m3_factor *f=NULL;
+        vsdlss_m3_inverse_force64=wide;
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        vsdlss_m3_inverse_force64=0;
+        CHECK(wide?(f->inv64&&!f->inv32):(f->inv32&&!f->inv64));
+        CHECK(vsdlss_m3_internal_order(f,perm)==VSDLSS_OK);
+        memset(seen,0,n);
+        for(csi p=0;p<n;p++){ CHECK(perm[p]>=0&&perm[p]<n&&!seen[perm[p]]); seen[perm[p]]=1; }
+        CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+        if(first){ memcpy(ref,x,n*8); first=0; }
+        CHECK(memcmp(ref,x,n*8)==0);
+        for(csi p=0;p<n;p++) bi[p]=b[perm[p]];
+        for(int rep=0;rep<2;rep++){                  /* second pass: cached split */
+            CHECK(vsdlss_m3_solve_internal(f,bi,xi)==VSDLSS_OK);
+            for(csi p=0;p<n;p++) CHECK(memcmp(&xi[p],&ref[perm[p]],8)==0);
+        }
+        memcpy(xi,bi,n*8); CHECK(vsdlss_m3_solve_internal(f,xi,xi)==VSDLSS_OK);   /* aliasing */
+        for(csi p=0;p<n;p++) CHECK(memcmp(&xi[p],&ref[perm[p]],8)==0);
+        for(csi p=0;p<n;p++) xi[p]=77;
+        bi[n/3]=NAN;
+        CHECK(vsdlss_m3_solve_internal(f,bi,xi)==VSDLSS_ERR_NONFINITE);
+        for(csi p=0;p<n;p++) CHECK(xi[p]==77);
+        vsdlss_m3_factor_free(f);
+    }
+    CHECK(vsdlss_m3_internal_order(NULL,perm)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_m3_solve_internal(NULL,bi,xi)==VSDLSS_ERR_INVALID);
+    vsdlss_spfree(A); free(b); free(ref); free(x); free(bi); free(xi); free(perm); free(seen);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(panel_tile_boundaries()==0);
     CHECK(kernels()==0);
+    CHECK(internal_order_solve()==0);
     if(vsdlss_parallel_enabled()){
         CHECK(components_and_rhs()==0);CHECK(components_threads_equal()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);
     }

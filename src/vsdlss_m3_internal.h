@@ -86,6 +86,10 @@ typedef struct vsdlss_sn_factor {
     /* Tree and source blocks (copied from the symbolic layout) for the
      * tree-parallel triangular solves. */
     csi *sn_parent, *blk_ptr, *blk_src, *blk_first, *blk_end;
+    /* Solve-tree postorder and per-thread-count subtree splits, built once
+     * so repeated tree-parallel solves do not rebuild them (NULL: built per
+     * solve). */
+    struct vsdlss_sn_solve_tree *solve_tree;
 } vsdlss_sn_factor;
 
 typedef struct vsdlss_m3_component_factor {
@@ -108,6 +112,13 @@ struct vsdlss_m3_factor {
     int disk_mode;
     vsdlss_components *components;       /* owns global/local maps */
     vsdlss_m3_component_factor *component; /* count owned entries */
+    /* Global vertex -> (component << inv_shift) | local index, so the solve
+     * writes the caller's solution sequentially (reading the component
+     * buffers at random) instead of scattering into it.  32-bit codes when
+     * they fit, else 64-bit; both NULL means the per-component scatter. */
+    uint32_t *inv32;
+    uint64_t *inv64;
+    int inv_shift;
 };
 
 /* Symmetric weighted adjacency (no diagonal in idx/val; diag separate). */
@@ -161,6 +172,7 @@ void vsdlss_reduction_free(vsdlss_reduction *);
  * paths on small matrices).  Results depend on them, never on threads. */
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
+extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's
  * reduction replay is bandwidth bound).  Keeps records, returning OK, when
@@ -186,6 +198,11 @@ void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *);
 vsdlss_status vsdlss_sn_factorize(const vsdlss *, const vsdlss_sn_symbolic *,
                                   vsdlss_sn_factor **);
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *);
+/* In place on x (length n), no allocation on the serial path and no input or
+ * output finiteness scans: the caller checks x afterwards (a non-finite input
+ * or intermediate always leaves a non-finite entry in the result).  Bitwise
+ * the same result as vsdlss_sn_solve.  On failure x is partially updated. */
+vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *, double *x);
 vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *, csi nrhs, double *x, csi ldx);
 vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *, vsdlss **);
 void vsdlss_sn_factor_free(vsdlss_sn_factor *);
@@ -194,6 +211,10 @@ void vsdlss_sn_factor_free(vsdlss_sn_factor *);
 vsdlss_status vsdlss_panel_factor(double *, csi rows, csi width);
 vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
                                 csi ext, const csi *index, double *, int back);
+#ifdef VSDLSS_BLAS
+/* 1 when wide panels are solved with BLAS (VSDLSS_BLAS_SOLVE_MIN > 0). */
+int vsdlss_panel_solve_uses_blas(void);
+#endif
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
 

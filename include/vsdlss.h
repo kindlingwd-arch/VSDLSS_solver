@@ -95,11 +95,19 @@ vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
  * factor is freed.  Each solve preserves the output on error, and may alias
  * rhs and solution.  A caller that already produces/consumes packed vectors
  * avoids per-solve global gather/scatter; packing an ordinary vector inside
- * the loop gives no such saving. */
+ * the loop gives no such saving.  Results are bitwise those of
+ * vsdlss_m3_solve. */
 vsdlss_status vsdlss_m3_export_packed_permutation(const vsdlss_m3_factor *factor,
                                                    csi *packed_to_global, csi length);
 vsdlss_status vsdlss_m3_solve_packed(const vsdlss_m3_factor *factor,
                                     const double *rhs, double *solution);
+/* Same order and implementation under the names of the other branch:
+ * vsdlss_m3_internal_order(f, perm) equals
+ * vsdlss_m3_export_packed_permutation(f, perm, n), and
+ * vsdlss_m3_solve_internal equals vsdlss_m3_solve_packed. */
+vsdlss_status vsdlss_m3_internal_order(const vsdlss_m3_factor *factor, csi *perm);
+vsdlss_status vsdlss_m3_solve_internal(const vsdlss_m3_factor *factor,
+                                       const double *rhs, double *solution);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
 /* M4: panel mode (width cap 8), scalar fallback for very small budgets.
  * Private temporary disk factor; no original-format compatibility.
