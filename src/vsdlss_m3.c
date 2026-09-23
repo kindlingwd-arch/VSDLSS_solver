@@ -110,6 +110,13 @@ static void run_components(const vsdlss_m3_factor *f, int serial, component_fn f
 #ifdef _OPENMP
         int levels=omp_get_max_active_levels();
         if(levels<2) omp_set_max_active_levels(2);
+#if _OPENMP < 201811
+        /* Before OpenMP 5.0 (e.g. GCC <= 10) nested teams also need
+         * nest-var; without it every component team silently runs on one
+         * thread.  Newer runtimes derive it from max-active-levels. */
+        int nested=omp_get_nested();
+        if(!nested) omp_set_nested(1);
+#endif
 #endif
         VSDLSS_OMP(omp parallel for num_threads((int)nbig) schedule(static,1))
         for(csi i=0;i<nbig;i++) {
@@ -120,6 +127,9 @@ static void run_components(const vsdlss_m3_factor *f, int serial, component_fn f
         }
 #ifdef _OPENMP
         if(levels<2) omp_set_max_active_levels(levels);
+#if _OPENMP < 201811
+        if(!nested) omp_set_nested(0);
+#endif
 #endif
     }
     if(nbig==count) return;
