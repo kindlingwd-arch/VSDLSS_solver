@@ -91,6 +91,18 @@ MLD 是与反编译证据对应的重建产物，保留为 `-p 4`。
 设计、与 SuiteSparse AMD 的对照及测试见
 [15-ordering-amd.md](docs/reconstruction/15-ordering-amd.md)。默认要求 `.rhs` 存在且长度准确；只有显式指定 `--demo-rhs` 才会在 RHS 缺失时构造 `b=A·1`。成功后写出 `<jobname>.rsl`。
 
+文本 dump 回放测试（`<job>` 是二进制解文件 `<job>.rsl` 的输出前缀）：
+
+```bash
+make vsdlss_solver
+./vsdlss_solver --text-dump test/fixtures/text_dumps/02_tree_five_nodes --m3 /tmp/tree5
+make test-text
+```
+
+目录内必须有 `diag.txt`（每行 `值` 或 `零基序号 值`）、`data.txt`（每行 `零基行 零基列 值`，严格上三角且不可重复）、`b_vector.txt` 和 `x_vector.txt`（每行 `零基序号 值`）。`x_vector.txt` 只用于计算参考解误差，求解输入是 `b_vector.txt`。这些文本输入也可搭配 `--disk-budget` 和 `--m4-reduced`；原 `.hdr/.mat*/.rhs` 路径保持原样。
+
+输出 `load_ms`（文本解析和矩阵装配）、`prepare_ms`（解向量分配）、`factor_ms`（包含求解器内部排序、符号和数值分解）、`solve_ms`（一次回代）及 `factor_solve_ms`（从分解开始到回代结束的墙钟时间）。使用 `--load-factor` 时 `factor_ms` 计入打开已有因子的耗时。`relative_residual_inf=||Ax-b||∞/max(1,||b||∞)`，参考解误差也以无穷范数报告。计时使用单调墙钟；读写 `.rsl`、残差和误差计算不计入分解与求解时间。
+
 ## 公共 API
 
 入口集中在 `include/vsdlss.h`：
