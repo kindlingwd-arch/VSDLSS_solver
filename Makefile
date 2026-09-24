@@ -40,7 +40,7 @@ endif
 LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c \
            src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
-           src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_components.c \
+           src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
            src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m4.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c \
@@ -72,6 +72,10 @@ test-unit: test_solver
 test-io: test_io
 	./test_io
 
+.PHONY: test-text
+test-text: vsdlss_solver
+	python3 test/test_text_dump.py
+
 test-ordering: test_ordering
 	./test_ordering
 
@@ -88,7 +92,7 @@ test_m3: test/test_m3.c test/m3_test_alloc.c test/m3_test_alloc.h $(LIBSRCS) inc
 test-m3: test_m3
 	./test_m3
 
-test: all test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel test-supernodal
+test: all test-unit test-io test-text test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel test-supernodal
 	python3 test/gen_sparse.py test_sparse 10
 	./vsdlss_solver test_sparse
 	./vsdlss_solver --disk-budget 8192 test_sparse
@@ -99,7 +103,7 @@ sanitizers:
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
 	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal
 
-src/%.o: src/%.c include/vsdlss.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h
+src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
