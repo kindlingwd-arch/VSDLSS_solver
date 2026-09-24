@@ -182,11 +182,14 @@ vsdlss_status vsdlss_reduce_pack(vsdlss_reduction *);
  * vsdlss_reduce_run followed by vsdlss_reduce_pack, without compacting). */
 typedef struct { double *local, *saved, *core; } vsdlss_reduce_ws;
 /* ws (optional) receives solve buffers of n, count and core_n doubles taken
- * over from the reduction's own arrays (NULL when a size is 0). */
+ * over from the reduction's own arrays (NULL when a size is 0; saved is also
+ * NULL when the result is packed, whose replays need no saved array). */
 vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *, vsdlss_reduction **,
                                        vsdlss_reduce_ws *ws);
 /* work must be finite on entry (callers check while gathering); overflow in
- * the replay shows up as a non-finite core RHS or in the backward pass. */
+ * the replay shows up as a non-finite core RHS or in the backward pass.
+ * saved may be NULL when r is packed (records NULL); both replays must then
+ * use the same work/x vector, untouched between them except at core vertices. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);

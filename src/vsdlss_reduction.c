@@ -379,7 +379,8 @@ static void forward_seg(const vsdlss_pk_seg *g, double *restrict work, double *r
     for(csi i=0;i<g->count;i++) {
         uint32_t h=head[i]; csi d=(csi)(h>>30);
         const double *m=val+i+o+1; const uint32_t *w=nb+o;
-        double s=saved[i]=work[h&PK_VMASK];
+        double s=work[h&PK_VMASK];
+        if(saved) saved[i]=s;
         for(csi j=0;j<d;j++) { double update=m[j]*s; work[w[j]]-=update; }
         o+=d;
     }
@@ -396,7 +397,7 @@ static int backward_seg(const vsdlss_pk_seg *g, const double *restrict saved, do
         uint32_t h=head[i]; csi d=(csi)(h>>30);
         o-=d;
         const double *v=val+i+o; const uint32_t *w=nb+o;
-        double value=saved[i]/v[0];
+        double value=(saved?saved[i]:x[h&PK_VMASK])/v[0];
         for(csi j=0;j<d;j++) { double update=v[1+j]*x[w[j]]; value-=update; }
         ok&=isfinite(value)!=0;
         x[h&PK_VMASK]=value;
@@ -413,12 +414,16 @@ static int pk_blocked(const vsdlss_reduction *r)
  * its internal copy; afterwards work[core_vertices[k]] is the core RHS.
  * Records of the parallel block pass touch disjoint vertices per block, so
  * those blocks are replayed concurrently; every entry sees the same
- * operations as in the serial replay, for any thread count. */
+ * operations as in the serial replay, for any thread count.
+ * saved may be NULL for a packed reduction: a record's saved value is then
+ * left in work at its vertex, which no later record updates and the core
+ * write-back does not touch, and the backward replay reads it from there. */
+#define SV(saved,g) ((saved)?(saved)+(g).k0:NULL)
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *work,
                                             double *saved)
 {
     csi k, first=0; int bad=0, nt;
-    if(!valid_reduction_shape(r) || (!work && r->n) || (!saved && r->count)) return VSDLSS_ERR_INVALID;
+    if(!valid_reduction_shape(r) || (!work && r->n) || (!saved && r->count && r->records)) return VSDLSS_ERR_INVALID;
     nt=vsdlss_parallel_width((double)r->n*4);
     (void)nt;
     if(!r->records && r->count) {
@@ -427,10 +432,10 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
             int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
             (void)bt;
             VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4))
-            for(csi b=0;b<r->blocks;b++) forward_seg(pk+b,work,saved+pk[b].k0);
+            for(csi b=0;b<r->blocks;b++) forward_seg(pk+b,work,SV(saved,pk[b]));
             q0=r->blocks;
         }
-        for(csi q=q0;q<r->pk_count;q++) forward_seg(pk+q,work,saved+pk[q].k0);
+        for(csi q=q0;q<r->pk_count;q++) forward_seg(pk+q,work,SV(saved,pk[q]));
         return VSDLSS_OK;
     }
     if(blocks_valid(r)) {
@@ -452,7 +457,7 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
                                              double *x)
 {
     csi k, stop=0; int bad=0, nt;
-    if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count)) return VSDLSS_ERR_INVALID;
+    if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count && r->records)) return VSDLSS_ERR_INVALID;
     for(k=0;k<r->core_n;k++) {
         csi vertex=r->core_vertices[k];
         if(vertex<0 || vertex>=r->n) return VSDLSS_ERR_INVALID;
@@ -462,12 +467,12 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
     (void)nt;
     if(!r->records && r->count) {
         const vsdlss_pk_seg *pk=r->pk; int ok=1; csi q0=pk_blocked(r)?r->blocks:0;
-        for(csi q=r->pk_count;q>q0;q--) ok&=backward_seg(pk+q-1,saved+pk[q-1].k0,x);
+        for(csi q=r->pk_count;q>q0;q--) ok&=backward_seg(pk+q-1,SV(saved,pk[q-1]),x);
         if(q0) {
             int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
             (void)bt;
             VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4) reduction(&:ok))
-            for(csi b=0;b<r->blocks;b++) ok&=backward_seg(pk+b,saved+pk[b].k0,x);
+            for(csi b=0;b<r->blocks;b++) ok&=backward_seg(pk+b,SV(saved,pk[b]),x);
         }
         return ok?VSDLSS_OK:VSDLSS_ERR_NONFINITE;
     }
@@ -943,6 +948,7 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
             return status;
         }
     }
+    if(ws && !r->records) { free(ws->saved); ws->saved=NULL; }   /* packed: replay keeps it in place */
     *out=r; return VSDLSS_OK;
 ws_fail:
     free(ws->local); free(ws->saved); free(ws->core); memset(ws,0,sizeof(*ws));

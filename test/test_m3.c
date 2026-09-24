@@ -847,6 +847,15 @@ static int test_packed_reduction_matches_records(void)
         for(k=0;k<r1->core_n;k++) w[r2->core_vertices[k]]=cs[k];
         CHECK(vsdlss_reduce_backward_inplace(r2,s2,w)==VSDLSS_OK);
         CHECK(memcmp(x1,w,n*8)==0);
+        /* Packed: without a saved array the values stay in w, same bits. */
+        memcpy(w,b,n*8);
+        CHECK(vsdlss_reduce_forward_inplace(r2,w,NULL)==VSDLSS_OK);
+        for(k=0;k<r1->core_n;k++) CHECK(w[r2->core_vertices[k]]==core1[k]);
+        for(k=0;k<r1->core_n;k++) w[r2->core_vertices[k]]=cs[k];
+        CHECK(vsdlss_reduce_backward_inplace(r2,NULL,w)==VSDLSS_OK);
+        CHECK(memcmp(x1,w,n*8)==0);
+        CHECK(vsdlss_reduce_forward_inplace(r1,w,NULL)==VSDLSS_ERR_INVALID);   /* unpacked needs it */
+        CHECK(vsdlss_reduce_backward_inplace(r1,NULL,w)==VSDLSS_ERR_INVALID);
         /* Overflow in the replay is reported by the backward pass. */
         for(k=0;k<n;k++) w[k]=DBL_MAX;
         CHECK(vsdlss_reduce_forward_inplace(r2,w,s2)==VSDLSS_OK);

@@ -392,6 +392,7 @@ static vsdlss_status ws_acquire(const vsdlss_m3_factor *f, csi c, solve_ws *w)
 {
     vsdlss_m3_component_factor *cf=(vsdlss_m3_component_factor *)(f->component+c);
     const vsdlss_reduction *r=cf->reduction; const csi core=r->core_n;
+    const int need_saved=r->count && r->records;     /* packed replays keep it in place */
     memset(w,0,sizeof(*w));
     if(!count_fits(cf->n,sizeof(double)) || !count_fits(core,sizeof(double)) ||
        !count_fits(r->count,sizeof(double))) return VSDLSS_ERR_OOM;
@@ -399,11 +400,11 @@ static vsdlss_status ws_acquire(const vsdlss_m3_factor *f, csi c, solve_ws *w)
         w->own=1; w->local=cf->ws_local; w->saved=cf->ws_saved; w->core=cf->ws_core;
     } else {
         w->local=(double*)malloc((size_t)(cf->n?cf->n:1)*sizeof(double));
-        if(r->count) w->saved=(double*)malloc((size_t)r->count*sizeof(double));
+        if(need_saved) w->saved=(double*)malloc((size_t)r->count*sizeof(double));
         if(core) w->core=(double*)malloc((size_t)core*sizeof(double));
     }
     if(core&&cf->disk) w->core_x=(double*)malloc((size_t)core*sizeof(double));
-    if(!w->local||(r->count&&!w->saved)||(core&&!w->core)||(core&&cf->disk&&!w->core_x)) {
+    if(!w->local||(need_saved&&!w->saved)||(core&&!w->core)||(core&&cf->disk&&!w->core_x)) {
         ws_release(f,c,w); return VSDLSS_ERR_OOM;
     }
     return VSDLSS_OK;
@@ -432,7 +433,7 @@ static vsdlss_status solve_local(void *vctx, csi c)
     }
     if(bad) return VSDLSS_ERR_NONFINITE;
     TRACE("solve: gather",t0);
-    status=vsdlss_reduce_forward_inplace(r,local,w->saved);
+    status=vsdlss_reduce_forward_inplace(r,local,w->saved);   /* NULL when packed */
     if(status!=VSDLSS_OK) return status;
     TRACE("solve: reduce forward",t0);
     if(core) {
