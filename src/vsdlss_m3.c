@@ -212,8 +212,15 @@ static vsdlss_status factor_component(void *vctx, csi component)
         /* The solve reads core unknown k at local vertex core_vertices[q[k]]. */
         for(csi k=0;k<r->core_n;k++) q[k]=r->core_vertices[q[k]];
         vsdlss_spfree(r->core); r->core=NULL;   /* only the disk mode reads it later */
+        /* Strict supernodes (no amalgamation zeros) were measured on the
+         * 16M-node EMIR case: 11% fewer stored entries but no faster solve
+         * and a slower factorization, so the relaxed layout stays. */
         status=vsdlss_sn_analyze_relaxed(permuted,&symbolic);
         if(status!=VSDLSS_OK) goto done;
+        if(trace_on()) fprintf(stderr,"vsdlss trace: core L stored %lld, amalgamation zeros %lld (%.1f%%), supernodes %lld\n",
+                               (long long)symbolic->l_nnz,(long long)symbolic->relaxed_zeros,
+                               100.0*(double)symbolic->relaxed_zeros/(double)(symbolic->l_nnz?symbolic->l_nnz:1),
+                               (long long)symbolic->count);
         TRACE("core symbolic",t0);
         status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
         TRACE("core numeric",t0);

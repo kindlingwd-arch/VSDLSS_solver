@@ -626,6 +626,85 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
     return 0;
 }
 
+/* Work of forward_pull(d) in multiply-adds (source-block updates plus the
+ * diagonal triangle), used to decide whether a tree-top target is worth a
+ * thread team. */
+static double forward_pull_work(const vsdlss_sn_factor *f, csi d)
+{
+    double wd = (double)(f->column_start[d + 1] - f->column_start[d]), w = wd * wd / 2;
+    for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
+        csi sn = f->blk_src[b];
+        w += (double)(f->blk_end[b] - f->blk_first[b]) *
+             (double)(f->column_start[sn + 1] - f->column_start[sn]);
+    }
+    return w;
+}
+
+/* First position p in [lo, hi) with R[p] >= key (R ascending). */
+static csi lower_bound_csi(const csi *R, csi lo, csi hi, csi key)
+{
+    while (lo < hi) { csi mid = lo + (hi - lo) / 2; if (R[mid] < key) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+
+/* forward_pull for a large tree-top target on a thread team.  The target's
+ * columns are split into contiguous ranges, one per thread; every thread
+ * applies all source blocks in the same ascending order, restricted to the
+ * rows in its range.  The diagonal triangle is solved in column blocks: the
+ * block itself serially, the rows below it split among the threads.  Each
+ * entry therefore receives exactly the subtractions and division of
+ * forward_pull, in the same order: the result is bitwise the same. */
+#define FWD_TOP_BLK 64
+#define FWD_TOP_PAR_WORK 65536.0   /* below this a team costs more than it saves */
+static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
+{
+    const csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
+    const csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
+    const double *a = f->panel + f->panel_offset[d];
+    int bad = 0;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt))
+    {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num(), T = omp_get_num_threads();
+#else
+        const int tid = 0, T = 1;
+#endif
+        const csi lo = bd + wd * tid / T, hi = bd + wd * (tid + 1) / T;
+        for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
+            csi sn = f->blk_src[b], bs = f->column_start[sn], ws = f->column_start[sn + 1] - bs;
+            csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
+            const double *as = f->panel + f->panel_offset[sn] + ws;
+            const csi *R = f->row_index + f->row_ptr[sn];
+            const csi s = lower_bound_csi(R, f->blk_first[b], f->blk_end[b], lo);
+            const csi e = lower_bound_csi(R, s, f->blk_end[b], hi);
+            for (csi j = 0; j < ws && s < e; ++j) {
+                const double xj = x[bs + j], *col = as + j * rs;
+                for (csi r = s; r < e; ++r) x[R[r]] -= col[r] * xj;
+            }
+        }
+        VSDLSS_OMP(omp barrier)
+        for (csi jb = 0; jb < wd; jb += FWD_TOP_BLK) {
+            const csi je = jb + FWD_TOP_BLK < wd ? jb + FWD_TOP_BLK : wd;
+            VSDLSS_OMP(omp single)
+            for (csi j = jb; j < je; ++j) {
+                double dj = a[j * rd + j];
+                if (!isfinite(dj) || dj <= 0) bad = 1;
+                x[bd + j] /= dj;
+                for (csi r = j + 1; r < je; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
+            }
+            const csi r0 = je + (wd - je) * tid / T, r1 = je + (wd - je) * (tid + 1) / T;
+            for (csi r = r0; r < r1; ++r) {
+                double v = x[bd + r];
+                for (csi j = jb; j < je; ++j) v -= a[j * rd + r] * x[bd + j];
+                x[bd + r] = v;
+            }
+            VSDLSS_OMP(omp barrier)
+        }
+    }
+    return bad;
+}
+
 static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
 {
     csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
@@ -662,15 +741,37 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
     }
     const csi nsub = sp->nsub, *sub = sp->sub, *sub_end = sp->sub_end;
     const char *in_sub = sp->in_sub;
+    const int nt_top = nt;          /* team for large tree-top panels */
     if (nt > nsub) nt = (int)(nsub ? nsub : 1);
     (void)nt;
+#ifdef _OPENMP
+    /* VSDLSS_SOLVE_PROFILE=1: per-call phase times and the tree-top share of L. */
+    static int prof = -1;
+    if (prof < 0) { const char *e = getenv("VSDLSS_SOLVE_PROFILE"); prof = e && *e && *e != '0'; }
+    double tp[5] = {0}; if (prof) tp[0] = omp_get_wtime();
+#endif
     VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
     for (csi i = 0; i < nsub; ++i)
         for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
-    for (csi k = 0; k < count && !bad; ++k)
-        if (!in_sub[t->order[k]]) bad |= forward_pull(f, t->order[k], x);
+#ifdef _OPENMP
+    if (prof) tp[1] = omp_get_wtime();
+#endif
+    for (csi k = 0; k < count && !bad; ++k) {
+        const csi d = t->order[k];
+        if (in_sub[d]) continue;
+        if (nt_top > 1 && forward_pull_work(f, d) >= FWD_TOP_PAR_WORK)
+            bad |= forward_pull_par(f, d, x, nt_top);
+        else
+            bad |= forward_pull(f, d, x);
+    }
+#ifdef _OPENMP
+    if (prof) tp[2] = omp_get_wtime();
+#endif
     for (csi k = count - 1; k >= 0 && !bad; --k)
         if (!in_sub[t->order[k]]) bad |= backward_panel(f, t->order[k], x);
+#ifdef _OPENMP
+    if (prof) tp[3] = omp_get_wtime();
+#endif
     if (!bad) {
         /* The subtree is order[first[root] .. sub_end] with the root last;
          * walk it backwards so parents precede children. */
@@ -678,6 +779,20 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
         for (csi i = 0; i < nsub; ++i)
             for (csi k = sub_end[i]; !bad && k >= t->first[sub[i]]; --k) bad |= backward_panel(f, t->order[k], x);
     }
+#ifdef _OPENMP
+    if (prof) {
+        tp[4] = omp_get_wtime();
+        double top = 0, all = 0;   /* stored entries (incl. amalgamation zeros) */
+        for (csi d = 0; d < count; ++d) {
+            double w = (double)(f->column_start[d + 1] - f->column_start[d]);
+            double e = (double)(f->row_ptr[d + 1] - f->row_ptr[d]);
+            double s = w * (w + 1) / 2 + w * e;
+            all += s; if (!in_sub[d]) top += s;
+        }
+        fprintf(stderr, "vsdlss solve profile: n=%lld nt=%d subtrees=%lld | fwd sub %.4f top %.4f | bwd top %.4f sub %.4f s | top share of L %.1f%%\n",
+                (long long)f->n, nt, (long long)nsub, tp[1] - tp[0], tp[2] - tp[1], tp[3] - tp[2], tp[4] - tp[3], 100 * top / all);
+    }
+#endif
     split_free(owned);
     if (!cache) tree_free(&local_t);
     return bad == 0 ? VSDLSS_OK : (bad & 1) ? VSDLSS_ERR_INVALID : VSDLSS_ERR_NONFINITE;
