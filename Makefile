@@ -215,6 +215,9 @@ bench-powergrid: bench_powergrid
 bench_pg_profile: test/bench_pg_profile.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_pg_profile.c $(LIBSRCS) $(LDLIBS)
 
+bench_pg_memory_bandwidth: test/bench_pg_memory_bandwidth.c
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_pg_memory_bandwidth.c $(LDLIBS)
+
 # Customer degree profile, 22,875,397 nodes (needs ~6 GB RAM), AMD, 2 threads
 bench-pg-profile: bench_pg_profile
 	VSDLSS_TRACE=1 ./bench_pg_profile 5 2 1 1

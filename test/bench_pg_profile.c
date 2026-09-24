@@ -14,8 +14,8 @@
  *   - d1 pendant taps, each on its own wire node (the host becomes degree 3);
  *   - short straps between junctions two columns apart (degree 4);
  *   - 10 junctions with two straps (degree 5);
- *   - one wire node with two taps (degree 4, keeps the degree sum even);
- *   - 3 supply nodes of degree 8/8/10 feeding pads, strongly grounded.
+ *   - legacy three-supply profiles use one double-tap wire node and supply
+ *     degrees 8/8/10; two-supply profiles use degree-6 supplies, one per net.
  * The generator solves for lattice size, wire lengths and strap count so the
  * histogram matches; it prints the achieved histogram next to the target.
  * Numbering is shuffled unless shuffle = 0. */
@@ -78,11 +78,9 @@ static int gen_net(spec_t *s,csi base,edges *E,double *ground)
         csi rr=r0+(r0&1), cc;
         if(rr<4)continue;
         for(cc=(I_target/rr)|1;;cc+=2){
-            csi d3=0;
-            for(csi r=0;r<rr;r++)for(csi c=0;c<cc;c++){
-                int d=(c>0)+(c+1<cc)+(r+1<rr&&((r+c)%2==0))+(r>0&&((r-1+c)%2==0));
-                d3+=d==3;
-            }
+            /* For even rr and odd cc, all (rr-2)*(cc-2) interior nodes
+             * have degree 3, plus (cc-3)/2 on each horizontal boundary. */
+            csi d3=(rr-2)*(cc-2)+(cc-3);
             if(d3>=I_target){ if(((d3-I_target)&1)==0&&(X<0||d3-I_target<X)){X=d3-I_target;R=rr;C=cc;} break; }
         }
     }
@@ -184,20 +182,26 @@ int main(int argc,char **argv)
      * histogram split PG_SPLIT : 1-PG_SPLIT (default 0.52). */
     const char *env=getenv("PG_NETS"); int nets=env?atoi(env):1;
     env=getenv("PG_SPLIT"); double split=env?atof(env):0.52;
-    if(D6!=3||(nets!=1&&nets!=2)||!(split>0.05&&split<0.95)){fprintf(stderr,"generator expects d6p=3, PG_NETS 1 or 2\n");return 2;}
+    if((D6!=2&&D6!=3)||(nets!=1&&nets!=2)||!(split>0.05&&split<0.95)||
+       D1+D2+D3+D4+D5+D6!=N){fprintf(stderr,"generator expects d6p=2 or 3, valid counts, PG_NETS 1 or 2\n");return 2;}
     spec_t sp[2]; memset(sp,0,sizeof sp);
-    if(nets==1){ sp[0]=(spec_t){N,D1,D2,D3,D4,D5,3,1,{8,8,10},0,0}; }
+    if(nets==1){
+        sp[0]=(D6==2)?(spec_t){N,D1,D2,D3,D4,D5,2,0,{6,6,0},0,0}
+                       :(spec_t){N,D1,D2,D3,D4,D5,3,1,{8,8,10},0,0};
+    }
     else {
-        /* VDD: 2 supply nodes (8, 8) and the double-tap host; GND: 1 supply
-         * node (10).  D4 parity per net is fixed by pads + dbl, and D1+D3+D5
-         * must be even per net (degree sum). */
+        /* Degree-6 profile: one degree-6 supply per net, no double-tap host.
+         * Legacy profile: VDD has two degree-8 supplies and a double-tap
+         * host; GND has one degree-10 supply. */
         spec_t *a=sp,*b=sp+1;
         a->D1=(csi)llround(split*D1); a->D2=(csi)llround(split*D2); a->D3=(csi)llround(split*D3);
-        a->D4=(csi)llround(split*D4); a->D5=D5/2; a->D6=2; a->dbl=1; a->sdeg[0]=8; a->sdeg[1]=8;
-        if(!(a->D4&1))a->D4++;
+        a->D4=(csi)llround(split*D4); a->D5=D5/2;
+        a->D6=D6==2?1:2; a->dbl=D6==3; a->sdeg[0]=D6==2?6:8; a->sdeg[1]=8;
+        if((a->D4&1)!=(D6==3))a->D4++;
         if((a->D1+a->D3+a->D5)&1)a->D3++;
         a->N=a->D1+a->D2+a->D3+a->D4+a->D5+a->D6;
-        *b=(spec_t){N-a->N,D1-a->D1,D2-a->D2,D3-a->D3,D4-a->D4,D5-a->D5,1,0,{10,0,0},0,0};
+        *b=(spec_t){N-a->N,D1-a->D1,D2-a->D2,D3-a->D3,D4-a->D4,D5-a->D5,
+                    1,0,{D6==2?6:10,0,0},0,0};
         if((b->D4&1)||((b->D1+b->D3+b->D5)&1)){fprintf(stderr,"cannot split histogram with valid parity\n");return 2;}
     }
     double t0=now();
@@ -248,6 +252,12 @@ int main(int argc,char **argv)
            (long long)hist[3],(long long)hist[4],(long long)hist[5],(long long)hist[6],(long long)hist[0]);
     printf("# rss after build: %ld MB\n",peak_rss_mb());
     fflush(stdout);
+
+    if(hist[0]||hist[1]!=D1||hist[2]!=D2||hist[3]!=D3||hist[4]!=D4||
+       hist[5]!=D5||hist[6]!=D6||(D6==2&&maxdeg!=6)){
+        fprintf(stderr,"degree histogram or maximum degree mismatch\n");return 2;
+    }
+    if(getenv("PG_GENERATE_ONLY")){vsdlss_spfree(A);return 0;}
 
     if(vsdlss_set_num_threads(threads)!=VSDLSS_OK){puts("bad thread count");return 1;}
     vsdlss_m3_factor *f=NULL;
