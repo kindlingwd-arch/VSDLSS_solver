@@ -67,7 +67,8 @@ static void uf_union(csi *parent, csi a, csi b)
  *     first). */
 static vsdlss_status components_build_impl(const vsdlss *A,
                                            vsdlss_components **out,
-                                           int validate, vsdlss_wgraph **graph)
+                                           int validate, vsdlss_wgraph **graph,
+                                           csi **ptr_out)
 {
     vsdlss_components *components = NULL;
     csi *sizes = NULL, *adj_offset = NULL, *roots = NULL, *sched = NULL;
@@ -79,6 +80,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
     if (!out) return VSDLSS_ERR_INVALID;
     *out = NULL;
     if (graph) *graph = NULL;
+    if (ptr_out) *ptr_out = NULL;
     if (!A || A->n < 1)
         return VSDLSS_ERR_INVALID;
     if (A->n == INT64_MAX || !checked_count(A->n, sizeof(csi)) ||
@@ -297,6 +299,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
         adj_offset = NULL; adjacent = NULL; adjval = NULL; diag = NULL;
         *graph = g;
     }
+    if (ptr_out) { *ptr_out = adj_offset; adj_offset = NULL; }
     free(sizes); free(roots); free(sched); free(adj_offset); free(adjacent); free(adjval); free(diag);
     *out = components;
     return VSDLSS_OK;
@@ -310,20 +313,30 @@ fail:
 vsdlss_status vsdlss_components_build(const vsdlss *A,
                                       vsdlss_components **out)
 {
-    return components_build_impl(A, out, 1, NULL);
+    return components_build_impl(A, out, 1, NULL, NULL);
 }
 
 vsdlss_status vsdlss_components_build_normalized(const vsdlss *A,
                                                  vsdlss_components **out)
 {
-    return components_build_impl(A, out, 0, NULL);
+    return components_build_impl(A, out, 0, NULL, NULL);
 }
 
 vsdlss_status vsdlss_components_build_graph(const vsdlss *A, vsdlss_components **out,
                                             vsdlss_wgraph **graph)
 {
     if (!graph) return VSDLSS_ERR_INVALID;
-    return components_build_impl(A, out, 0, graph);
+    return components_build_impl(A, out, 0, graph, NULL);
+}
+
+/* Normalized input; structure-only adjacency (no values are copied).
+ * *degree_ptr receives the adjacency offsets, i.e. the off-diagonal degree
+ * of vertex v is (*degree_ptr)[v+1] - (*degree_ptr)[v]. */
+vsdlss_status vsdlss_components_build_degrees(const vsdlss *A, vsdlss_components **out,
+                                              csi **degree_ptr)
+{
+    if (!degree_ptr) return VSDLSS_ERR_INVALID;
+    return components_build_impl(A, out, 0, NULL, degree_ptr);
 }
 
 static vsdlss_status component_extract_impl(const vsdlss *A,

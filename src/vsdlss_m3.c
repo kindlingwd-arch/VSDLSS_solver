@@ -185,6 +185,7 @@ static void run_components(const vsdlss_m3_factor *f, int serial, component_fn f
 typedef struct {
     vsdlss_m3_factor *factor; const vsdlss *src; const vsdlss_wgraph *graph;
     csi *newidx; vsdlss_reduce_input **inputs; int order;
+    int map_only;   /* fused path: only fix the numbering (gather/newidx) */
 } factor_ctx;
 
 static vsdlss_status prepare_component(void *vctx, csi component)
@@ -196,17 +197,23 @@ static vsdlss_status prepare_component(void *vctx, csi component)
     vsdlss *local=NULL; vsdlss_status st;
     vsdlss_reduce_input **input=x->inputs+component;
     cf->n=factor->components->offset[component+1]-begin;
-    if(x->graph && factor->components->order && cf->n>=VSDLSS_REORDER_MIN) {
+    if((x->graph||x->map_only) && factor->components->order && cf->n>=VSDLSS_REORDER_MIN) {
         const csi *perm=factor->components->order+begin;
         cf->gather=(csi*)vsdlss_big_malloc((size_t)cf->n*sizeof(csi));
         if(!cf->gather) return VSDLSS_ERR_OOM;
+        const csi *vert=factor->components->vertices+begin;
         for(csi k=0;k<cf->n;k++){
-            csi g=factor->components->vertices[begin+perm[k]];
+            /* perm is a BFS order: vert[] and newidx[] are hit at random. */
+            if(k+32<cf->n) VSDLSS_PREFETCH(vert+perm[k+32]);
+            if(k+16<cf->n) VSDLSS_PREFETCHW(x->newidx+vert[perm[k+16]]);
+            csi g=vert[perm[k]];
             cf->gather[k]=g; x->newidx[g]=k;     /* this component's entries only */
         }
+        if(x->map_only) return VSDLSS_OK;
         return vsdlss_reduce_prepare_graph(x->graph->ptr,x->graph->idx,x->graph->val,x->graph->diag,
                                            cf->gather,cf->n,x->newidx,input);
     }
+    if(x->map_only) return VSDLSS_OK;   /* ascending: local_of is the new index */
     if(x->graph)       /* ascending numbering: local_of is already the new index */
         return vsdlss_reduce_prepare_graph(x->graph->ptr,x->graph->idx,x->graph->val,x->graph->diag,
                                            factor->components->vertices+begin,cf->n,
@@ -302,6 +309,19 @@ done:
 
 static vsdlss_status build_inverse(vsdlss_m3_factor *f);
 
+/* VSDLSS_FUSED=1 (experimental, off by default): no weighted graph; the
+ * reduction inputs are built by a bucketed scatter over A
+ * (vsdlss_reduce_prepare_scatter).  Results are bitwise identical.  On a
+ * 1-vCPU VM with a very large LLC it was 5-10% slower overall (extra
+ * streaming of the staging buffer outweighs fewer random accesses); it is
+ * kept for A/B runs on DRAM-latency-bound servers. */
+static int fused_prepare_on(void)
+{
+    static int on=-1;
+    if(on<0) { const char *e=getenv("VSDLSS_FUSED"); on=e && e[0]=='1'; }
+    return on;
+}
+
 static vsdlss_status factorize_shared(const vsdlss *A, int order,
                                   vsdlss_m3_factor **out,int disk_mode,size_t budget,const char *directory)
 {
@@ -321,7 +341,7 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     if(A->n==INT64_MAX || A->n<1 || !count_fits(A->n+1,sizeof(csi)) ||
        !count_fits(A->n,sizeof(double))) return A->n<1?VSDLSS_ERR_INVALID:VSDLSS_ERR_OOM;
     double t0=trace_now();
-    const vsdlss *src=A; vsdlss_wgraph *graph=NULL;
+    const vsdlss *src=A; vsdlss_wgraph *graph=NULL; csi *degree_ptr=NULL;
     /* Already-normalized input (sorted, no duplicates: the usual case) is
      * used in place; only otherwise is a normalized copy made. */
     status=vsdlss_validate_upper_csc(A);
@@ -335,11 +355,19 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     factor=(vsdlss_m3_factor*)calloc(1,sizeof(*factor));
     if(!factor) {status=VSDLSS_ERR_OOM;goto fail;}
     factor->n=src->n; factor->disk_mode=disk_mode;
-    status=vsdlss_components_build_graph(src,&factor->components,&graph);
-    if(status!=VSDLSS_OK) goto fail;
-    /* The weighted graph holds everything the components need from here
-     * on, so a normalized copy of A is dropped now (peak memory). */
-    vsdlss_spfree(normalized); normalized=NULL; src=NULL;
+    const int fused=fused_prepare_on();
+    if(fused) {
+        /* Structure-only components; the reduction inputs are later built
+         * by one pass over src, so src (and a normalized copy) stays. */
+        status=vsdlss_components_build_degrees(src,&factor->components,&degree_ptr);
+        if(status!=VSDLSS_OK) goto fail;
+    } else {
+        status=vsdlss_components_build_graph(src,&factor->components,&graph);
+        if(status!=VSDLSS_OK) goto fail;
+        /* The weighted graph holds everything the components need from here
+         * on, so a normalized copy of A is dropped now (peak memory). */
+        vsdlss_spfree(normalized); normalized=NULL; src=NULL;
+    }
     TRACE("components",t0);
     factor->count=factor->components->count;
     if(!count_fits(factor->count,sizeof(*factor->component))) {status=VSDLSS_ERR_OOM;goto fail;}
@@ -351,14 +379,27 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
      * renumbered components, whose local_of entries no later step reads (small
      * components read local_of only for their own vertices), so it shares that
      * array instead of allocating another n-length one. */
-    factor_ctx ctx={factor,src,graph,factor->components->local_of,inputs,order};
+    factor_ctx ctx={factor,src,graph,factor->components->local_of,inputs,order,0};
     if(!results||!inputs||!ctx.newidx){status=VSDLSS_ERR_OOM;goto fail;}
     /* Prepare every component, then drop the graph, the normalized copy and
      * the vertex maps no later phase reads, so the reduction's working set
      * does not coexist with them (peak memory on large grids). */
+    ctx.map_only=fused;
     run_components(factor,disk_mode,prepare_component,&ctx,results);
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];goto fail;
+    }
+    if(fused) {
+        csi *size=(csi*)malloc((size_t)factor->count*sizeof(csi));
+        if(!size){status=VSDLSS_ERR_OOM;goto fail;}
+        for(component=0;component<factor->count;component++)
+            size[component]=factor->components->offset[component+1]-factor->components->offset[component];
+        status=vsdlss_reduce_prepare_scatter(src,factor->components->component_of,ctx.newidx,
+                                             degree_ptr,factor->count,size,inputs);
+        free(size);
+        if(status!=VSDLSS_OK) goto fail;
+        free(degree_ptr); degree_ptr=NULL;
+        vsdlss_spfree(normalized); normalized=NULL; src=NULL; ctx.src=NULL;
     }
     TRACE("renumber+adjacency",t0);
     vsdlss_wgraph_free(graph); graph=NULL; ctx.graph=NULL; ctx.newidx=NULL;
@@ -394,7 +435,7 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
 fail:
     if(inputs) for(component=0;component<factor->count;component++) vsdlss_reduce_input_free(inputs[component]);
     free(results); free(inputs);
-    vsdlss_wgraph_free(graph);
+    vsdlss_wgraph_free(graph); free(degree_ptr);
     vsdlss_spfree(normalized); vsdlss_m3_factor_free(factor); return status;
 }
 
@@ -619,7 +660,7 @@ static void perm_plan_free(struct vsdlss_perm_plan *p)
 static int perm2_on(void)
 {
     static int on=-1;
-    if(on<0) { const char *e=getenv("VSDLSS_PERM2"); on=!(e && e[0]=='0'); }
+    if(on<0) { const char *e=getenv("VSDLSS_PERM2"); on=e && e[0]=='1'; }
     return on;
 }
 

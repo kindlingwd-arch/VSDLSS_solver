@@ -4,6 +4,16 @@
 #include "vsdlss.h"
 #include <stdatomic.h>
 
+/* Software prefetch for the randomly addressed renumbering passes.  A hint
+ * only: no result depends on it. */
+#if defined(__GNUC__) || defined(__clang__)
+#define VSDLSS_PREFETCH(p)  __builtin_prefetch((const void *)(p), 0, 3)
+#define VSDLSS_PREFETCHW(p) __builtin_prefetch((const void *)(p), 1, 3)
+#else
+#define VSDLSS_PREFETCH(p)  ((void)0)
+#define VSDLSS_PREFETCHW(p) ((void)0)
+#endif
+
 typedef struct vsdlss_components {
     csi n, count;
     csi *offset;
@@ -145,6 +155,10 @@ vsdlss_status vsdlss_components_build_graph(const vsdlss *, vsdlss_components **
                                             vsdlss_wgraph **);
 vsdlss_status vsdlss_components_build_normalized(const vsdlss *,
                                                  vsdlss_components **);
+/* Normalized input; no weighted graph.  *degree_ptr (n+1, caller frees):
+ * off-diagonal degree of v is (*degree_ptr)[v+1]-(*degree_ptr)[v]. */
+vsdlss_status vsdlss_components_build_degrees(const vsdlss *, vsdlss_components **,
+                                              csi **degree_ptr);
 vsdlss_status vsdlss_component_extract(const vsdlss *, const vsdlss_components *,
                                        csi, vsdlss **);
 vsdlss_status vsdlss_component_extract_normalized(const vsdlss *,
@@ -168,6 +182,14 @@ vsdlss_status vsdlss_reduce_prepare_csc(const vsdlss *A, vsdlss_reduce_input **)
 vsdlss_status vsdlss_reduce_prepare_graph(const csi *ptr, const csi *idx, const double *val,
                                           const double *diag, const csi *map, csi n,
                                           const csi *newidx, vsdlss_reduce_input **);
+/* Reduction inputs of all components in one pass over a normalized upper
+ * CSC: vertex g goes to component comp_of[g] at index newidx[g]; degree_ptr
+ * as from vsdlss_components_build_degrees; size[c] vertices in component c.
+ * The inputs equal those of vsdlss_reduce_prepare_graph. */
+vsdlss_status vsdlss_reduce_prepare_scatter(const vsdlss *A, const csi *comp_of,
+                                            const csi *newidx, const csi *degree_ptr,
+                                            csi count, const csi *size,
+                                            vsdlss_reduce_input **inputs);
 vsdlss_status vsdlss_reduce_run(vsdlss_reduce_input *, vsdlss_reduction **);
 void vsdlss_reduce_input_free(vsdlss_reduce_input *);
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *, const double *,

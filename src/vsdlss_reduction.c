@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 typedef struct { csi vertex; double value; } numeric_edge;
 
@@ -745,7 +746,12 @@ vsdlss_status vsdlss_reduce_prepare_graph(const csi *ptr, const csi *idx, const 
     *out=NULL;
     if(!ptr||!idx||!val||!diag||!map||!newidx) return VSDLSS_ERR_INVALID;
     status=input_alloc(n,&in); if(status!=VSDLSS_OK) return status;
+    /* map[] visits the graph in BFS order, i.e. at random: without prefetch
+     * each vertex is a chain of dependent misses (ptr -> row -> newidx).
+     * PD vertices ahead was flat between 8 and 64 on the test machine. */
+    enum { PD=16 };
     for(csi k=0;k<n;k++) {
+        if(k+PD<n) VSDLSS_PREFETCH(ptr+map[k+PD]);
         csi d=ptr[map[k]+1]-ptr[map[k]];
         if(d<0||d>=MAX_LIST-1) { vsdlss_reduce_input_free(in); return VSDLSS_ERR_INVALID; }
         in->adj[k].capacity=(int32_t)d;
@@ -760,6 +766,12 @@ vsdlss_status vsdlss_reduce_prepare_graph(const csi *ptr, const csi *idx, const 
     for(csi k=0;k<n;k++) {
         csi g=map[k], c=0, j;
         numeric_edge *e=in->base.edge+SLOT_OFF(in->adj[k].slot);
+        /* Stages: ptr/diag of k+2PD, row of k+PD, new indices of the
+         * neighbours of k+PD/2 (only addresses this loop reads anyway). */
+        if(k+2*PD<n) { csi g2=map[k+2*PD]; VSDLSS_PREFETCH(ptr+g2); VSDLSS_PREFETCH(diag+g2); }
+        if(k+PD<n) { csi g1=map[k+PD], p1=ptr[g1]; VSDLSS_PREFETCH(idx+p1); VSDLSS_PREFETCH(val+p1); }
+        if(k+PD/2<n) { csi g1=map[k+PD/2];
+            for(csi p=ptr[g1];p<ptr[g1+1];p++) VSDLSS_PREFETCH(newidx+idx[p]); }
         in->diag[k]=diag[g];
         if(!isfinite(diag[g])) bad|=2;
         for(csi p=ptr[g];p<ptr[g+1];p++) {
@@ -774,6 +786,117 @@ vsdlss_status vsdlss_reduce_prepare_graph(const csi *ptr, const csi *idx, const 
     }
     if(bad) { vsdlss_reduce_input_free(in); return (bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE; }
     *out=in; return VSDLSS_OK;
+}
+
+/* Builds every component's reduction input from a normalized upper CSC
+ * without a weighted graph.  Vertices get a global internal position
+ * P = offset[comp] + newidx.  Pass 1 streams A once and appends each
+ * off-diagonal entry, for both of its ends, to the staging bucket of the
+ * target position (buckets of 2^PS_SHIFT positions, so appends are a few
+ * hundred sequential streams instead of random writes).  Pass 2 places one
+ * bucket at a time: its targets' lists are one contiguous, cache-sized part
+ * of the arena.  Lists hold distinct keys and are sorted, so the inputs
+ * equal those of vsdlss_reduce_prepare_graph whatever the arrival order. */
+#define PS_SHIFT 13
+typedef struct { uint32_t target, vertex; double value; } staged_edge;
+
+vsdlss_status vsdlss_reduce_prepare_scatter(const vsdlss *A, const csi *comp_of,
+                                            const csi *newidx, const csi *degree_ptr,
+                                            csi count, const csi *size,
+                                            vsdlss_reduce_input **inputs)
+{
+    vsdlss_status status=VSDLSS_OK; int bad=0;
+    csi *pos=NULL, *bstart=NULL, *bcur=NULL, *offset=NULL; staged_edge *stage=NULL;
+    numeric_list **list=NULL; double **dg=NULL; numeric_edge **arena=NULL;
+    if(!A||!comp_of||!newidx||!degree_ptr||!size||!inputs||count<1) return VSDLSS_ERR_INVALID;
+    const csi n=A->n, *Ap=A->p, *Ai=A->i; const double *Ax=A->x;
+    const csi nb=(n>>PS_SHIFT)+1;
+    for(csi c=0;c<count;c++) inputs[c]=NULL;
+    if((uint64_t)n>UINT32_MAX) return VSDLSS_ERR_UNSUPPORTED;
+    pos=(csi*)vsdlss_big_malloc((size_t)n*sizeof(csi));
+    list=(numeric_list**)malloc((size_t)count*sizeof(*list));
+    dg=(double**)malloc((size_t)count*sizeof(*dg));
+    arena=(numeric_edge**)malloc((size_t)count*sizeof(*arena));
+    offset=(csi*)malloc((size_t)(count+1)*sizeof(csi));
+    bstart=(csi*)calloc((size_t)nb+1,sizeof(csi));
+    bcur=(csi*)malloc((size_t)nb*sizeof(csi));
+    if(!pos||!list||!dg||!arena||!offset||!bstart||!bcur) { status=VSDLSS_ERR_OOM; goto fail; }
+    offset[0]=0;
+    for(csi c=0;c<count;c++) {
+        status=input_alloc(size[c],inputs+c); if(status!=VSDLSS_OK) goto fail;
+        offset[c+1]=offset[c]+size[c];
+    }
+    if(offset[count]!=n) { status=VSDLSS_ERR_INVALID; goto fail; }
+    for(csi g=0;g<n;g++) {
+        csi c=comp_of[g], k=newidx[g], d=degree_ptr[g+1]-degree_ptr[g];
+        if(c<0||c>=count||k<0||k>=size[c]||d<0||d>=MAX_LIST-1) { status=VSDLSS_ERR_INVALID; goto fail; }
+        inputs[c]->adj[k].capacity=(int32_t)d;
+        pos[g]=offset[c]+k;
+        bstart[((offset[c]+k)>>PS_SHIFT)+1]+=d;
+    }
+    for(csi c=0;c<count;c++) {
+        status=input_place(inputs[c]); if(status!=VSDLSS_OK) goto fail;
+        list[c]=inputs[c]->adj; dg[c]=inputs[c]->diag; arena[c]=inputs[c]->base.edge;
+    }
+    for(csi b=0;b<nb;b++) bstart[b+1]+=bstart[b];
+    if(!checked_count(bstart[nb]>0?bstart[nb]:1,sizeof(staged_edge))) { status=VSDLSS_ERR_OOM; goto fail; }
+    stage=(staged_edge*)vsdlss_big_malloc((size_t)(bstart[nb]>0?bstart[nb]:1)*sizeof(staged_edge));
+    if(!stage) { status=VSDLSS_ERR_OOM; goto fail; }
+    memcpy(bcur,bstart,(size_t)nb*sizeof(csi));
+    /* Pass 1: A in column order; pos[col] is sequential, pos[row] random. */
+    for(csi col=0;col<n;col++) {
+        const csi pc=pos[col], c=comp_of[col], kc=pc-offset[c];
+        for(csi q=Ap[col];q<Ap[col+1];q++) {
+            const csi row=Ai[q];
+            if(row==col) { dg[c][kc]+=Ax[q]; continue; }
+            const csi pr=pos[row];
+            if(pr<offset[c]||pr>=offset[c+1]) { bad|=1; continue; }
+            csi bc=pc>>PS_SHIFT, br=pr>>PS_SHIFT;
+            if(bcur[bc]>=bstart[bc+1]||bcur[br]>=bstart[br+1]) { bad|=1; continue; }
+            stage[bcur[bc]++]=(staged_edge){(uint32_t)pc,(uint32_t)(pr-offset[c]),Ax[q]};
+            stage[bcur[br]++]=(staged_edge){(uint32_t)pr,(uint32_t)kc,Ax[q]};
+        }
+    }
+    if(bad) { status=VSDLSS_ERR_INVALID; goto fail; }
+    /* Pass 2: bucket by bucket (independent: parallel, deterministic). */
+    {
+        int nt=vsdlss_parallel_width((double)bstart[nb]*8);
+        (void)nt;
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,4) reduction(|:bad))
+        for(csi b=0;b<nb;b++) {
+            if(bcur[b]!=bstart[b+1]) { bad|=1; continue; }
+            csi lo=b<<PS_SHIFT, hi=lo+((csi)1<<PS_SHIFT); if(hi>n) hi=n;
+            if(lo>=n) continue;
+            csi c=0; { csi l=0,h=count-1; while(l<h){csi m=(l+h+1)/2; if(offset[m]<=lo) l=m; else h=m-1;} c=l; }
+            for(csi q=bstart[b];q<bstart[b+1];q++) {
+                const staged_edge *s=stage+q; csi t=(csi)s->target;
+                csi cc=c; while(t>=offset[cc+1]) cc++;
+                numeric_list *L=list[cc]+(t-offset[cc]);
+                if(L->count>=L->capacity) { bad|=1; continue; }
+                arena[cc][SLOT_OFF(L->slot)+L->count++]=(numeric_edge){(csi)s->vertex,s->value};
+            }
+            for(csi t=lo;t<hi;t++) {
+                while(t>=offset[c+1]) c++;
+                const csi k=t-offset[c]; numeric_list *L=list[c]+k;
+                numeric_edge *e=arena[c]+SLOT_OFF(L->slot); const csi cnt=L->count;
+                if(!isfinite(dg[c][k])) bad|=2;
+                if(cnt!=L->capacity) bad|=1;
+                for(csi i=1;i<cnt;i++) {
+                    numeric_edge x=e[i]; csi j=i;
+                    while(j>0&&e[j-1].vertex>x.vertex) { e[j]=e[j-1]; j--; }
+                    e[j]=x;
+                }
+                for(csi j=0;j<cnt;j++) if(e[j].vertex==k||(j&&e[j].vertex==e[j-1].vertex)) bad|=1;
+            }
+        }
+    }
+    if(bad) { status=(bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE; goto fail; }
+    free(stage); free(pos); free(list); free(dg); free(arena); free(offset); free(bstart); free(bcur);
+    return VSDLSS_OK;
+fail:
+    free(stage); free(pos); free(list); free(dg); free(arena); free(offset); free(bstart); free(bcur);
+    for(csi c=0;c<count;c++) { vsdlss_reduce_input_free(inputs[c]); inputs[c]=NULL; }
+    return status;
 }
 
 static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction **out, int pack,
