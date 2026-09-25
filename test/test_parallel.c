@@ -323,11 +323,54 @@ static int internal_order_solve(void)
     return 0;
 }
 
+/* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
+ * takes it: several buckets, many small components, blocks straddling
+ * components) against the direct loops: the same bits for every thread
+ * count and both inverse-map widths, cached plans, aliasing; a non-finite
+ * RHS fails and leaves the output untouched. */
+static int two_pass_permutation(void)
+{
+    vsdlss *A=two_nets(); CHECK(A);
+    const csi n=A->n, saved_min=vsdlss_perm2_min;
+    double *b=malloc(n*8),*bb=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8);
+    CHECK(b&&bb&&ref&&x);
+    for(csi i=0;i<n;i++) b[i]=cos(0.021*(double)i)+0.3;
+    vsdlss_m3_factor *f=NULL;
+    vsdlss_perm2_min=(csi)1<<62;                    /* direct loops: reference */
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+    CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
+    vsdlss_m3_factor_free(f);
+    vsdlss_perm2_min=1;
+    int maxt=vsdlss_parallel_enabled()?4:1;
+    for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+        vsdlss_m3_inverse_force64=wide;
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        for(int rep=0;rep<2;rep++){                 /* second call: cached plan */
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
+        CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        memcpy(bb,b,(size_t)n*8); bb[n/3]=NAN;
+        for(csi i=0;i<n;i++) x[i]=55;
+        CHECK(vsdlss_m3_solve(f,bb,x)==VSDLSS_ERR_NONFINITE);
+        for(csi i=0;i<n;i++) CHECK(x[i]==55);
+        vsdlss_m3_factor_free(f);
+    }
+    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(panel_tile_boundaries()==0);
     CHECK(kernels()==0);
     CHECK(internal_order_solve()==0);
+    CHECK(two_pass_permutation()==0);
     if(vsdlss_parallel_enabled()){
         CHECK(components_and_rhs()==0);CHECK(components_threads_equal()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);
     }

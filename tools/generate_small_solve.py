@@ -9,8 +9,14 @@ for w in range(1,7):
  out += [' int bad=0; for(csi r=0;r<ext;r++) { v=x[idx[r]];']
  for j in range(w):out += [f' v-=a[{j}*rows+{w}+r]*x[b+{j}];']
  out += [' x[idx[r]]=v; if(!isfinite(v))bad=1; }',' if(bad)return VSDLSS_ERR_NONFINITE;',' } else {',' int bad=0;']
- for j in range(w):
-  out += [f' v=x[b+{j}]; for(csi r=0;r<ext;r++)v-=a[{j}*rows+{w}+r]*x[idx[r]];',f' x[b+{j}]=v; if(!isfinite(v))bad=1;']
+ # One pass over the external rows: x[idx[r]] is read once and the w
+ # column sums advance as independent chains, each in ascending r (the
+ # same operations as one loop per column).
+ out += [' ' + ' '.join(f'double v{j}=x[b+{j}];' for j in range(w)),
+         ' for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];']
+ for j in range(w):out += [f' v{j}-=a[{j}*rows+{w}+r]*xr;']
+ out += [' }']
+ for j in range(w):out += [f' x[b+{j}]=v{j}; if(!isfinite(v{j}))bad=1;']
  out += [' if(bad)return VSDLSS_ERR_NONFINITE;']
  for j in reversed(range(w)):
   out += [f' d=a[{j}*rows+{j}]; v=x[b+{j}]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;']

@@ -119,6 +119,13 @@ struct vsdlss_m3_factor {
     uint32_t *inv32;
     uint64_t *inv64;
     int inv_shift;
+    /* Blocked two-pass gather / write-back of original-order solves
+     * (vsdlss_m3.c): plans built on first use per thread count, and a
+     * scratch vector of n doubles taken with an atomic flag. */
+#define VSDLSS_PERM_PLAN_SLOTS 65
+    _Atomic(struct vsdlss_perm_plan *) pplan[VSDLSS_PERM_PLAN_SLOTS];
+    double *pbuf;
+    atomic_int pbuf_busy;
 };
 
 /* Symmetric weighted adjacency (no diagonal in idx/val; diag separate). */
@@ -173,6 +180,8 @@ void vsdlss_reduction_free(vsdlss_reduction *);
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
+extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
+extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's
  * reduction replay is bandwidth bound).  Keeps records, returning OK, when
@@ -198,6 +207,10 @@ vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
  * matrix before permutation).  Fill is unchanged; supernodes get larger. */
 vsdlss_status vsdlss_postorder_permutation(const vsdlss *A, csi *q, csi *pinv);
 void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *);
+/* Column order inside each supernode of s that makes descendants' row sets
+ * contiguous (vsdlss_sn_reorder.c): *perm (new -> old, n entries) keeps
+ * every column within its supernode. */
+vsdlss_status vsdlss_sn_reorder_within(const vsdlss_sn_symbolic *s, csi **perm);
 vsdlss_status vsdlss_sn_factorize(const vsdlss *, const vsdlss_sn_symbolic *,
                                   vsdlss_sn_factor **);
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *);

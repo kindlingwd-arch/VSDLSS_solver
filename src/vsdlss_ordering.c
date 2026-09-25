@@ -43,6 +43,13 @@ static vsdlss_status metis_order(const vsdlss *A, csi **q)
         if ((e = getenv("VSDLSS_METIS_NITER")) && atoi(e) > 0) options[METIS_OPTION_NITER] = atoi(e);
         if ((e = getenv("VSDLSS_METIS_CTYPE")) && *e) options[METIS_OPTION_CTYPE] = atoi(e);
         if ((e = getenv("VSDLSS_METIS_RTYPE")) && *e) options[METIS_OPTION_RTYPE] = atoi(e);
+        /* separators tried per bisection (best kept), balance tolerance
+         * (x1000), connected-component and compression handling */
+        if ((e = getenv("VSDLSS_METIS_NSEPS")) && atoi(e) > 0) options[METIS_OPTION_NSEPS] = atoi(e);
+        if ((e = getenv("VSDLSS_METIS_UFACTOR")) && atoi(e) > 0) options[METIS_OPTION_UFACTOR] = atoi(e);
+        if ((e = getenv("VSDLSS_METIS_CCORDER")) && *e) options[METIS_OPTION_CCORDER] = atoi(e);
+        if ((e = getenv("VSDLSS_METIS_COMPRESS")) && *e) options[METIS_OPTION_COMPRESS] = atoi(e);
+        if ((e = getenv("VSDLSS_METIS_NO2HOP")) && *e) options[METIS_OPTION_NO2HOP] = atoi(e);
     }
     int rc;
 #ifdef VSDLSS_METIS_THREADSAFE
@@ -61,6 +68,61 @@ static vsdlss_status metis_order(const vsdlss *A, csi **q)
     if (rc != METIS_OK) { free(perm); return rc == METIS_ERROR_MEMORY ? VSDLSS_ERR_OOM : VSDLSS_ERR_INVALID; }
     /* METIS: row k of the permuted matrix is row perm[k], i.e. q[new] = old. */
     *q = (csi *)perm;
+    return VSDLSS_OK;
+}
+#endif
+
+#ifdef VSDLSS_KAHIP
+/* Optional KaHIP nested dissection with data reduction (order 7; build with
+ * -DVSDLSS_KAHIP and KaHIP's library, 32-bit kahip_idx).  Ost, Schulz,
+ * Strash, "Engineering Data Reduction for Nested Dissection", ALENEX 2021.
+ * VSDLSS_KAHIP_MODE: 0 fast, 1 eco (default), 2 strong. */
+#include <stdbool.h>
+#include <stdint.h>
+#include "vsdlss_parallel.h"
+void reduced_nd(int *n, int32_t *xadj, int32_t *adjncy, bool suppress_output,
+                int seed, int mode, int *ordering);
+static vsdlss_status kahip_order(const vsdlss *A, csi **q)
+{
+    const csi n = A->n;
+    csi m = 0;
+    for (csi j = 0; j < n; ++j)
+        for (csi p = A->p[j]; p < A->p[j + 1]; ++p) if (A->i[p] != j) m += 2;
+    if (n >= INT32_MAX || m >= INT32_MAX) return VSDLSS_ERR_UNSUPPORTED;
+    int32_t *xadj = (int32_t *)calloc((size_t)n + 1, sizeof(int32_t));
+    int32_t *adj = (int32_t *)malloc((size_t)(m ? m : 1) * sizeof(int32_t));
+    int *ord = (int *)malloc((size_t)n * sizeof(int));
+    csi *out = (csi *)malloc((size_t)n * sizeof(csi));
+    if (!xadj || !adj || !ord || !out) { free(xadj); free(adj); free(ord); free(out); return VSDLSS_ERR_OOM; }
+    for (csi j = 0; j < n; ++j)
+        for (csi p = A->p[j]; p < A->p[j + 1]; ++p)
+            if (A->i[p] != j) { xadj[A->i[p] + 1]++; xadj[j + 1]++; }
+    for (csi j = 0; j < n; ++j) xadj[j + 1] += xadj[j];
+    {
+        int32_t *fill = (int32_t *)malloc((size_t)n * sizeof(int32_t));
+        if (!fill) { free(xadj); free(adj); free(ord); free(out); return VSDLSS_ERR_OOM; }
+        memcpy(fill, xadj, (size_t)n * sizeof(int32_t));
+        for (csi j = 0; j < n; ++j)
+            for (csi p = A->p[j]; p < A->p[j + 1]; ++p) {
+                csi i = A->i[p];
+                if (i != j) { adj[fill[i]++] = (int32_t)j; adj[fill[j]++] = (int32_t)i; }
+            }
+        free(fill);
+    }
+    const char *e = getenv("VSDLSS_KAHIP_MODE");
+    int nn = (int)n, mode = e && *e ? atoi(e) : 1;
+    /* KaHIP keeps its random state and output redirection in globals. */
+    VSDLSS_OMP(omp critical(vsdlss_kahip))
+    reduced_nd(&nn, xadj, adj, true, 1, mode, ord);
+    free(xadj); free(adj);
+    /* ord[v] is the position of vertex v: q[position] = v. */
+    for (csi k = 0; k < n; ++k) out[k] = -1;
+    for (csi v = 0; v < n; ++v) {
+        if (ord[v] < 0 || ord[v] >= n || out[ord[v]] != -1) { free(ord); free(out); return VSDLSS_ERR_INVALID; }
+        out[ord[v]] = v;
+    }
+    free(ord);
+    *q = out;
     return VSDLSS_OK;
 }
 #endif
@@ -234,6 +296,12 @@ vsdlss_status vsdlss_order_analyze(const vsdlss *A, int order,
 #ifdef VSDLSS_METIS
     else if (order == 6) {
         status = metis_order(A, &local_q);
+        if (status != VSDLSS_OK) return status;
+    }
+#endif
+#ifdef VSDLSS_KAHIP
+    else if (order == 7) {
+        status = kahip_order(A, &local_q);
         if (status != VSDLSS_OK) return status;
     }
 #endif

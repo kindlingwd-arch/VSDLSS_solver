@@ -10,8 +10,11 @@ static vsdlss_status solve_1(const double *a,csi b,csi ext,const csi *idx,double
  if(bad)return VSDLSS_ERR_NONFINITE;
  } else {
  int bad=0;
- v=x[b+0]; for(csi r=0;r<ext;r++)v-=a[0*rows+1+r]*x[idx[r]];
- x[b+0]=v; if(!isfinite(v))bad=1;
+ double v0=x[b+0];
+ for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];
+ v0-=a[0*rows+1+r]*xr;
+ }
+ x[b+0]=v0; if(!isfinite(v0))bad=1;
  if(bad)return VSDLSS_ERR_NONFINITE;
  d=a[0*rows+0]; v=x[b+0]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
  x[b+0]=v/d; if(!isfinite(x[b+0]))return VSDLSS_ERR_NONFINITE;
@@ -32,10 +35,13 @@ static vsdlss_status solve_2(const double *a,csi b,csi ext,const csi *idx,double
  if(bad)return VSDLSS_ERR_NONFINITE;
  } else {
  int bad=0;
- v=x[b+0]; for(csi r=0;r<ext;r++)v-=a[0*rows+2+r]*x[idx[r]];
- x[b+0]=v; if(!isfinite(v))bad=1;
- v=x[b+1]; for(csi r=0;r<ext;r++)v-=a[1*rows+2+r]*x[idx[r]];
- x[b+1]=v; if(!isfinite(v))bad=1;
+ double v0=x[b+0]; double v1=x[b+1];
+ for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];
+ v0-=a[0*rows+2+r]*xr;
+ v1-=a[1*rows+2+r]*xr;
+ }
+ x[b+0]=v0; if(!isfinite(v0))bad=1;
+ x[b+1]=v1; if(!isfinite(v1))bad=1;
  if(bad)return VSDLSS_ERR_NONFINITE;
  d=a[1*rows+1]; v=x[b+1]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
  x[b+1]=v/d; if(!isfinite(x[b+1]))return VSDLSS_ERR_NONFINITE;
@@ -64,12 +70,15 @@ static vsdlss_status solve_3(const double *a,csi b,csi ext,const csi *idx,double
  if(bad)return VSDLSS_ERR_NONFINITE;
  } else {
  int bad=0;
- v=x[b+0]; for(csi r=0;r<ext;r++)v-=a[0*rows+3+r]*x[idx[r]];
- x[b+0]=v; if(!isfinite(v))bad=1;
- v=x[b+1]; for(csi r=0;r<ext;r++)v-=a[1*rows+3+r]*x[idx[r]];
- x[b+1]=v; if(!isfinite(v))bad=1;
- v=x[b+2]; for(csi r=0;r<ext;r++)v-=a[2*rows+3+r]*x[idx[r]];
- x[b+2]=v; if(!isfinite(v))bad=1;
+ double v0=x[b+0]; double v1=x[b+1]; double v2=x[b+2];
+ for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];
+ v0-=a[0*rows+3+r]*xr;
+ v1-=a[1*rows+3+r]*xr;
+ v2-=a[2*rows+3+r]*xr;
+ }
+ x[b+0]=v0; if(!isfinite(v0))bad=1;
+ x[b+1]=v1; if(!isfinite(v1))bad=1;
+ x[b+2]=v2; if(!isfinite(v2))bad=1;
  if(bad)return VSDLSS_ERR_NONFINITE;
  d=a[2*rows+2]; v=x[b+2]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
  x[b+2]=v/d; if(!isfinite(x[b+2]))return VSDLSS_ERR_NONFINITE;
@@ -108,14 +117,17 @@ static vsdlss_status solve_4(const double *a,csi b,csi ext,const csi *idx,double
  if(bad)return VSDLSS_ERR_NONFINITE;
  } else {
  int bad=0;
- v=x[b+0]; for(csi r=0;r<ext;r++)v-=a[0*rows+4+r]*x[idx[r]];
- x[b+0]=v; if(!isfinite(v))bad=1;
- v=x[b+1]; for(csi r=0;r<ext;r++)v-=a[1*rows+4+r]*x[idx[r]];
- x[b+1]=v; if(!isfinite(v))bad=1;
- v=x[b+2]; for(csi r=0;r<ext;r++)v-=a[2*rows+4+r]*x[idx[r]];
- x[b+2]=v; if(!isfinite(v))bad=1;
- v=x[b+3]; for(csi r=0;r<ext;r++)v-=a[3*rows+4+r]*x[idx[r]];
- x[b+3]=v; if(!isfinite(v))bad=1;
+ double v0=x[b+0]; double v1=x[b+1]; double v2=x[b+2]; double v3=x[b+3];
+ for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];
+ v0-=a[0*rows+4+r]*xr;
+ v1-=a[1*rows+4+r]*xr;
+ v2-=a[2*rows+4+r]*xr;
+ v3-=a[3*rows+4+r]*xr;
+ }
+ x[b+0]=v0; if(!isfinite(v0))bad=1;
+ x[b+1]=v1; if(!isfinite(v1))bad=1;
+ x[b+2]=v2; if(!isfinite(v2))bad=1;
+ x[b+3]=v3; if(!isfinite(v3))bad=1;
  if(bad)return VSDLSS_ERR_NONFINITE;
  d=a[3*rows+3]; v=x[b+3]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
  x[b+3]=v/d; if(!isfinite(x[b+3]))return VSDLSS_ERR_NONFINITE;
@@ -166,16 +178,19 @@ static vsdlss_status solve_5(const double *a,csi b,csi ext,const csi *idx,double
  if(bad)return VSDLSS_ERR_NONFINITE;
  } else {
  int bad=0;
- v=x[b+0]; for(csi r=0;r<ext;r++)v-=a[0*rows+5+r]*x[idx[r]];
- x[b+0]=v; if(!isfinite(v))bad=1;
- v=x[b+1]; for(csi r=0;r<ext;r++)v-=a[1*rows+5+r]*x[idx[r]];
- x[b+1]=v; if(!isfinite(v))bad=1;
- v=x[b+2]; for(csi r=0;r<ext;r++)v-=a[2*rows+5+r]*x[idx[r]];
- x[b+2]=v; if(!isfinite(v))bad=1;
- v=x[b+3]; for(csi r=0;r<ext;r++)v-=a[3*rows+5+r]*x[idx[r]];
- x[b+3]=v; if(!isfinite(v))bad=1;
- v=x[b+4]; for(csi r=0;r<ext;r++)v-=a[4*rows+5+r]*x[idx[r]];
- x[b+4]=v; if(!isfinite(v))bad=1;
+ double v0=x[b+0]; double v1=x[b+1]; double v2=x[b+2]; double v3=x[b+3]; double v4=x[b+4];
+ for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];
+ v0-=a[0*rows+5+r]*xr;
+ v1-=a[1*rows+5+r]*xr;
+ v2-=a[2*rows+5+r]*xr;
+ v3-=a[3*rows+5+r]*xr;
+ v4-=a[4*rows+5+r]*xr;
+ }
+ x[b+0]=v0; if(!isfinite(v0))bad=1;
+ x[b+1]=v1; if(!isfinite(v1))bad=1;
+ x[b+2]=v2; if(!isfinite(v2))bad=1;
+ x[b+3]=v3; if(!isfinite(v3))bad=1;
+ x[b+4]=v4; if(!isfinite(v4))bad=1;
  if(bad)return VSDLSS_ERR_NONFINITE;
  d=a[4*rows+4]; v=x[b+4]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
  x[b+4]=v/d; if(!isfinite(x[b+4]))return VSDLSS_ERR_NONFINITE;
@@ -240,18 +255,21 @@ static vsdlss_status solve_6(const double *a,csi b,csi ext,const csi *idx,double
  if(bad)return VSDLSS_ERR_NONFINITE;
  } else {
  int bad=0;
- v=x[b+0]; for(csi r=0;r<ext;r++)v-=a[0*rows+6+r]*x[idx[r]];
- x[b+0]=v; if(!isfinite(v))bad=1;
- v=x[b+1]; for(csi r=0;r<ext;r++)v-=a[1*rows+6+r]*x[idx[r]];
- x[b+1]=v; if(!isfinite(v))bad=1;
- v=x[b+2]; for(csi r=0;r<ext;r++)v-=a[2*rows+6+r]*x[idx[r]];
- x[b+2]=v; if(!isfinite(v))bad=1;
- v=x[b+3]; for(csi r=0;r<ext;r++)v-=a[3*rows+6+r]*x[idx[r]];
- x[b+3]=v; if(!isfinite(v))bad=1;
- v=x[b+4]; for(csi r=0;r<ext;r++)v-=a[4*rows+6+r]*x[idx[r]];
- x[b+4]=v; if(!isfinite(v))bad=1;
- v=x[b+5]; for(csi r=0;r<ext;r++)v-=a[5*rows+6+r]*x[idx[r]];
- x[b+5]=v; if(!isfinite(v))bad=1;
+ double v0=x[b+0]; double v1=x[b+1]; double v2=x[b+2]; double v3=x[b+3]; double v4=x[b+4]; double v5=x[b+5];
+ for(csi r=0;r<ext;r++) { const double xr=x[idx[r]];
+ v0-=a[0*rows+6+r]*xr;
+ v1-=a[1*rows+6+r]*xr;
+ v2-=a[2*rows+6+r]*xr;
+ v3-=a[3*rows+6+r]*xr;
+ v4-=a[4*rows+6+r]*xr;
+ v5-=a[5*rows+6+r]*xr;
+ }
+ x[b+0]=v0; if(!isfinite(v0))bad=1;
+ x[b+1]=v1; if(!isfinite(v1))bad=1;
+ x[b+2]=v2; if(!isfinite(v2))bad=1;
+ x[b+3]=v3; if(!isfinite(v3))bad=1;
+ x[b+4]=v4; if(!isfinite(v4))bad=1;
+ x[b+5]=v5; if(!isfinite(v5))bad=1;
  if(bad)return VSDLSS_ERR_NONFINITE;
  d=a[5*rows+5]; v=x[b+5]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
  x[b+5]=v/d; if(!isfinite(x[b+5]))return VSDLSS_ERR_NONFINITE;

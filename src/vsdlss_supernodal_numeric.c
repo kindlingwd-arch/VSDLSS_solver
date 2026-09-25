@@ -2,6 +2,7 @@
 #include "vsdlss_m3_internal.h"
 #include "vsdlss_dense.h"
 #include "vsdlss_parallel.h"
+#include "vsdlss_simd.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -606,12 +607,14 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
     csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
     csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
     const double *a = f->panel + f->panel_offset[d];
+    const int simd = vsdlss_simd_enabled();
     for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
         csi sn = f->blk_src[b], bs = f->column_start[sn], ws = f->column_start[sn + 1] - bs;
         csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
         const double *as = f->panel + f->panel_offset[sn] + ws;
         const csi *R = f->row_index + f->row_ptr[sn];
         const csi r0 = f->blk_first[b], r1 = f->blk_end[b];
+        if (simd) { vsdlss_simd_block_update(as, rs, ws, x + bs, R, r0, r1, x); continue; }
         for (csi j = 0; j < ws; ++j) {
             const double xj = x[bs + j], *col = as + j * rs;
             for (csi r = r0; r < r1; ++r) x[R[r]] -= col[r] * xj;
@@ -621,7 +624,8 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
         double dj = a[j * rd + j];
         if (!isfinite(dj) || dj <= 0) return 1;
         x[bd + j] /= dj;
-        for (csi r = j + 1; r < wd; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
+        if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, a + j * rd + j + 1, x[bd + j], wd - j - 1);
+        else for (csi r = j + 1; r < wd; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
     }
     return 0;
 }
@@ -654,22 +658,33 @@ static csi lower_bound_csi(const csi *R, csi lo, csi hi, csi key)
  * block itself serially, the rows below it split among the threads.  Each
  * entry therefore receives exactly the subtractions and division of
  * forward_pull, in the same order: the result is bitwise the same. */
-#define FWD_TOP_BLK 64
-#define FWD_TOP_PAR_WORK 65536.0   /* below this a team costs more than it saves */
-static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
+/* Tuning (defaults measured on the power-grid cases; any value gives the
+ * same bits): VSDLSS_FWD_TOP_BLK columns per serial triangle block of a
+ * tree-top target, VSDLSS_FWD_TOP_WORK multiply-adds for a target to get a
+ * team. */
+static csi fwd_top_blk(void)
+{
+    static csi v = -1;
+    if (v < 0) { const char *e = getenv("VSDLSS_FWD_TOP_BLK"); v = e && atoll(e) > 0 ? (csi)atoll(e) : 64; }
+    return v;
+}
+static double fwd_top_work(void)
+{
+    static double v = -1;
+    if (v < 0) { const char *e = getenv("VSDLSS_FWD_TOP_WORK"); v = e && atof(e) > 0 ? atof(e) : 65536.0; }
+    return v;
+}
+#define FWD_TOP_BLK fwd_top_blk()
+#define FWD_TOP_PAR_WORK fwd_top_work()   /* below this a team costs more than it saves */
+/* Called by every thread (tid of T) of an existing team: it contains team
+ * barriers.  *bad is set by the thread solving a triangle block. */
+static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int tid, int T, int *bad)
 {
     const csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
     const csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
     const double *a = f->panel + f->panel_offset[d];
-    int bad = 0;
-    (void)nt;
-    VSDLSS_OMP(omp parallel num_threads(nt))
+    const int simd = vsdlss_simd_enabled();
     {
-#ifdef _OPENMP
-        const int tid = omp_get_thread_num(), T = omp_get_num_threads();
-#else
-        const int tid = 0, T = 1;
-#endif
         const csi lo = bd + wd * tid / T, hi = bd + wd * (tid + 1) / T;
         for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
             csi sn = f->blk_src[b], bs = f->column_start[sn], ws = f->column_start[sn + 1] - bs;
@@ -678,6 +693,7 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
             const csi *R = f->row_index + f->row_ptr[sn];
             const csi s = lower_bound_csi(R, f->blk_first[b], f->blk_end[b], lo);
             const csi e = lower_bound_csi(R, s, f->blk_end[b], hi);
+            if (simd) { if (s < e) vsdlss_simd_block_update(as, rs, ws, x + bs, R, s, e, x); continue; }
             for (csi j = 0; j < ws && s < e; ++j) {
                 const double xj = x[bs + j], *col = as + j * rs;
                 for (csi r = s; r < e; ++r) x[R[r]] -= col[r] * xj;
@@ -689,12 +705,14 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
             VSDLSS_OMP(omp single)
             for (csi j = jb; j < je; ++j) {
                 double dj = a[j * rd + j];
-                if (!isfinite(dj) || dj <= 0) bad = 1;
+                if (!isfinite(dj) || dj <= 0) *bad = 1;
                 x[bd + j] /= dj;
-                for (csi r = j + 1; r < je; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
+                if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, a + j * rd + j + 1, x[bd + j], je - j - 1);
+                else for (csi r = j + 1; r < je; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
             }
             const csi r0 = je + (wd - je) * tid / T, r1 = je + (wd - je) * (tid + 1) / T;
-            for (csi r = r0; r < r1; ++r) {
+            if (simd) vsdlss_simd_block_update_contig(a, rd, jb, je, x + bd, r0, r1, x + bd);
+            else for (csi r = r0; r < r1; ++r) {
                 double v = x[bd + r];
                 for (csi j = jb; j < je; ++j) v -= a[j * rd + r] * x[bd + j];
                 x[bd + r] = v;
@@ -702,8 +720,29 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
             VSDLSS_OMP(omp barrier)
         }
     }
+}
+
+static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
+{
+    int bad = 0;
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt))
+    {
+#ifdef _OPENMP
+        const int tid = omp_get_thread_num(), T = omp_get_num_threads();
+#else
+        const int tid = 0, T = 1;
+#endif
+        forward_pull_team(f, d, x, tid, T, &bad);
+    }
     return bad;
 }
+
+/* Forward tree top on one team for the whole top (default; 0 selects a team
+ * per large target, the former schedule).  Targets run in the same order
+ * either way: runs of small targets on one thread, each large target on
+ * the team, so the results are the same bits. */
+int vsdlss_fwd_top_team = 1;
 
 static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
 {
@@ -756,6 +795,39 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
 #ifdef _OPENMP
     if (prof) tp[1] = omp_get_wtime();
 #endif
+    csi *bigk = NULL, nbig = 0;
+    if (!bad && nt_top > 1 && vsdlss_fwd_top_team && (bigk = (csi *)malloc((size_t)count * sizeof(csi)))) {
+        /* Positions of the large (team) targets in the top; one team runs
+         * the whole top: each run of small targets on one thread (the
+         * single's barrier orders it before the next large target), each
+         * large target on the team.  Order as below: same bits. */
+        for (csi k = 0; k < count; ++k) {
+            const csi d = t->order[k];
+            if (!in_sub[d] && forward_pull_work(f, d) >= FWD_TOP_PAR_WORK) bigk[nbig++] = k;
+        }
+        int badt = 0;
+        VSDLSS_OMP(omp parallel num_threads(nt_top))
+        {
+#ifdef _OPENMP
+            const int tid = omp_get_thread_num(), T = omp_get_num_threads();
+#else
+            const int tid = 0, T = 1;
+#endif
+            csi k = 0;
+            for (csi i = 0; i <= nbig; ++i) {
+                const csi kend = i < nbig ? bigk[i] : count;
+                VSDLSS_OMP(omp single)
+                for (csi kk = k; kk < kend; ++kk) {
+                    const csi d = t->order[kk];
+                    if (!in_sub[d]) badt |= forward_pull(f, d, x);
+                }
+                if (i < nbig) forward_pull_team(f, t->order[kend], x, tid, T, &badt);
+                k = kend + 1;
+            }
+        }
+        bad |= badt;
+        free(bigk);
+    } else
     for (csi k = 0; k < count && !bad; ++k) {
         const csi d = t->order[k];
         if (in_sub[d]) continue;

@@ -42,9 +42,9 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
            src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
-           src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m4.c \
+           src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c \
-           src/vsdlss_dense.c
+           src/vsdlss_dense.c src/vsdlss_simd.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
 .PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel bench-parallel bench-m3 bench-sn sanitizers clean
@@ -107,7 +107,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod bench_pardiso test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -258,3 +258,12 @@ bench_cholmod: test/bench_cholmod.c
 PARDISO_LIBS ?= -lmkl_rt -Wl,--no-as-needed -lgomp -lm -ldl -lpthread
 bench_pardiso: test/bench_pardiso.c
 	$(CC) -O2 -std=c11 -fopenmp -o $@ test/bench_pardiso.c $(PARDISO_LIBS)
+
+test_simd: test/test_simd.c src/vsdlss_simd.c src/vsdlss_simd.h include/vsdlss.h
+	$(CC) $(CFLAGS) -o $@ test/test_simd.c src/vsdlss_simd.c
+
+.PHONY: test-simd
+test-simd: test_simd
+	./test_simd
+
+test: test-simd
