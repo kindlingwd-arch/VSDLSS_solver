@@ -89,7 +89,7 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     free(factor->component);
     vsdlss_components_free(factor->components);
     free(factor->inv32); free(factor->inv64);
-    for(k=0;k<VSDLSS_PERM_PLAN_SLOTS;k++) perm_plan_free(atomic_load(&factor->pplan[k]));
+    perm_plan_free(atomic_load(&factor->pplan));
     free(factor->pbuf); free(factor->pscr_block);
     free(factor);
 }
@@ -405,12 +405,24 @@ fail:
  * Every component's buffers are taken first (the factor's cached workspace,
  * or private buffers when a concurrent solve holds it), so nothing can fail
  * for lack of memory once work starts.  Phase 1 computes each component's
- * solution in its local buffer: gather (checking the RHS is finite), forward
- * elimination of the low-degree vertices, core solve, recovery.  Only when
+ * solution in its local buffer: phase 1a gathers (checking the RHS is
+ * finite), eliminates the low-degree vertices forward and solves the core
+ * for every component, then phase 1b recovers the eliminated vertices.  Only when
  * every component succeeded does phase 2 scatter the local solutions into
  * the caller's array, so a failed solve leaves it untouched, and rhs may be
  * the same array as solution (every component has read its RHS by then). */
 typedef struct { double *local, *saved, *core, *core_x; int own; } solve_ws;
+
+/* Solve-time state of the fused passes (see solve_common). */
+typedef struct {
+    const struct vsdlss_perm_plan *pl; double *buf, *scr;
+    int P; atomic_int *busy;       /* scratch slots and their flags */
+    int streamed;
+} fused_ctx;
+/* Fused parts of the two-pass gather / write-back (defined with them). */
+static int fused_forward(const vsdlss_m3_factor *f, const fused_ctx *z, csi c, double *local);
+static int fused_backward(const vsdlss_m3_factor *f, const fused_ctx *z, csi c, double *local);
+static int fused_component(const fused_ctx *z, csi c);
 
 /* internal: rhs and out are in the factor's internal order (component c's
  * local vector at components->offset[c]), so gather and write-back are
@@ -420,6 +432,7 @@ typedef struct {
     const vsdlss_m3_factor *f; const double *rhs; double *out; solve_ws *ws;
     int internal; double **loc;
     int pregathered;            /* local buffers already filled (two-pass gather) */
+    const fused_ctx *z;         /* fused passes, or NULL */
 } solve_ctx;
 
 static const csi *component_map(const vsdlss_m3_factor *f, csi c)
@@ -489,7 +502,8 @@ static vsdlss_status ws_acquire(const vsdlss_m3_factor *f, csi c, solve_ws *w)
     return VSDLSS_OK;
 }
 
-/* Phase 1 for one component (all buffers private). */
+/* Phase 1a for one component (all buffers private): gather, forward
+ * replay, core solve. */
 static vsdlss_status solve_local(void *vctx, csi c)
 {
     const solve_ctx *x=(const solve_ctx*)vctx;
@@ -512,8 +526,13 @@ static vsdlss_status solve_local(void *vctx, csi c)
     }
     if(bad) return VSDLSS_ERR_NONFINITE;
     TRACE("solve: gather",t0);
-    status=vsdlss_reduce_forward_inplace(r,local,w->saved);   /* NULL when packed */
-    if(status!=VSDLSS_OK) return status;
+    const int fused=fused_component(x->z,c);
+    if(fused) {               /* this component's gather pass 2 with the replay */
+        if(fused_forward(x->f,x->z,c,local)) return VSDLSS_ERR_NONFINITE;
+    } else {
+        status=vsdlss_reduce_forward_inplace(r,local,w->saved);   /* NULL when packed */
+        if(status!=VSDLSS_OK) return status;
+    }
     TRACE("solve: reduce forward",t0);
     if(core) {
         if(cf->disk) {
@@ -537,9 +556,24 @@ static vsdlss_status solve_local(void *vctx, csi c)
         }
     }
     TRACE("solve: core",t0);
-    /* The in-memory core write-back above checked every core value. */
-    status=core&&!cf->disk?vsdlss_reduce_backward_core_checked(r,w->saved,local)
-                          :vsdlss_reduce_backward_inplace(r,w->saved,local);
+    return VSDLSS_OK;
+}
+
+/* Phase 1b for one component: backward replay.  It runs after every
+ * component's phase 1a because a fused write-back pass 1 fills the same
+ * bucket buffer that the fused gathers read. */
+static vsdlss_status solve_local_back(void *vctx, csi c)
+{
+    const solve_ctx *x=(const solve_ctx*)vctx;
+    const vsdlss_m3_component_factor *cf=x->f->component+c;
+    const vsdlss_reduction *r=cf->reduction;
+    solve_ws *w=x->ws+c;
+    vsdlss_status status;
+    double t0=trace_now();
+    /* The in-memory core write-back of phase 1a checked every core value. */
+    if(fused_component(x->z,c)) status=fused_backward(x->f,x->z,c,w->local)?VSDLSS_OK:VSDLSS_ERR_NONFINITE;
+    else status=r->core_n&&!cf->disk?vsdlss_reduce_backward_core_checked(r,w->saved,w->local)
+                                    :vsdlss_reduce_backward_inplace(r,w->saved,w->local);
     TRACE("solve: reduce backward",t0);
     return status;
 }
@@ -592,46 +626,59 @@ static void write_back_inverse(const solve_ctx *x)
 
 /* ---- Blocked two-pass permutations -------------------------------------------
  * The original-order solve moves n doubles through a random permutation
- * twice: gather (caller order -> packed order, the components' local buffers
- * laid end to end) and write-back (packed -> caller order).  Done directly,
- * each element is one random memory access and the loops are latency bound.
- * Two passes make both sides sequential: pass 1 streams the source and
- * appends each value to the bucket of its destination block (2^PERM_SH
- * doubles, 256 KB, cache resident); pass 2 fills one destination block per
- * bucket.  Measured on a 16M-element random permutation: 2.7x faster than
- * the direct loop.  Pure copies: results are bitwise those of the direct
- * loops.  A plan (per thread count: each thread's slot range per bucket, and
- * each slot's offset in its block) depends only on the permutation, so it is
- * built on first use and kept with the factor.  VSDLSS_PERM2=0 disables.
+ * twice: gather (caller order -> the components' local buffers) and
+ * write-back (local buffers -> caller order).  Done directly, each element
+ * is one random memory access and the loops are latency bound.  Two passes
+ * make both sides sequential: pass 1 streams the source and appends each
+ * value to the bucket of its destination block (2^sh doubles, 256 KB, cache
+ * resident); pass 2 fills one destination block per bucket.  Pure copies:
+ * results are bitwise those of the direct loops.  VSDLSS_PERM2=0 disables.
  *
- * Memory traffic (both passes are bandwidth bound): the plan keeps each
- * element's destination bucket as 16 bits (pass 1 otherwise reads the
- * 32-bit inverse code or the 64-bit map); pass 1 stages each bucket's
- * current 64-byte line and writes full lines with non-temporal stores; pass
- * 2 assembles a destination block in a cache-resident scratch and streams
- * it out.  Neither the bucket buffer nor the destination is then read
- * before it is written (no read-for-ownership).  22.9M-node VDD/GND case:
- * gather + write-back 0.44 -> 0.22 s on 1 thread, 0.14 -> 0.08 s on 4
- * (docs/reconstruction/solve-nonkernel-20260925.md).  Streaming is for
- * vectors larger than the cache only (stream_min_bytes). */
+ * Internal side: the local buffers are laid end to end in a padded order
+ * (component c at poff[c]).  A component whose low-degree reduction is
+ * packed and blocked is "fused": it starts on a chunk boundary (so does the
+ * component after it), so each of its chunks and buckets holds only its own
+ * entries.  Its gather pass 2 runs inside its solve, block by block, right
+ * before the forward replay of the block (the block is then still in cache),
+ * and its write-back pass 1 right after the backward replay of the block.
+ * Everything else takes both passes globally.
+ *
+ * The plan (built on first use, kept with the factor) depends only on the
+ * permutation: sources are cut into chunks of CI entries (whole reduction
+ * blocks), and slots are laid out bucket-major, each (chunk, bucket) pair
+ * a contiguous range, so chunks can be scheduled dynamically by any team.
+ * For each source element it keeps its bucket (16 bits), and for each slot
+ * the destination offset in its bucket (16 bits).
+ *
+ * Memory traffic (bandwidth bound): pass 1 stages each bucket's current
+ * 64-byte line and writes full lines with non-temporal stores; global pass
+ * 2 assembles a block in a cache-resident scratch and streams it out, so
+ * neither the bucket buffer nor the destination is read before it is
+ * written.  Streaming is for vectors larger than the cache only
+ * (stream_min_bytes).  Measurements: docs/reconstruction/
+ * solve-nonkernel-20260925.md. */
 #define PERM_SH 15
-#define PERM_MASK (((csi)1<<PERM_SH)-1)
 /* Smallest n using the two-pass path (tests lower it). */
 csi vsdlss_perm2_min = (csi)1<<20;
 #define PERM_MIN vsdlss_perm2_min
 typedef struct vsdlss_perm_plan {
-    int T; csi B, chunk;
-    csi *posG, *posW;            /* T*B: first buffer slot of (thread, bucket) */
-    csi *bstartG, *bstartW;      /* B+1: first slot of each bucket */
-    uint16_t *offG, *offW;       /* n: destination offset of each slot in its block */
-    uint16_t *bktG, *bktW;       /* n: bucket of each source element (global / packed order) */
+    int sh; csi G, CI;           /* bucket 2^sh = G entries; source chunk CI (a multiple of G) */
+    csi np;                      /* padded internal length */
+    csi *poff;                   /* count+1: padded start of each component */
+    csi *frank;                  /* count: rank among fused components, -1 if not fused */
+    csi nf;                      /* fused components */
+    csi Sg, Bp, Sp, Bg, maxB;    /* gather: Sg global chunks -> Bp padded buckets; write-back: Sp -> Bg */
+    csi *posG, *posW;            /* Sg*Bp, Sp*Bg: first slot of (chunk, bucket) */
+    csi *bstartG, *bstartW;      /* Bp+1, Bg+1: first slot of each bucket */
+    uint16_t *bktG, *offG;       /* n: padded bucket of each global entry; offset of each slot */
+    uint16_t *bktW, *offW;       /* np: global bucket of each padded entry; n: offset of each slot */
 } vsdlss_perm_plan;
 
 static void perm_plan_free(struct vsdlss_perm_plan *p)
 {
     if(!p) return;
-    free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW); free(p->offG); free(p->offW);
-    free(p->bktG); free(p->bktW); free(p);
+    free(p->poff); free(p->frank); free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW);
+    free(p->bktG); free(p->offG); free(p->bktW); free(p->offW); free(p);
 }
 
 static int perm2_on(void)
@@ -641,93 +688,131 @@ static int perm2_on(void)
     return on;
 }
 
-/* Packed position of global vertex g, and the component holding packed p. */
-static inline csi packed_of(const vsdlss_m3_factor *f, csi g)
+/* Component and local index of global vertex g. */
+static inline void inv_of(const vsdlss_m3_factor *f, csi g, csi *c, csi *i)
 {
-    const int sh=f->inv_shift; const csi *off=f->components->offset;
-    if(f->inv32) { uint32_t u=f->inv32[g]; return off[u>>sh]+(csi)(u&(uint32_t)(((uint64_t)1<<sh)-1)); }
-    uint64_t u=f->inv64[g]; return off[u>>sh]+(csi)(u&(((uint64_t)1<<sh)-1));
+    const int sh=f->inv_shift;
+    if(f->inv32) { uint32_t u=f->inv32[g]; *c=(csi)(u>>sh); *i=(csi)(u&(uint32_t)(((uint64_t)1<<sh)-1)); }
+    else { uint64_t u=f->inv64[g]; *c=(csi)(u>>sh); *i=(csi)(u&(((uint64_t)1<<sh)-1)); }
 }
-static csi comp_of(const vsdlss_m3_factor *f, csi p)
+/* Last component starting at or before padded position p. */
+static csi comp_at(const vsdlss_perm_plan *pl, csi count, csi p)
 {
-    const csi *off=f->components->offset; csi lo=0, hi=f->count-1;
+    const csi *off=pl->poff; csi lo=0, hi=count-1;
     while(lo<hi) { csi mid=lo+(hi-lo+1)/2; if(off[mid]<=p) lo=mid; else hi=mid-1; }
     return lo;
 }
 
-static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
+static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f)
 {
-    const csi n=f->n, B=(n>>PERM_SH)+1, chunk=(n+T-1)/T;
-    const csi *off=f->components->offset;
+    const csi n=f->n, count=f->count;
     vsdlss_perm_plan *pl=(vsdlss_perm_plan*)calloc(1,sizeof(*pl));
     if(!pl) return NULL;
-    pl->T=T; pl->B=B; pl->chunk=chunk;
-    pl->posG=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi)); pl->posW=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi));
-    pl->bstartG=(csi*)malloc((size_t)(B+1)*sizeof(csi)); pl->bstartW=(csi*)malloc((size_t)(B+1)*sizeof(csi));
-    pl->offG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->offW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
-    pl->bktG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->bktW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
-    csi *q=(csi*)malloc((size_t)T*(size_t)B*2*sizeof(csi));
-    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->offG||!pl->offW||!pl->bktG||!pl->bktW||!q) {
-        free(q); perm_plan_free(pl); return NULL;
+    pl->poff=(csi*)malloc((size_t)(count+1)*sizeof(csi));
+    pl->frank=(csi*)malloc((size_t)count*sizeof(csi));
+    if(!pl->poff||!pl->frank) { perm_plan_free(pl); return NULL; }
+    /* Bucket size: 2^15, or the reduction block when that is a smaller
+     * power of two (tests); fused components need blocks of whole buckets. */
+    csi G=(csi)1<<PERM_SH, bsf=0;
+    for(csi c=0;c<count;c++) {
+        csi bs=0;
+        if(!f->disk_mode && vsdlss_reduce_fused_blocks(f->component[c].reduction,&bs) && !(bs&(bs-1)) && bs<G) G=bs;
     }
-    VSDLSS_OMP(omp parallel num_threads(T))
+    for(csi c=0;c<count;c++) {
+        csi bs=0; pl->frank[c]=-1;
+        if(f->disk_mode || !vsdlss_reduce_fused_blocks(f->component[c].reduction,&bs) || bs%G) continue;
+        if(bsf && bs!=bsf) continue;             /* one chunk size for all fused components */
+        bsf=bs; pl->frank[c]=pl->nf++;
+    }
+    int sh=0; while(((csi)1<<sh)<G) sh++;
+    pl->sh=sh; pl->G=G;
+    /* Chunks of k reduction blocks, k doubling while the slot tables would
+     * exceed n/4 entries (they are Sg*Bp and Sp*Bg). */
+    csi CI=bsf?bsf:G;
+    for(;;) {
+        csi at=0;
+        for(csi c=0;c<count;c++) {
+            if(pl->frank[c]>=0 || (c>0 && pl->frank[c-1]>=0)) at=(at+CI-1)/CI*CI;
+            pl->poff[c]=at; at+=f->component[c].n;
+        }
+        pl->poff[count]=at; pl->np=at;
+        pl->Sg=(n+CI-1)/CI; pl->Bg=(n+G-1)/G; pl->Sp=(at+CI-1)/CI; pl->Bp=(at+G-1)/G;
+        const double cells=(double)pl->Sg*(double)pl->Bp+(double)pl->Sp*(double)pl->Bg;
+        if(cells<=(double)(n/2>(csi)1<<16?n/2:(csi)1<<16) || CI>=((csi)1<<40)) break;
+        CI*=2;
+    }
+    pl->CI=CI;
+    if(pl->Bp>65536 || pl->Bg>65536) { perm_plan_free(pl); return NULL; }   /* 16-bit buckets */
+    pl->maxB=pl->Bp>pl->Bg?pl->Bp:pl->Bg;
+    const csi Sg=pl->Sg, Bp=pl->Bp, Sp=pl->Sp, Bg=pl->Bg, np=pl->np, *poff=pl->poff;
+    pl->posG=(csi*)calloc((size_t)Sg*(size_t)Bp,sizeof(csi)); pl->posW=(csi*)calloc((size_t)Sp*(size_t)Bg,sizeof(csi));
+    pl->bstartG=(csi*)malloc((size_t)(Bp+1)*sizeof(csi)); pl->bstartW=(csi*)malloc((size_t)(Bg+1)*sizeof(csi));
+    pl->bktG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->offG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
+    pl->bktW=(uint16_t*)vsdlss_big_malloc((size_t)(np?np:1)*sizeof(uint16_t)); pl->offW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
+    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->bktG||!pl->offG||!pl->bktW||!pl->offW) {
+        perm_plan_free(pl); return NULL;
+    }
+    int T=vsdlss_parallel_width((double)n*4); (void)T;
+    /* Counts per (chunk, bucket); every chunk is walked in ascending source
+     * order, here and in the passes. */
+    VSDLSS_OMP(omp parallel for num_threads(T) if(T>1) schedule(dynamic,1))
+    for(csi s=0;s<Sg;s++) {
+        const csi lo=s*CI, hi=lo+CI<n?lo+CI:n; csi *row=pl->posG+(size_t)s*Bp;
+        for(csi g=lo;g<hi;g++) { csi c,i; inv_of(f,g,&c,&i); csi b=(poff[c]+i)>>sh; pl->bktG[g]=(uint16_t)b; row[b]++; }
+    }
+    VSDLSS_OMP(omp parallel for num_threads(T) if(T>1) schedule(dynamic,1))
+    for(csi s=0;s<Sp;s++) {
+        const csi lo=s*CI, hi=lo+CI<np?lo+CI:np; csi *row=pl->posW+(size_t)s*Bg;
+        for(csi c=comp_at(pl,count,lo);c<count && poff[c]<hi;c++) {
+            const csi a=poff[c]>lo?poff[c]:lo, e=poff[c]+f->component[c].n<hi?poff[c]+f->component[c].n:hi;
+            const csi *map=component_map(f,c);
+            for(csi p=a;p<e;p++) { csi b=map[p-poff[c]]>>sh; pl->bktW[p]=(uint16_t)b; row[b]++; }
+        }
+    }
+    csi at=0;
+    for(csi b=0;b<Bp;b++) { pl->bstartG[b]=at; for(csi s=0;s<Sg;s++) { csi *v=pl->posG+(size_t)s*Bp+b, k=*v; *v=at; at+=k; } }
+    pl->bstartG[Bp]=at;
+    at=0;
+    for(csi b=0;b<Bg;b++) { pl->bstartW[b]=at; for(csi s=0;s<Sp;s++) { csi *v=pl->posW+(size_t)s*Bg+b, k=*v; *v=at; at+=k; } }
+    pl->bstartW[Bg]=at;
+    int failed=0;
+    VSDLSS_OMP(omp parallel num_threads(T) if(T>1) reduction(|:failed))
     {
-#ifdef _OPENMP
-        const int t=omp_get_thread_num();
-#else
-        const int t=0;
-#endif
-        const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
-        csi *cg=pl->posG+(size_t)t*B, *cw=pl->posW+(size_t)t*B;
-        for(csi g=lo;g<hi;g++) { csi b=packed_of(f,g)>>PERM_SH; pl->bktG[g]=(uint16_t)b; cg[b]++; }
-        if(lo<hi) {
-            csi c=comp_of(f,lo); const csi *map=component_map(f,c);
-            for(csi p=lo;p<hi;p++) {
-                while(p>=off[c+1]) { c++; map=component_map(f,c); }
-                csi b=map[p-off[c]]>>PERM_SH; pl->bktW[p]=(uint16_t)b; cw[b]++;
+        csi *q=(csi*)malloc((size_t)pl->maxB*sizeof(csi));
+        if(!q) failed=1;
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(csi s=0;s<Sg;s++) {
+            if(!q) continue;
+            const csi lo=s*CI, hi=lo+CI<n?lo+CI:n;
+            memcpy(q,pl->posG+(size_t)s*Bp,(size_t)Bp*sizeof(csi));
+            for(csi g=lo;g<hi;g++) { csi c,i; inv_of(f,g,&c,&i); pl->offG[q[pl->bktG[g]]++]=(uint16_t)((poff[c]+i)&(G-1)); }
+        }
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(csi s=0;s<Sp;s++) {
+            if(!q) continue;
+            const csi lo=s*CI, hi=lo+CI<np?lo+CI:np;
+            memcpy(q,pl->posW+(size_t)s*Bg,(size_t)Bg*sizeof(csi));
+            for(csi c=comp_at(pl,count,lo);c<count && poff[c]<hi;c++) {
+                const csi a=poff[c]>lo?poff[c]:lo, e=poff[c]+f->component[c].n<hi?poff[c]+f->component[c].n:hi;
+                const csi *map=component_map(f,c);
+                for(csi p=a;p<e;p++) { csi g=map[p-poff[c]]; pl->offW[q[pl->bktW[p]]++]=(uint16_t)(g&(G-1)); }
             }
         }
-        VSDLSS_OMP(omp barrier)
-        VSDLSS_OMP(omp single)
-        {
-            csi atg=0, atw=0;
-            for(csi b=0;b<B;b++) {
-                pl->bstartG[b]=atg; pl->bstartW[b]=atw;
-                for(int u=0;u<T;u++) {
-                    csi vg=pl->posG[(size_t)u*B+b], vw=pl->posW[(size_t)u*B+b];
-                    pl->posG[(size_t)u*B+b]=atg; atg+=vg;
-                    pl->posW[(size_t)u*B+b]=atw; atw+=vw;
-                }
-            }
-            pl->bstartG[B]=atg; pl->bstartW[B]=atw;
-        }
-        csi *qg=q+(size_t)t*B*2, *qw=qg+B;
-        memcpy(qg,pl->posG+(size_t)t*B,(size_t)B*sizeof(csi));
-        memcpy(qw,pl->posW+(size_t)t*B,(size_t)B*sizeof(csi));
-        for(csi g=lo;g<hi;g++) { csi p=packed_of(f,g); pl->offG[qg[p>>PERM_SH]++]=(uint16_t)(p&PERM_MASK); }
-        if(lo<hi) {
-            csi c=comp_of(f,lo); const csi *map=component_map(f,c);
-            for(csi p=lo;p<hi;p++) {
-                while(p>=off[c+1]) { c++; map=component_map(f,c); }
-                csi g=map[p-off[c]]; pl->offW[qw[g>>PERM_SH]++]=(uint16_t)(g&PERM_MASK);
-            }
-        }
+        free(q);
     }
-    free(q);
+    if(failed) { perm_plan_free(pl); return NULL; }
     return pl;
 }
 
-static const vsdlss_perm_plan *perm_plan_get(const vsdlss_m3_factor *fc, int T)
+static const vsdlss_perm_plan *perm_plan_get(const vsdlss_m3_factor *fc)
 {
     vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
-    if(T<1 || T>=VSDLSS_PERM_PLAN_SLOTS) return NULL;
-    if((f->n>>PERM_SH)+1>65536) return NULL;         /* buckets must fit 16 bits */
-    vsdlss_perm_plan *pl=atomic_load(&f->pplan[T]);
+    vsdlss_perm_plan *pl=atomic_load(&f->pplan);
     if(pl) return pl;
-    pl=perm_plan_build(f,T);
+    pl=perm_plan_build(f);
     if(!pl) return NULL;
     vsdlss_perm_plan *expect=NULL;
-    if(!atomic_compare_exchange_strong(&f->pplan[T],&expect,pl)) { perm_plan_free(pl); pl=expect; }
+    if(!atomic_compare_exchange_strong(&f->pplan,&expect,pl)) { perm_plan_free(pl); pl=expect; }
     return pl;
 }
 
@@ -782,18 +867,30 @@ static double stream_min_bytes(void)
     return v;
 }
 
-/* Per-thread scratch of the passes: B staging lines, then one block. */
-static size_t pscr_stride(csi B)
-{ return (size_t)B*PERM_LINE+((size_t)1<<PERM_SH); }
+/* Scratch slots (P of them): thread t of the global passes uses slot t,
+ * the fused write-back takes slots from the pool.  Each: maxB staging
+ * lines, one block, maxB queue counters. */
+static size_t slot_stride(const vsdlss_perm_plan *pl)
+{
+    size_t d=(size_t)pl->maxB*PERM_LINE+(size_t)pl->G+(size_t)pl->maxB;
+    return (d+PERM_LINE-1)/PERM_LINE*PERM_LINE;
+}
+typedef struct { double *stage, *blk; csi *q; } perm_slot;
+static perm_slot slot_at(const vsdlss_perm_plan *pl, double *scr, size_t k)
+{
+    perm_slot s;
+    s.stage=scr+k*slot_stride(pl); s.blk=s.stage+(size_t)pl->maxB*PERM_LINE; s.q=(csi*)(s.blk+pl->G);
+    return s;
+}
 
-/* Scratch vector of n doubles and the plan's per-thread scratch (64-byte
- * aligned); NULL when a concurrent solve holds them. */
-static double *pbuf_acquire(const vsdlss_m3_factor *fc, const vsdlss_perm_plan *pl)
+/* Scratch vector of np doubles and P scratch slots (64-byte aligned); NULL
+ * when a concurrent solve holds them. */
+static double *pbuf_acquire(const vsdlss_m3_factor *fc, const vsdlss_perm_plan *pl, int P)
 {
     vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
-    const size_t need=(size_t)pl->T*pscr_stride(pl->B);
+    const size_t need=(size_t)P*slot_stride(pl);
     if(atomic_exchange(&f->pbuf_busy,1)) return NULL;
-    if(!f->pbuf) f->pbuf=(double*)vsdlss_big_malloc((size_t)f->n*sizeof(double));
+    if(!f->pbuf) f->pbuf=(double*)vsdlss_big_malloc((size_t)(pl->np?pl->np:1)*sizeof(double));
     if(f->pbuf && f->pscr_len<need) {
         free(f->pscr_block); f->pscr_block=NULL; f->pscr=NULL; f->pscr_len=0;
         f->pscr_block=malloc(need*sizeof(double)+64);
@@ -805,18 +902,24 @@ static double *pbuf_acquire(const vsdlss_m3_factor *fc, const vsdlss_perm_plan *
     if(!f->pbuf || !f->pscr) { atomic_store(&f->pbuf_busy,0); return NULL; }
     return f->pbuf;
 }
+static void pbuf_release(const vsdlss_m3_factor *fc)
+{ atomic_store(&((vsdlss_m3_factor*)fc)->pbuf_busy,0); }
 
-/* Pass 1 of both directions: buf[q[bkt[i]]++] = src[i-soff] for i in [lo, hi),
- * through one staging line per bucket.  first[b] is this thread's first
- * slot of bucket b: a line that starts before it is shared with the
- * previous thread, so only this thread's slots of it are stored (plainly). */
-static void perm_pass1(const double *restrict src, csi soff, const uint16_t *restrict bkt, csi lo, csi hi,
-                       double *restrict buf, csi *restrict q, const csi *restrict first,
-                       csi B, double *restrict stage, int streamed)
+/* Pass 1 of both directions, over a run of consecutive source chunks:
+ * p1_feed appends src[i-soff] for i in [lo, hi) to the buckets,
+ * buf[q[bkt[i]]++], through one staging line per bucket.  The slots of one
+ * bucket are contiguous across consecutive chunks, so a run carries its
+ * lines from chunk to chunk.  first[b] is the run's first slot of bucket b:
+ * a line that starts before it is shared with another run, so only this
+ * run's slots of it are stored (plainly); p1_flush stores the lines left
+ * partial at the end of the run (plainly) and fences the streamed ones. */
+static void p1_feed(const double *restrict src, csi soff, const uint16_t *restrict bkt, csi lo, csi hi,
+                    double *restrict buf, csi *restrict q, const csi *restrict first,
+                    double *restrict stage, int streamed)
 {
     /* a0: slot index of the first 64-byte boundary in buf, modulo 8. */
     const csi a0=(csi)(((64-((uintptr_t)buf&63))&63)/sizeof(double));
-    if(!streamed || ((uintptr_t)buf&7)) {             /* plain stores */
+    if(!streamed) {                                   /* plain stores */
         for(csi i=lo;i<hi;i++) buf[q[bkt[i]]++]=src[i-soff];
         return;
     }
@@ -830,7 +933,13 @@ static void perm_pass1(const double *restrict src, csi soff, const uint16_t *res
             else for(csi k=first[b];k<=pos;k++) buf[k]=st[(k-a0)&(PERM_LINE-1)];
         }
     }
-    for(csi b=0;b<B;b++) {                            /* partial last lines */
+}
+static void p1_flush(double *restrict buf, const csi *restrict q, const csi *restrict first, csi B,
+                     const double *restrict stage, int streamed)
+{
+    if(!streamed) return;
+    const csi a0=(csi)(((64-((uintptr_t)buf&63))&63)/sizeof(double));
+    for(csi b=0;b<B;b++) {
         const csi end=q[b], part=(end-a0)&(PERM_LINE-1);
         csi k=end-part; if(k<first[b]) k=first[b];
         const double *st=stage+(size_t)b*PERM_LINE;
@@ -838,45 +947,69 @@ static void perm_pass1(const double *restrict src, csi soff, const uint16_t *res
     }
     stream_fence();
 }
-static void pbuf_release(const vsdlss_m3_factor *fc)
-{ atomic_store(&((vsdlss_m3_factor*)fc)->pbuf_busy,0); }
 
-/* loc[c][i] = rhs[component_map(c)[i]] for all components; returns 1 when a
- * gathered value is not finite (the direct gather's check). */
-static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, const double *rhs,
-                        double *buf, double *const *loc, csi *q, double *scr)
+/* This thread's share [*lo, *hi) of m items split evenly among T. */
+static void share_of(csi m, int t, int T, csi *lo, csi *hi)
+{ *lo=m*(csi)t/(csi)T; *hi=m*(csi)(t+1)/(csi)T; }
+
+/* Feeds internal chunk s of the write-back to pass 1 (the components
+ * overlapping it; a fused component's chunk holds only its own entries). */
+static void writeback_chunk(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, double *buf,
+                            double *const *loc, csi s, csi *q, const csi *first, double *stage, int streamed)
 {
-    const csi n=f->n, B=pl->B, chunk=pl->chunk, *off=f->components->offset;
-    const int streamed=(double)n*sizeof(double)>=stream_min_bytes();
+    const csi lo=s*pl->CI, hi=lo+pl->CI<pl->np?lo+pl->CI:pl->np, *poff=pl->poff;
+    for(csi c=comp_at(pl,f->count,lo);c<f->count && poff[c]<hi;c++) {
+        const csi a=poff[c]>lo?poff[c]:lo, e=poff[c]+f->component[c].n<hi?poff[c]+f->component[c].n:hi;
+        if(a<e) p1_feed(loc[c],poff[c],pl->bktW,a,e,buf,q,first,stage,streamed);
+    }
+}
+
+/* Gather, global part: pass 1 for all entries, pass 2 for the buckets of
+ * components that are not fused.  loc[c][i] = rhs[component_map(c)[i]];
+ * returns 1 when a gathered value is not finite (the direct gather's check). */
+static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, const double *rhs,
+                        double *buf, double *const *loc, double *scr, int T, int streamed)
+{
+    const csi n=f->n, Bp=pl->Bp, CI=pl->CI, G=pl->G, *poff=pl->poff;
     int bad=0;
-    VSDLSS_OMP(omp parallel num_threads(pl->T) reduction(|:bad))
+    (void)T;
+    VSDLSS_OMP(omp parallel num_threads(T) reduction(|:bad))
     {
 #ifdef _OPENMP
         const int t=omp_get_thread_num();
 #else
         const int t=0;
 #endif
-        const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
-        csi *qt=q+(size_t)t*B;
-        double *stage=scr+(size_t)t*pscr_stride(B), *blk=stage+(size_t)B*PERM_LINE;
-        memcpy(qt,pl->posG+(size_t)t*B,(size_t)B*sizeof(csi));
-        perm_pass1(rhs,0,pl->bktG,lo,hi,buf,qt,pl->posG+(size_t)t*B,B,stage,streamed);
+#ifdef _OPENMP
+        const int nth=omp_get_num_threads();
+#else
+        const int nth=1;
+#endif
+        perm_slot sl=slot_at(pl,scr,(size_t)t);
+        csi s0, s1; share_of(pl->Sg,t,nth,&s0,&s1);
+        if(s0<s1) {                                     /* one run per thread */
+            const csi *first=pl->posG+(size_t)s0*Bp, hi=s1*CI<n?s1*CI:n;
+            memcpy(sl.q,first,(size_t)Bp*sizeof(csi));
+            p1_feed(rhs,0,pl->bktG,s0*CI,hi,buf,sl.q,first,sl.stage,streamed);
+            p1_flush(buf,sl.q,first,Bp,sl.stage,streamed);
+        }
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp for schedule(dynamic,4))
-        for(csi b=0;b<B;b++) {
-            const csi p0=b<<PERM_SH, pend=p0+PERM_MASK+1<n?p0+PERM_MASK+1:n;
-            const csi k0=pl->bstartG[b], k1=pl->bstartG[b+1];
+        for(csi b=0;b<Bp;b++) {
+            const csi p0=b*G, k0=pl->bstartG[b], k1=pl->bstartG[b+1];
             if(k0==k1) continue;
-            const csi c=comp_of(f,p0);
-            if(pend<=off[c+1]) {                       /* block inside one component */
+            const csi c=comp_at(pl,f->count,p0), cend=poff[c]+f->component[c].n;
+            if(pl->frank[c]>=0) continue;                /* in that component's solve */
+            const csi pend=p0+G<cend?p0+G:cend;
+            if(p0>=poff[c] && k1-k0==pend-p0) {          /* block inside one component */
                 /* Every slot of the block is written once (a permutation). */
-                double *d=streamed?blk:loc[c]+(p0-off[c]);
+                double *d=streamed?sl.blk:loc[c]+(p0-poff[c]);
                 for(csi k=k0;k<k1;k++) { double v=buf[k]; d[pl->offG[k]]=v; bad|=!isfinite(v); }
-                if(streamed) stream_copy(loc[c]+(p0-off[c]),blk,pend-p0);
+                if(streamed) stream_copy(loc[c]+(p0-poff[c]),sl.blk,pend-p0);
             } else {
                 for(csi k=k0;k<k1;k++) {
-                    const csi p=p0+pl->offG[k], cc=comp_of(f,p); double v=buf[k];
-                    loc[cc][p-off[cc]]=v; bad|=!isfinite(v);
+                    const csi p=p0+pl->offG[k], cc=comp_at(pl,f->count,p); double v=buf[k];
+                    loc[cc][p-poff[cc]]=v; bad|=!isfinite(v);
                 }
             }
         }
@@ -885,52 +1018,137 @@ static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, c
     return bad;
 }
 
-/* out[component_map(c)[i]] = loc[c][i] for all components. */
+/* Write-back, global part: pass 1 for the chunks of components that are not
+ * fused (fused ones took it in their solve), then pass 2 for all entries:
+ * out[component_map(c)[i]] = loc[c][i]. */
 static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, double *buf,
-                            double *const *loc, double *out, csi *q, double *scr)
+                            double *const *loc, double *out, double *scr, int T, int streamed)
 {
-    const csi n=f->n, B=pl->B, chunk=pl->chunk, *off=f->components->offset;
-    const int streamed=(double)n*sizeof(double)>=stream_min_bytes();
-    VSDLSS_OMP(omp parallel num_threads(pl->T))
+    const csi n=f->n, G=pl->G;
+    (void)T;
+    VSDLSS_OMP(omp parallel num_threads(T))
     {
 #ifdef _OPENMP
         const int t=omp_get_thread_num();
 #else
         const int t=0;
 #endif
-        const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
-        csi *qt=q+(size_t)t*B;
-        double *stage=scr+(size_t)t*pscr_stride(B), *blk=stage+(size_t)B*PERM_LINE;
-        memcpy(qt,pl->posW+(size_t)t*B,(size_t)B*sizeof(csi));
-        if(lo<hi) {
-            /* Packed range [lo, hi) component by component (the source of
-             * packed position p is loc[c][p - off[c]]). */
-            csi c=comp_of(f,lo), p=lo;
-            while(p<hi) {
-                const csi e=off[c+1]<hi?off[c+1]:hi;
-                perm_pass1(loc[c],off[c],pl->bktW,p,e,buf,qt,pl->posW+(size_t)t*B,B,stage,streamed);
-                p=e; c++;
+#ifdef _OPENMP
+        const int nth=omp_get_num_threads();
+#else
+        const int nth=1;
+#endif
+        perm_slot sl=slot_at(pl,scr,(size_t)t);
+        csi s0, s1; const csi *first=NULL;
+        share_of(pl->Sp,t,nth,&s0,&s1);
+        for(csi s=s0;s<s1;s++) {                        /* runs of chunks not fused */
+            if(pl->frank[comp_at(pl,f->count,s*pl->CI)]>=0) {
+                if(first) { p1_flush(buf,sl.q,first,pl->Bg,sl.stage,streamed); first=NULL; }
+                continue;
             }
+            if(!first) { first=pl->posW+(size_t)s*pl->Bg; memcpy(sl.q,first,(size_t)pl->Bg*sizeof(csi)); }
+            writeback_chunk(f,pl,buf,loc,s,sl.q,first,sl.stage,streamed);
         }
+        if(first) p1_flush(buf,sl.q,first,pl->Bg,sl.stage,streamed);
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp for schedule(dynamic,4))
-        for(csi b=0;b<B;b++) {
-            const csi g0=b<<PERM_SH, len=g0+PERM_MASK+1<n?PERM_MASK+1:n-g0;
+        for(csi b=0;b<pl->Bg;b++) {
+            const csi g0=b*G, len=g0+G<n?G:n-g0;
             /* Every slot of the block is written once (a permutation). */
-            double *d=streamed?blk:out+g0;
+            double *d=streamed?sl.blk:out+g0;
             for(csi k=pl->bstartW[b];k<pl->bstartW[b+1];k++) d[pl->offW[k]]=buf[k];
-            if(streamed) stream_copy(out+g0,blk,len);
+            if(streamed) stream_copy(out+g0,sl.blk,len);
         }
         stream_fence();
     }
 }
 
+/* A fused component's forward replay with its gather pass 2: per chunk,
+ * fill the chunk from its buckets, then replay the chunk's blocks while it
+ * is in cache; then the sequential tail.  Same operations on every entry as
+ * vsdlss_reduce_forward_inplace.  Returns 1 when a value is not finite. */
+static int fused_forward(const vsdlss_m3_factor *f, const fused_ctx *z, csi c, double *local)
+{
+    const vsdlss_perm_plan *pl=z->pl;
+    const vsdlss_reduction *r=f->component[c].reduction;
+    const csi cn=f->component[c].n, CI=pl->CI, sh=pl->sh, b0=pl->poff[c]>>sh;
+    const csi nch=(cn+CI-1)/CI; csi bs=0;
+    vsdlss_reduce_fused_blocks(r,&bs);
+    int bad=0, gt=vsdlss_parallel_width((double)cn*4); (void)gt;
+    VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(dynamic,1) reduction(|:bad))
+    for(csi j=0;j<nch;j++) {
+        const csi lo=j*CI, hi=lo+CI<cn?lo+CI:cn;
+        for(csi bb=lo>>sh;bb<=(hi-1)>>sh;bb++) {
+            double *d=local+(bb<<sh);
+            for(csi k=pl->bstartG[b0+bb];k<pl->bstartG[b0+bb+1];k++) { double v=z->buf[k]; d[pl->offG[k]]=v; bad|=!isfinite(v); }
+        }
+        for(csi b=lo/bs;b<=(hi-1)/bs;b++) vsdlss_reduce_forward_block(r,b,local);
+    }
+    if(!bad) vsdlss_reduce_forward_tail(r,local);
+    return bad;
+}
+
+/* Scratch slot from the pool (z->P slots): a holder never waits while
+ * holding one, so spinning always makes progress. */
+static size_t slot_acquire(const fused_ctx *z)
+{
+    for(;;) for(int k=0;k<z->P;k++)
+        if(!atomic_load_explicit(z->busy+k,memory_order_relaxed) && !atomic_exchange(z->busy+k,1)) return (size_t)k;
+}
+static void slot_release(const fused_ctx *z, size_t k)
+{ atomic_store(z->busy+k,0); }
+
+/* A fused component's backward replay with its write-back pass 1: the tail,
+ * then per chunk its blocks and the chunk's pass 1.  Same operations as
+ * vsdlss_reduce_backward_core_checked.  Returns 0 when a recovered value is
+ * not finite. */
+static int fused_backward(const vsdlss_m3_factor *f, const fused_ctx *z, csi c, double *local)
+{
+    const vsdlss_perm_plan *pl=z->pl;
+    const vsdlss_reduction *r=f->component[c].reduction;
+    const csi cn=f->component[c].n, CI=pl->CI, s0=pl->poff[c]/CI, pc=pl->poff[c];
+    const csi nch=(cn+CI-1)/CI; csi bs=0;
+    vsdlss_reduce_fused_blocks(r,&bs);
+    int ok=vsdlss_reduce_backward_tail(r,local);
+    if(!ok) return 0;
+    int gt=vsdlss_parallel_width((double)cn*4); (void)gt;
+    /* Contiguous chunks per thread (one pass-1 run each).  A thread holds
+     * a scratch slot for its run; it waits for nothing while holding it. */
+    VSDLSS_OMP(omp parallel num_threads(gt) if(gt>1) reduction(&:ok))
+    {
+#ifdef _OPENMP
+        const int t=omp_get_thread_num(), nth=omp_get_num_threads();
+#else
+        const int t=0, nth=1;
+#endif
+        csi j0, j1; share_of(nch,t,nth,&j0,&j1);
+        if(j0<j1) {
+            const size_t k=slot_acquire(z);
+            perm_slot sl=slot_at(pl,z->scr,k);
+            const csi *first=pl->posW+(size_t)(s0+j0)*pl->Bg;
+            memcpy(sl.q,first,(size_t)pl->Bg*sizeof(csi));
+            for(csi j=j0;j<j1;j++) {
+                const csi lo=j*CI, hi=lo+CI<cn?lo+CI:cn;
+                for(csi b=lo/bs;b<=(hi-1)/bs;b++) ok&=vsdlss_reduce_backward_block(r,b,local);
+                p1_feed(local,pc,pl->bktW,pc+lo,pc+hi,z->buf,sl.q,first,sl.stage,z->streamed);
+            }
+            p1_flush(z->buf,sl.q,first,pl->Bg,sl.stage,z->streamed);
+            slot_release(z,k);
+        }
+    }
+    return ok;
+}
+
+static int fused_component(const fused_ctx *z, csi c)
+{ return z && z->pl->frank[c]>=0; }
+
 static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
                                   const double *rhs, double *solution, int internal)
 {
     vsdlss_status status=VSDLSS_OK, *results=NULL; solve_ws *ws=NULL; double **loc=NULL;
-    const vsdlss_perm_plan *pl=NULL; double *pbuf=NULL; csi *pq=NULL;
-    csi c, taken=0;
+    const vsdlss_perm_plan *pl=NULL; double *pbuf=NULL; atomic_int *busy=NULL;
+    csi c, taken=0; int T=1, streamed=0;
+    fused_ctx z;
     if(!factor || !factor->components || !factor->component || !rhs || !solution)
         return VSDLSS_ERR_INVALID;
     if(!count_fits(factor->count,sizeof(solve_ws))) return VSDLSS_ERR_OOM;
@@ -944,32 +1162,40 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         if(status!=VSDLSS_OK) goto done;
         if(loc) loc[taken]=ws[taken].local;
     }
-    solve_ctx ctx={factor,rhs,solution,ws,internal,loc,0};
+    solve_ctx ctx={factor,rhs,solution,ws,internal,loc,0,NULL};
     if(inverse && !factor->disk_mode && factor->n>=PERM_MIN && perm2_on()) {
-        /* Two-pass gather here, two-pass write-back below (plan, scratch
-         * vector and queues permitting; otherwise the direct loops). */
-        int T=vsdlss_parallel_width((double)factor->n*4);
-        pl=perm_plan_get(factor,T);
-        if(pl) pq=(csi*)malloc((size_t)pl->T*(size_t)pl->B*sizeof(csi));
-        if(pl && pq) pbuf=pbuf_acquire(factor,pl);
+        /* Two-pass gather here, two-pass write-back below, the fused parts
+         * inside the components' solves (plan and scratch permitting;
+         * otherwise the direct loops).  P bounds the threads that can hold
+         * a scratch slot at once (the components' schedule uses at most
+         * vsdlss_parallel_width(n*256) threads). */
+        T=vsdlss_parallel_width((double)factor->n*4);
+        int P=vsdlss_parallel_width((double)factor->n*256); if(P<T) P=T;
+        pl=perm_plan_get(factor);
+        if(pl) busy=(atomic_int*)calloc((size_t)P,sizeof(*busy));
+        if(pl && busy) pbuf=pbuf_acquire(factor,pl,P);
         if(pbuf) {
             double tg=trace_now();
-            int bad=perm2_gather(factor,pl,rhs,pbuf,loc,pq,factor->pscr);
+            streamed=(double)pl->np*sizeof(double)>=stream_min_bytes();
+            z.pl=pl; z.buf=pbuf; z.scr=factor->pscr; z.P=P; z.busy=busy; z.streamed=streamed;
+            int bad=perm2_gather(factor,pl,rhs,pbuf,loc,factor->pscr,T,streamed);
             TRACE("solve: two-pass gather",tg);
             if(bad) { status=VSDLSS_ERR_NONFINITE; goto done; }
-            ctx.pregathered=1;
+            ctx.pregathered=1; ctx.z=&z;
         }
     }
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
+    run_components(factor,factor->disk_mode,solve_local_back,&ctx,results);
+    for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
     double t0=trace_now();
-    if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq,factor->pscr);
+    if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,factor->pscr,T,streamed);
     else if(inverse) write_back_inverse(&ctx);
     else run_components(factor,factor->disk_mode,scatter_local,&ctx,results);
     TRACE("solve: scatter",t0);
 done:
     if(pbuf) pbuf_release(factor);
-    free(pq);
+    free(busy);
     if(ws) for(c=0;c<taken;c++) ws_release(factor,c,ws+c);
     free(ws); free(results); free(loc);
     return status;

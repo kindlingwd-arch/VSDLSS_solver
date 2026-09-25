@@ -46,6 +46,9 @@ typedef struct vsdlss_reduction {
      * finite, pivots nonzero), so replay needs no per-entry checks. */
     csi pk_count;
     struct vsdlss_pk_seg *pk;
+    /* Size of the parallel pass's blocks: block b covers vertices
+     * [b*block_size, min((b+1)*block_size, n)). */
+    csi block_size;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -120,12 +123,12 @@ struct vsdlss_m3_factor {
     uint64_t *inv64;
     int inv_shift;
     /* Blocked two-pass gather / write-back of original-order solves
-     * (vsdlss_m3.c): plans built on first use per thread count, and a
-     * scratch vector of n doubles taken with an atomic flag. */
-#define VSDLSS_PERM_PLAN_SLOTS 65
-    _Atomic(struct vsdlss_perm_plan *) pplan[VSDLSS_PERM_PLAN_SLOTS];
+     * (vsdlss_m3.c): a plan built on first use, and a scratch vector
+     * (padded internal length) with the passes' scratch slots, taken with
+     * an atomic flag. */
+    _Atomic(struct vsdlss_perm_plan *) pplan;
     double *pbuf;
-    double *pscr; size_t pscr_len;      /* per-thread pass scratch (64-byte aligned), taken with pbuf */
+    double *pscr; size_t pscr_len;      /* pass scratch slots (64-byte aligned), taken with pbuf */
     void *pscr_block;                   /* allocation holding pscr */
     atomic_int pbuf_busy;
 };
@@ -207,6 +210,19 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const dou
 /* Same without the finiteness scan of the core entries of x, which the
  * caller has already checked. */
 vsdlss_status vsdlss_reduce_backward_core_checked(const vsdlss_reduction *, const double *saved, double *x);
+/* Block-wise form of the packed replays, for callers that fuse other work
+ * with each block (the M3 two-pass gather / write-back).  Returns the
+ * number of blocks (0: not a packed blocked reduction, use the calls above)
+ * and their size.  The full forward replay is forward_block for every block
+ * (any order, concurrently) then forward_tail; the backward replay is
+ * backward_tail then backward_block for every block.  The backward calls
+ * return 0 when a recovered value is not finite and do not check the core
+ * entries (the caller has). */
+csi vsdlss_reduce_fused_blocks(const vsdlss_reduction *, csi *block_size);
+void vsdlss_reduce_forward_block(const vsdlss_reduction *, csi b, double *work);
+void vsdlss_reduce_forward_tail(const vsdlss_reduction *, double *work);
+int vsdlss_reduce_backward_tail(const vsdlss_reduction *, double *x);
+int vsdlss_reduce_backward_block(const vsdlss_reduction *, csi b, double *x);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
 /* Compose an elimination-tree postorder into (q, pinv) for matrix A (the

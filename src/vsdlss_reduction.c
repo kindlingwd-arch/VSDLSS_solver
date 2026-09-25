@@ -506,6 +506,25 @@ static vsdlss_status backward_replay(const vsdlss_reduction *r, const double *sa
     return VSDLSS_OK;
 }
 
+csi vsdlss_reduce_fused_blocks(const vsdlss_reduction *r, csi *block_size)
+{
+    if(!r || r->records || !r->count || !r->pk || !pk_blocked(r) || r->block_size<1) return 0;
+    if(block_size) *block_size=r->block_size;
+    return r->blocks;
+}
+void vsdlss_reduce_forward_block(const vsdlss_reduction *r, csi b, double *work)
+{ forward_seg(r->pk+b,work,NULL); }
+void vsdlss_reduce_forward_tail(const vsdlss_reduction *r, double *work)
+{ for(csi q=r->blocks;q<r->pk_count;q++) forward_seg(r->pk+q,work,NULL); }
+int vsdlss_reduce_backward_tail(const vsdlss_reduction *r, double *x)
+{
+    int ok=1;
+    for(csi q=r->pk_count;q>r->blocks;q--) ok&=backward_seg(r->pk+q-1,NULL,x);
+    return ok;
+}
+int vsdlss_reduce_backward_block(const vsdlss_reduction *r, csi b, double *x)
+{ return backward_seg(r->pk+b,NULL,x); }
+
 static int record_valid(const vsdlss_reduction *r, const vsdlss_elim_record *e)
 {
     if(e->vertex<0 || e->vertex>=r->n || e->degree<0 || e->degree>3) return 0;
@@ -839,6 +858,7 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
     r->block_ptr=(csi *)malloc((size_t)(blocks+1)*sizeof(csi));
     if(!r->block_ptr) { status=VSDLSS_ERR_OOM; goto fail; }
     r->blocks=blocks;
+    r->block_size=REDUCE_BLOCK;
 
     {
         reduce_state z={adj,diag,active,ar,r->records};

@@ -324,45 +324,57 @@ static int internal_order_solve(void)
 }
 
 /* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
- * takes it: several buckets, many small components, blocks straddling
- * components) against the direct loops: the same bits for every thread
- * count, both inverse-map widths and plain or streaming stores (staging
- * lines shared by two threads), cached plans, aliasing; a non-finite
+ * takes it: many small components, blocks straddling components; with and
+ * without the passes fused into blocked reductions) against the direct
+ * loops: the same bits for every thread count, both inverse-map widths and
+ * plain or streaming stores (staging lines shared by two chunks), cached
+ * plans, aliasing; a non-finite
  * RHS fails and leaves the output untouched. */
 static int two_pass_permutation(void)
 {
     vsdlss *A=two_nets(); CHECK(A);
-    const csi n=A->n, saved_min=vsdlss_perm2_min;
+    const csi n=A->n, saved_min=vsdlss_perm2_min, saved_block=vsdlss_reduce_block, saved_reorder=vsdlss_reorder_min;
     double *b=malloc(n*8),*bb=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8);
     CHECK(b&&bb&&ref&&x);
     for(csi i=0;i<n;i++) b[i]=cos(0.021*(double)i)+0.3;
-    vsdlss_m3_factor *f=NULL;
-    vsdlss_perm2_min=(csi)1<<62;                    /* direct loops: reference */
-    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
-    CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
-    vsdlss_m3_factor_free(f);
-    vsdlss_perm2_min=1;
     int maxt=vsdlss_parallel_enabled()?4:1;
-    for(int streamed=0;streamed<2;streamed++)       /* plain / non-temporal stores */
-    for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
-        vsdlss_perm2_stream_min=streamed?0:1e300;
-        vsdlss_m3_inverse_force64=wide;
-        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
-        f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
-        for(int rep=0;rep<2;rep++){                 /* second call: cached plan */
-            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
-            CHECK(memcmp(x,ref,(size_t)n*8)==0);
-        }
-        memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
-        CHECK(memcmp(x,ref,(size_t)n*8)==0);
-        memcpy(bb,b,(size_t)n*8); bb[n/3]=NAN;
-        for(csi i=0;i<n;i++) x[i]=55;
-        CHECK(vsdlss_m3_solve(f,bb,x)==VSDLSS_ERR_NONFINITE);
-        for(csi i=0;i<n;i++) CHECK(x[i]==55);
+    /* fused = 1: reduction blocks of 64 vertices, so both nets are reduced
+     * in blocks and take the gather / write-back fused with the replays
+     * (buckets of 64 entries: many buckets, chunks and shared lines). */
+    for(int fused=0;fused<2;fused++) {
+        vsdlss_reduce_block=fused?64:saved_block; vsdlss_reorder_min=fused?64:saved_reorder;
+        vsdlss_m3_factor *f=NULL;
+        vsdlss_perm2_min=(csi)1<<62;                /* direct loops: reference */
+        CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
         vsdlss_m3_factor_free(f);
+        vsdlss_perm2_min=1;
+        for(int streamed=0;streamed<2;streamed++)   /* plain / non-temporal stores */
+        for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+            vsdlss_perm2_stream_min=streamed?0:1e300;
+            vsdlss_m3_inverse_force64=wide;
+            CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+            f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+            for(int rep=0;rep<2;rep++){             /* second call: cached plan */
+                CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+                CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            }
+            memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            for(int where=0;where<2;where++){       /* non-finite RHS: output untouched */
+                memcpy(bb,b,(size_t)n*8); bb[where?n-1:n/3]=NAN;
+                for(csi i=0;i<n;i++) x[i]=55;
+                CHECK(vsdlss_m3_solve(f,bb,x)==VSDLSS_ERR_NONFINITE);
+                for(csi i=0;i<n;i++) CHECK(x[i]==55);
+            }
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);   /* usable after a failure */
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            vsdlss_m3_factor_free(f);
+        }
     }
     vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_stream_min=-1;
+    vsdlss_reduce_block=saved_block; vsdlss_reorder_min=saved_reorder;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
     return 0;
