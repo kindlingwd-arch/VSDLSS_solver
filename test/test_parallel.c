@@ -326,7 +326,8 @@ static int internal_order_solve(void)
 /* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
  * takes it: several buckets, many small components, blocks straddling
  * components) against the direct loops: the same bits for every thread
- * count and both inverse-map widths, cached plans, aliasing; a non-finite
+ * count, both inverse-map widths and plain or streaming stores (staging
+ * lines shared by two threads), cached plans, aliasing; a non-finite
  * RHS fails and leaves the output untouched. */
 static int two_pass_permutation(void)
 {
@@ -343,7 +344,9 @@ static int two_pass_permutation(void)
     vsdlss_m3_factor_free(f);
     vsdlss_perm2_min=1;
     int maxt=vsdlss_parallel_enabled()?4:1;
+    for(int streamed=0;streamed<2;streamed++)       /* plain / non-temporal stores */
     for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+        vsdlss_perm2_stream_min=streamed?0:1e300;
         vsdlss_m3_inverse_force64=wide;
         CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
         f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
@@ -359,7 +362,7 @@ static int two_pass_permutation(void)
         for(csi i=0;i<n;i++) CHECK(x[i]==55);
         vsdlss_m3_factor_free(f);
     }
-    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min;
+    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_stream_min=-1;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
     return 0;

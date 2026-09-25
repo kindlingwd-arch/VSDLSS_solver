@@ -453,16 +453,32 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
 
 /* x holds the core solution at x[core_vertices[k]]; the eliminated entries
  * are recovered in reverse order with the arithmetic of reduce_recover. */
+static vsdlss_status backward_replay(const vsdlss_reduction *r, const double *saved, double *x);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const double *saved,
                                              double *x)
 {
-    csi k, stop=0; int bad=0, nt;
     if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count && r->records)) return VSDLSS_ERR_INVALID;
-    for(k=0;k<r->core_n;k++) {
+    for(csi k=0;k<r->core_n;k++) {
         csi vertex=r->core_vertices[k];
         if(vertex<0 || vertex>=r->n) return VSDLSS_ERR_INVALID;
         if(!isfinite(x[vertex])) return VSDLSS_ERR_NONFINITE;
     }
+    return backward_replay(r,saved,x);
+}
+
+/* Same, for a caller that has just written every core value and checked it
+ * is finite (the M3 in-memory solve): skips the scan over the core, a
+ * scattered pass over the vector. */
+vsdlss_status vsdlss_reduce_backward_core_checked(const vsdlss_reduction *r, const double *saved,
+                                                  double *x)
+{
+    if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count && r->records)) return VSDLSS_ERR_INVALID;
+    return backward_replay(r,saved,x);
+}
+
+static vsdlss_status backward_replay(const vsdlss_reduction *r, const double *saved, double *x)
+{
+    csi k, stop=0; int bad=0, nt;
     nt=vsdlss_parallel_width((double)r->n*4);
     (void)nt;
     if(!r->records && r->count) {

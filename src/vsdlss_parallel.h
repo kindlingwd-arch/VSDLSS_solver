@@ -20,4 +20,6 @@ int vsdlss_parallel_set_budget(int threads);
 void *vsdlss_big_malloc(size_t bytes);
 void *vsdlss_big_calloc(size_t count, size_t size);
 void vsdlss_parallel_observe(void); /* master thread only */
+/* Size of the last-level (L3) cache in bytes, 0 when unknown. */
+size_t vsdlss_llc_bytes(void);
 #endif

@@ -10,6 +10,9 @@
 #if defined(__GLIBC__)
 #include <malloc.h>
 #endif
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 /* VSDLSS_TRACE=1 prints the facade's phase times to stderr. */
 static double trace_now(void)
@@ -87,7 +90,7 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     vsdlss_components_free(factor->components);
     free(factor->inv32); free(factor->inv64);
     for(k=0;k<VSDLSS_PERM_PLAN_SLOTS;k++) perm_plan_free(atomic_load(&factor->pplan[k]));
-    free(factor->pbuf);
+    free(factor->pbuf); free(factor->pscr_block);
     free(factor);
 }
 
@@ -534,7 +537,9 @@ static vsdlss_status solve_local(void *vctx, csi c)
         }
     }
     TRACE("solve: core",t0);
-    status=vsdlss_reduce_backward_inplace(r,w->saved,local);
+    /* The in-memory core write-back above checked every core value. */
+    status=core&&!cf->disk?vsdlss_reduce_backward_core_checked(r,w->saved,local)
+                          :vsdlss_reduce_backward_inplace(r,w->saved,local);
     TRACE("solve: reduce backward",t0);
     return status;
 }
@@ -597,7 +602,18 @@ static void write_back_inverse(const solve_ctx *x)
  * the direct loop.  Pure copies: results are bitwise those of the direct
  * loops.  A plan (per thread count: each thread's slot range per bucket, and
  * each slot's offset in its block) depends only on the permutation, so it is
- * built on first use and kept with the factor.  VSDLSS_PERM2=0 disables. */
+ * built on first use and kept with the factor.  VSDLSS_PERM2=0 disables.
+ *
+ * Memory traffic (both passes are bandwidth bound): the plan keeps each
+ * element's destination bucket as 16 bits (pass 1 otherwise reads the
+ * 32-bit inverse code or the 64-bit map); pass 1 stages each bucket's
+ * current 64-byte line and writes full lines with non-temporal stores; pass
+ * 2 assembles a destination block in a cache-resident scratch and streams
+ * it out.  Neither the bucket buffer nor the destination is then read
+ * before it is written (no read-for-ownership).  22.9M-node VDD/GND case:
+ * gather + write-back 0.44 -> 0.22 s on 1 thread, 0.14 -> 0.08 s on 4
+ * (docs/reconstruction/solve-nonkernel-20260925.md).  Streaming is for
+ * vectors larger than the cache only (stream_min_bytes). */
 #define PERM_SH 15
 #define PERM_MASK (((csi)1<<PERM_SH)-1)
 /* Smallest n using the two-pass path (tests lower it). */
@@ -608,12 +624,14 @@ typedef struct vsdlss_perm_plan {
     csi *posG, *posW;            /* T*B: first buffer slot of (thread, bucket) */
     csi *bstartG, *bstartW;      /* B+1: first slot of each bucket */
     uint16_t *offG, *offW;       /* n: destination offset of each slot in its block */
+    uint16_t *bktG, *bktW;       /* n: bucket of each source element (global / packed order) */
 } vsdlss_perm_plan;
 
 static void perm_plan_free(struct vsdlss_perm_plan *p)
 {
     if(!p) return;
-    free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW); free(p->offG); free(p->offW); free(p);
+    free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW); free(p->offG); free(p->offW);
+    free(p->bktG); free(p->bktW); free(p);
 }
 
 static int perm2_on(void)
@@ -647,8 +665,11 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
     pl->posG=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi)); pl->posW=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi));
     pl->bstartG=(csi*)malloc((size_t)(B+1)*sizeof(csi)); pl->bstartW=(csi*)malloc((size_t)(B+1)*sizeof(csi));
     pl->offG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->offW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
+    pl->bktG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->bktW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
     csi *q=(csi*)malloc((size_t)T*(size_t)B*2*sizeof(csi));
-    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->offG||!pl->offW||!q) { free(q); perm_plan_free(pl); return NULL; }
+    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->offG||!pl->offW||!pl->bktG||!pl->bktW||!q) {
+        free(q); perm_plan_free(pl); return NULL;
+    }
     VSDLSS_OMP(omp parallel num_threads(T))
     {
 #ifdef _OPENMP
@@ -658,12 +679,12 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
 #endif
         const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
         csi *cg=pl->posG+(size_t)t*B, *cw=pl->posW+(size_t)t*B;
-        for(csi g=lo;g<hi;g++) cg[packed_of(f,g)>>PERM_SH]++;
+        for(csi g=lo;g<hi;g++) { csi b=packed_of(f,g)>>PERM_SH; pl->bktG[g]=(uint16_t)b; cg[b]++; }
         if(lo<hi) {
             csi c=comp_of(f,lo); const csi *map=component_map(f,c);
             for(csi p=lo;p<hi;p++) {
                 while(p>=off[c+1]) { c++; map=component_map(f,c); }
-                cw[map[p-off[c]]>>PERM_SH]++;
+                csi b=map[p-off[c]]>>PERM_SH; pl->bktW[p]=(uint16_t)b; cw[b]++;
             }
         }
         VSDLSS_OMP(omp barrier)
@@ -700,6 +721,7 @@ static const vsdlss_perm_plan *perm_plan_get(const vsdlss_m3_factor *fc, int T)
 {
     vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
     if(T<1 || T>=VSDLSS_PERM_PLAN_SLOTS) return NULL;
+    if((f->n>>PERM_SH)+1>65536) return NULL;         /* buckets must fit 16 bits */
     vsdlss_perm_plan *pl=atomic_load(&f->pplan[T]);
     if(pl) return pl;
     pl=perm_plan_build(f,T);
@@ -709,14 +731,112 @@ static const vsdlss_perm_plan *perm_plan_get(const vsdlss_m3_factor *fc, int T)
     return pl;
 }
 
-/* Scratch vector of n doubles; NULL when a concurrent solve holds it. */
-static double *pbuf_acquire(const vsdlss_m3_factor *fc)
+#define PERM_LINE 8                                 /* doubles per 64-byte line */
+/* Non-temporal stores (SSE2); plain stores elsewhere.  stream_fence orders
+ * a thread's streamed stores before the barrier that publishes them. */
+static inline void stream_line(double *dst, const double *src)   /* dst 64-byte aligned */
+{
+#if defined(__SSE2__)
+    _mm_stream_pd(dst,_mm_load_pd(src)); _mm_stream_pd(dst+2,_mm_load_pd(src+2));
+    _mm_stream_pd(dst+4,_mm_load_pd(src+4)); _mm_stream_pd(dst+6,_mm_load_pd(src+6));
+#else
+    memcpy(dst,src,PERM_LINE*sizeof(double));
+#endif
+}
+static void stream_copy(double *dst, const double *src, csi len)
+{
+#if defined(__SSE2__)
+    csi i=0;
+    if(((uintptr_t)dst&15) && len>0) { dst[0]=src[0]; i=1; }
+    if(((uintptr_t)(dst+i)&15)==0) {
+        for(;i+2<=len;i+=2) _mm_stream_pd(dst+i,_mm_loadu_pd(src+i));
+    }
+    for(;i<len;i++) dst[i]=src[i];
+#else
+    memcpy(dst,src,(size_t)len*sizeof(double));
+#endif
+}
+static inline void stream_fence(void)
+{
+#if defined(__SSE2__)
+    _mm_sfence();
+#endif
+}
+
+/* Vectors of at least this many bytes are moved with non-temporal stores
+ * (default: twice the last-level cache, 64 MB when unknown; the environment
+ * variable VSDLSS_STREAM_MIN overrides it).  Smaller ones stay in cache
+ * for the loop that reads them next, so plain stores are better there. */
+double vsdlss_perm2_stream_min = -1;         /* < 0: as above (tests set it) */
+static double stream_min_bytes(void)
+{
+    static double v=-1;
+    if(vsdlss_perm2_stream_min>=0) return vsdlss_perm2_stream_min;
+    if(v<0) {
+        const char *e=getenv("VSDLSS_STREAM_MIN");
+        const size_t l3=vsdlss_llc_bytes();
+        double m=l3?2.0*(double)l3:64.0*1024*1024;
+        if(e && *e) m=atof(e);
+        v=m;
+    }
+    return v;
+}
+
+/* Per-thread scratch of the passes: B staging lines, then one block. */
+static size_t pscr_stride(csi B)
+{ return (size_t)B*PERM_LINE+((size_t)1<<PERM_SH); }
+
+/* Scratch vector of n doubles and the plan's per-thread scratch (64-byte
+ * aligned); NULL when a concurrent solve holds them. */
+static double *pbuf_acquire(const vsdlss_m3_factor *fc, const vsdlss_perm_plan *pl)
 {
     vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
+    const size_t need=(size_t)pl->T*pscr_stride(pl->B);
     if(atomic_exchange(&f->pbuf_busy,1)) return NULL;
     if(!f->pbuf) f->pbuf=(double*)vsdlss_big_malloc((size_t)f->n*sizeof(double));
-    if(!f->pbuf) atomic_store(&f->pbuf_busy,0);
+    if(f->pbuf && f->pscr_len<need) {
+        free(f->pscr_block); f->pscr_block=NULL; f->pscr=NULL; f->pscr_len=0;
+        f->pscr_block=malloc(need*sizeof(double)+64);
+        if(f->pscr_block) {
+            f->pscr=(double*)(((uintptr_t)f->pscr_block+63)&~(uintptr_t)63);
+            f->pscr_len=need;
+        }
+    }
+    if(!f->pbuf || !f->pscr) { atomic_store(&f->pbuf_busy,0); return NULL; }
     return f->pbuf;
+}
+
+/* Pass 1 of both directions: buf[q[bkt[i]]++] = src[i-soff] for i in [lo, hi),
+ * through one staging line per bucket.  first[b] is this thread's first
+ * slot of bucket b: a line that starts before it is shared with the
+ * previous thread, so only this thread's slots of it are stored (plainly). */
+static void perm_pass1(const double *restrict src, csi soff, const uint16_t *restrict bkt, csi lo, csi hi,
+                       double *restrict buf, csi *restrict q, const csi *restrict first,
+                       csi B, double *restrict stage, int streamed)
+{
+    /* a0: slot index of the first 64-byte boundary in buf, modulo 8. */
+    const csi a0=(csi)(((64-((uintptr_t)buf&63))&63)/sizeof(double));
+    if(!streamed || ((uintptr_t)buf&7)) {             /* plain stores */
+        for(csi i=lo;i<hi;i++) buf[q[bkt[i]]++]=src[i-soff];
+        return;
+    }
+    for(csi i=lo;i<hi;i++) {
+        const csi b=bkt[i], pos=q[b]++, sl=(pos-a0)&(PERM_LINE-1);
+        double *st=stage+(size_t)b*PERM_LINE;
+        st[sl]=src[i-soff];
+        if(sl==PERM_LINE-1) {
+            const csi ls=pos-(PERM_LINE-1);
+            if(ls>=first[b]) stream_line(buf+ls,st);
+            else for(csi k=first[b];k<=pos;k++) buf[k]=st[(k-a0)&(PERM_LINE-1)];
+        }
+    }
+    for(csi b=0;b<B;b++) {                            /* partial last lines */
+        const csi end=q[b], part=(end-a0)&(PERM_LINE-1);
+        csi k=end-part; if(k<first[b]) k=first[b];
+        const double *st=stage+(size_t)b*PERM_LINE;
+        for(;k<end;k++) buf[k]=st[(k-a0)&(PERM_LINE-1)];
+    }
+    stream_fence();
 }
 static void pbuf_release(const vsdlss_m3_factor *fc)
 { atomic_store(&((vsdlss_m3_factor*)fc)->pbuf_busy,0); }
@@ -724,9 +844,10 @@ static void pbuf_release(const vsdlss_m3_factor *fc)
 /* loc[c][i] = rhs[component_map(c)[i]] for all components; returns 1 when a
  * gathered value is not finite (the direct gather's check). */
 static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, const double *rhs,
-                        double *buf, double *const *loc, csi *q)
+                        double *buf, double *const *loc, csi *q, double *scr)
 {
     const csi n=f->n, B=pl->B, chunk=pl->chunk, *off=f->components->offset;
+    const int streamed=(double)n*sizeof(double)>=stream_min_bytes();
     int bad=0;
     VSDLSS_OMP(omp parallel num_threads(pl->T) reduction(|:bad))
     {
@@ -737,8 +858,9 @@ static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, c
 #endif
         const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
         csi *qt=q+(size_t)t*B;
+        double *stage=scr+(size_t)t*pscr_stride(B), *blk=stage+(size_t)B*PERM_LINE;
         memcpy(qt,pl->posG+(size_t)t*B,(size_t)B*sizeof(csi));
-        for(csi g=lo;g<hi;g++) buf[qt[packed_of(f,g)>>PERM_SH]++]=rhs[g];
+        perm_pass1(rhs,0,pl->bktG,lo,hi,buf,qt,pl->posG+(size_t)t*B,B,stage,streamed);
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp for schedule(dynamic,4))
         for(csi b=0;b<B;b++) {
@@ -747,8 +869,10 @@ static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, c
             if(k0==k1) continue;
             const csi c=comp_of(f,p0);
             if(pend<=off[c+1]) {                       /* block inside one component */
-                double *d=loc[c]+(p0-off[c]);
+                /* Every slot of the block is written once (a permutation). */
+                double *d=streamed?blk:loc[c]+(p0-off[c]);
                 for(csi k=k0;k<k1;k++) { double v=buf[k]; d[pl->offG[k]]=v; bad|=!isfinite(v); }
+                if(streamed) stream_copy(loc[c]+(p0-off[c]),blk,pend-p0);
             } else {
                 for(csi k=k0;k<k1;k++) {
                     const csi p=p0+pl->offG[k], cc=comp_of(f,p); double v=buf[k];
@@ -756,15 +880,17 @@ static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, c
                 }
             }
         }
+        stream_fence();
     }
     return bad;
 }
 
 /* out[component_map(c)[i]] = loc[c][i] for all components. */
 static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, double *buf,
-                            double *const *loc, double *out, csi *q)
+                            double *const *loc, double *out, csi *q, double *scr)
 {
     const csi n=f->n, B=pl->B, chunk=pl->chunk, *off=f->components->offset;
+    const int streamed=(double)n*sizeof(double)>=stream_min_bytes();
     VSDLSS_OMP(omp parallel num_threads(pl->T))
     {
 #ifdef _OPENMP
@@ -774,21 +900,28 @@ static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *p
 #endif
         const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
         csi *qt=q+(size_t)t*B;
+        double *stage=scr+(size_t)t*pscr_stride(B), *blk=stage+(size_t)B*PERM_LINE;
         memcpy(qt,pl->posW+(size_t)t*B,(size_t)B*sizeof(csi));
         if(lo<hi) {
-            csi c=comp_of(f,lo); const csi *map=component_map(f,c); const double *l=loc[c];
-            for(csi p=lo;p<hi;p++) {
-                while(p>=off[c+1]) { c++; map=component_map(f,c); l=loc[c]; }
-                const csi i=p-off[c];
-                buf[qt[map[i]>>PERM_SH]++]=l[i];
+            /* Packed range [lo, hi) component by component (the source of
+             * packed position p is loc[c][p - off[c]]). */
+            csi c=comp_of(f,lo), p=lo;
+            while(p<hi) {
+                const csi e=off[c+1]<hi?off[c+1]:hi;
+                perm_pass1(loc[c],off[c],pl->bktW,p,e,buf,qt,pl->posW+(size_t)t*B,B,stage,streamed);
+                p=e; c++;
             }
         }
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp for schedule(dynamic,4))
         for(csi b=0;b<B;b++) {
-            double *d=out+(b<<PERM_SH);
+            const csi g0=b<<PERM_SH, len=g0+PERM_MASK+1<n?PERM_MASK+1:n-g0;
+            /* Every slot of the block is written once (a permutation). */
+            double *d=streamed?blk:out+g0;
             for(csi k=pl->bstartW[b];k<pl->bstartW[b+1];k++) d[pl->offW[k]]=buf[k];
+            if(streamed) stream_copy(out+g0,blk,len);
         }
+        stream_fence();
     }
 }
 
@@ -818,10 +951,10 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         int T=vsdlss_parallel_width((double)factor->n*4);
         pl=perm_plan_get(factor,T);
         if(pl) pq=(csi*)malloc((size_t)pl->T*(size_t)pl->B*sizeof(csi));
-        if(pl && pq) pbuf=pbuf_acquire(factor);
+        if(pl && pq) pbuf=pbuf_acquire(factor,pl);
         if(pbuf) {
             double tg=trace_now();
-            int bad=perm2_gather(factor,pl,rhs,pbuf,loc,pq);
+            int bad=perm2_gather(factor,pl,rhs,pbuf,loc,pq,factor->pscr);
             TRACE("solve: two-pass gather",tg);
             if(bad) { status=VSDLSS_ERR_NONFINITE; goto done; }
             ctx.pregathered=1;
@@ -830,7 +963,7 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
     double t0=trace_now();
-    if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq);
+    if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq,factor->pscr);
     else if(inverse) write_back_inverse(&ctx);
     else run_components(factor,factor->disk_mode,scatter_local,&ctx,results);
     TRACE("solve: scatter",t0);

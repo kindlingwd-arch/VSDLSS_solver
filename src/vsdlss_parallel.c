@@ -5,6 +5,9 @@
 #if defined(__linux__)
 #include <sys/mman.h>
 #endif
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 #define BIG_HINT_BYTES ((size_t)8<<20)
 static void big_hint(void *p,size_t bytes)
 {
@@ -19,6 +22,14 @@ static void big_hint(void *p,size_t bytes)
 #else
     (void)p;(void)bytes;
 #endif
+}
+size_t vsdlss_llc_bytes(void)
+{
+#if defined(_SC_LEVEL3_CACHE_SIZE)
+    long l3=sysconf(_SC_LEVEL3_CACHE_SIZE);
+    if(l3>0) return (size_t)l3;
+#endif
+    return 0;
 }
 void *vsdlss_big_malloc(size_t bytes){void *p=malloc(bytes);big_hint(p,bytes);return p;}
 void *vsdlss_big_calloc(size_t count,size_t size)

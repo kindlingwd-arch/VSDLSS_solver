@@ -125,6 +125,8 @@ struct vsdlss_m3_factor {
 #define VSDLSS_PERM_PLAN_SLOTS 65
     _Atomic(struct vsdlss_perm_plan *) pplan[VSDLSS_PERM_PLAN_SLOTS];
     double *pbuf;
+    double *pscr; size_t pscr_len;      /* per-thread pass scratch (64-byte aligned), taken with pbuf */
+    void *pscr_block;                   /* allocation holding pscr */
     atomic_int pbuf_busy;
 };
 
@@ -181,6 +183,7 @@ extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
+extern double vsdlss_perm2_stream_min; /* tests: smallest vector (bytes) moved with streaming stores; < 0 automatic */
 extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's
@@ -201,6 +204,9 @@ vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *, vsdlss_reduction *
  * use the same work/x vector, untouched between them except at core vertices. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
+/* Same without the finiteness scan of the core entries of x, which the
+ * caller has already checked. */
+vsdlss_status vsdlss_reduce_backward_core_checked(const vsdlss_reduction *, const double *saved, double *x);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
 /* Compose an elimination-tree postorder into (q, pinv) for matrix A (the
