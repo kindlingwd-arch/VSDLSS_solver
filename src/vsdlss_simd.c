@@ -166,6 +166,28 @@ SIMD_FN int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, 
             _mm256_movemask_pd(_mm256_cmp_pd(y, y, _CMP_UNORD_Q))) != 0;
 }
 
+SIMD_FN int vsdlss_simd_dot_tail(const double *c0, csi ld, const double *xg, csi n, double *v, int k)
+{
+    const double *c1 = k > 1 ? c0 + ld : c0, *c2 = k > 2 ? c0 + 2 * ld : c0, *c3 = c0;
+    __m256d acc = _mm256_set_pd(0.0, k > 2 ? v[2] : 0.0, k > 1 ? v[1] : 0.0, v[0]);
+    csi r = 0;
+    for (; r + 4 <= n; r += 4) {
+        __m256d q0, q1, q2, q3;
+        TRANSPOSE4(_mm256_loadu_pd(c0 + r), _mm256_loadu_pd(c1 + r), _mm256_loadu_pd(c2 + r),
+                   _mm256_loadu_pd(c3 + r), q0, q1, q2, q3);
+        acc = SUBMUL(acc, q0, _mm256_set1_pd(xg[r]));
+        acc = SUBMUL(acc, q1, _mm256_set1_pd(xg[r + 1]));
+        acc = SUBMUL(acc, q2, _mm256_set1_pd(xg[r + 2]));
+        acc = SUBMUL(acc, q3, _mm256_set1_pd(xg[r + 3]));
+    }
+    for (; r < n; ++r)
+        acc = SUBMUL(acc, _mm256_set_pd(c3[r], c2[r], c1[r], c0[r]), _mm256_set1_pd(xg[r]));
+    double t[4]; _mm256_storeu_pd(t, acc);
+    int bad = 0;
+    for (int i = 0; i < k; ++i) { v[i] = t[i]; bad |= t[i] - t[i] != 0; }
+    return bad;
+}
+
 #else   /* no x86 GCC-compatible compiler: scalar paths only */
 int vsdlss_simd_enabled(void) { return 0; }
 void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
@@ -180,4 +202,6 @@ int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
 int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
+int vsdlss_simd_dot_tail(const double *c0, csi ld, const double *xg, csi n, double *v, int k)
+{ (void)c0; (void)ld; (void)xg; (void)n; (void)v; (void)k; abort(); }
 #endif

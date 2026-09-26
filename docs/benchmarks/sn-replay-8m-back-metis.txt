@@ -1,0 +1,36 @@
+prev all	179.924	213.408
+prev 1-6	38.913	44.678
+prev 7-32	111.689	125.585
+prev 33-128	32.973	38.481
+prev >128	28.517	29.383
+prev # hash forward=1f4b15f66a068a89 forward+backward=b644e2c982f72cd9
+final all	184.051	185.278
+final 1-6	37.858	40.433
+final 7-32	108.642	105.228
+final 33-128	32.921	38.286
+final >128	26.712	26.056
+final # hash forward=1f4b15f66a068a89 forward+backward=b644e2c982f72cd9
+prev all	180.156	210.210
+prev 1-6	38.305	44.324
+prev 7-32	120.321	135.225
+prev 33-128	37.269	39.882
+prev >128	27.238	27.193
+prev # hash forward=1f4b15f66a068a89 forward+backward=b644e2c982f72cd9
+final all	186.326	188.657
+final 1-6	39.078	41.970
+final 7-32	110.450	108.373
+final 33-128	32.586	38.342
+final >128	27.186	26.707
+final # hash forward=1f4b15f66a068a89 forward+backward=b644e2c982f72cd9
+prev all	181.080	211.232
+prev 1-6	40.723	46.086
+prev 7-32	110.664	127.198
+prev 33-128	31.786	36.471
+prev >128	27.087	26.802
+prev # hash forward=1f4b15f66a068a89 forward+backward=b644e2c982f72cd9
+final all	184.638	185.232
+final 1-6	38.791	41.478
+final 7-32	109.708	106.774
+final 33-128	33.406	38.581
+final >128	27.068	26.749
+final # hash forward=1f4b15f66a068a89 forward+backward=b644e2c982f72cd9

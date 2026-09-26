@@ -25,5 +25,9 @@ int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *
 /* Same for eight columns (k = 0..7): two independent accumulators, so the
  * add latency chain is shared by twice as many entries as in dot4. */
 int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v);
+/* Same for the last k = 1..3 columns (k*ld beyond c0 need not exist): the
+ * unused lanes repeat column 0 and are discarded, so each of the k results
+ * is bitwise the scalar loop's. */
+int vsdlss_simd_dot_tail(const double *c0, csi ld, const double *xg, csi n, double *v, int k);
 
 #endif

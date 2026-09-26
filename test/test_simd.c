@@ -50,6 +50,13 @@ int main(void)
             for(int k=0;k<4;k++){double t=w[k];for(csi r=0;r<n;r++)t-=a[k*rs+r]*x[r];w[k]=t;}
             CHECK(memcmp(v,w,4*8)==0 && bad==0);
         }
+        for(int k=1;k<=3&&k<=ws;k++){
+            for(int i=0;i<k;i++)v[i]=w[i]=uni();
+            v[k]=w[k]=7.0;   /* must stay untouched */
+            int bad=vsdlss_simd_dot_tail(a,rs,x,n,v,k);
+            for(int i=0;i<k;i++){double t=w[i];for(csi r=0;r<n;r++)t-=a[i*rs+r]*x[r];w[i]=t;}
+            CHECK(memcmp(v,w,(size_t)(k+1)*8)==0 && bad==0);
+        }
         if(ws>=8){
             for(int k=0;k<8;k++)v[k]=w[k]=uni();
             int bad=vsdlss_simd_dot8(a,rs,x,n,v);
@@ -69,6 +76,8 @@ int main(void)
     x[5]=NAN; CHECK(vsdlss_simd_dot8(a,64,x,8,v)==1);
     x[5]=1; for(int k=0;k<8;k++)v[k]=0;
     CHECK(vsdlss_simd_dot8(a,64,x,8,v)==0);
+    x[2]=INFINITY; v[0]=v[1]=0; CHECK(vsdlss_simd_dot_tail(a,64,x,8,v,2)==1);
+    x[2]=1; v[0]=v[1]=0; CHECK(vsdlss_simd_dot_tail(a,64,x,8,v,2)==0);
     free(x);free(y);free(a);free(xs);free(v);free(w);free(R);
     puts("test_simd: kernels bitwise equal to the scalar loops (2000 random cases)");
     return 0;
