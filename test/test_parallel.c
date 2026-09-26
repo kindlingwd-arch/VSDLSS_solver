@@ -326,7 +326,8 @@ static int internal_order_solve(void)
 /* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
  * takes it: several buckets, many small components, blocks straddling
  * components) against the direct loops: the same bits for every thread
- * count, both inverse-map widths, plain and non-temporal stores, cached plans, aliasing; a non-finite
+ * count, both inverse-map widths, plain and non-temporal stores, block
+ * sizes 2^8..2^16 and the measured choice (which must settle on one plan), cached plans, aliasing; a non-finite
  * RHS fails and leaves the output untouched. */
 static int two_pass_permutation(void)
 {
@@ -343,7 +344,10 @@ static int two_pass_permutation(void)
     vsdlss_m3_factor_free(f);
     vsdlss_perm2_min=1;
     int maxt=vsdlss_parallel_enabled()?4:1;
-    for(int nt=0;nt<2;nt++) for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+    static const int shifts[]={0,8,12,15,16,-1};    /* L2 rule, fixed blocks, measured */
+    for(int si=0;si<6;si++) for(int nt=0;nt<2;nt++) for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+        if(si<5 && (nt!=wide)) continue;              /* keep the sweep short */
+        vsdlss_perm2_shift=shifts[si];
         vsdlss_m3_inverse_force64=wide;
         vsdlss_perm2_nt_min=nt?1:(csi)1<<62;          /* non-temporal stores or plain */
         CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
@@ -351,6 +355,13 @@ static int two_pass_permutation(void)
         for(int rep=0;rep<2;rep++){                 /* second call: cached plan */
             CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
             CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        if(shifts[si]==-1) {                        /* measurement runs to its decision */
+            for(int rep=0;rep<8;rep++){
+                CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+                CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            }
+            if(t<VSDLSS_PERM_PLAN_SLOTS){ CHECK(atomic_load(&f->pplan[t])!=NULL); CHECK(f->ptune[t]==NULL); }
         }
         memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
         CHECK(memcmp(x,ref,(size_t)n*8)==0);
@@ -361,6 +372,7 @@ static int two_pass_permutation(void)
         vsdlss_m3_factor_free(f);
     }
     vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_nt_min=saved_nt;
+    vsdlss_perm2_shift=0;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
     return 0;

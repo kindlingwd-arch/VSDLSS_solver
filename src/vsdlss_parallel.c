@@ -2,6 +2,9 @@
 #include "vsdlss_parallel.h"
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #if defined(__linux__)
 #include <sys/mman.h>
 #endif
@@ -70,3 +73,38 @@ void vsdlss_parallel_observe(void)
 static _Thread_local int dag_enabled=0;
 void vsdlss_set_dag_enabled(int enabled){dag_enabled=enabled!=0;}
 int vsdlss_get_dag_enabled(void){return dag_enabled;}
+
+/* Per-core L2 size in bytes, 0 when unknown: sysconf, else the first
+ * level-2 data or unified cache under /sys (cpu0).  Cached. */
+long vsdlss_l2_cache_bytes(void)
+{
+    static long cached=-1;
+    long v=__atomic_load_n(&cached,__ATOMIC_RELAXED);
+    if(v>=0) return v;
+    v=0;
+#ifdef _SC_LEVEL2_CACHE_SIZE
+    { long s=sysconf(_SC_LEVEL2_CACHE_SIZE); if(s>0) v=s; }
+#endif
+#if defined(__linux__)
+    for(int i=0;i<8 && v<=0;i++) {
+        char path[96], buf[32]; FILE *fp; int level=0;
+        snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/level",i);
+        if(!(fp=fopen(path,"r"))) break;
+        if(fscanf(fp,"%d",&level)!=1) level=0;
+        fclose(fp);
+        if(level!=2) continue;
+        snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/type",i);
+        if((fp=fopen(path,"r"))) { if(fgets(buf,sizeof buf,fp) && !strncmp(buf,"Instruction",11)) level=0; fclose(fp); }
+        if(level!=2) continue;
+        snprintf(path,sizeof path,"/sys/devices/system/cpu/cpu0/cache/index%d/size",i);
+        if((fp=fopen(path,"r"))) {
+            long k=0; char unit=0;
+            if(fscanf(fp,"%ld%c",&k,&unit)>=1) v=unit=='M'?k<<20:unit=='K'?k<<10:k;
+            fclose(fp);
+        }
+    }
+#endif
+    if(v<0) v=0;
+    __atomic_store_n(&cached,v,__ATOMIC_RELAXED);
+    return v;
+}

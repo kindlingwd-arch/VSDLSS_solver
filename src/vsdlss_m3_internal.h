@@ -125,6 +125,9 @@ struct vsdlss_m3_factor {
      * pbuf_len doubles, 64-byte aligned) taken with an atomic flag. */
 #define VSDLSS_PERM_PLAN_SLOTS 65
     _Atomic(struct vsdlss_perm_plan *) pplan[VSDLSS_PERM_PLAN_SLOTS];
+    /* Block-size measurement in progress per thread count (auto mode);
+     * touched only while holding pbuf_busy. */
+    struct vsdlss_perm_tune *ptune[VSDLSS_PERM_PLAN_SLOTS];
     double *pbuf;
     size_t pbuf_len;
     atomic_int pbuf_busy;
@@ -184,6 +187,7 @@ extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
 extern csi vsdlss_perm2_nt_min;      /* tests: smallest n for its non-temporal stores */
+extern int vsdlss_perm2_shift;       /* tests: 0 env/L2 rule, -1 measure, 8..16 fixed block 2^k */
 extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's
