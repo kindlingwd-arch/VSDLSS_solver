@@ -22,5 +22,8 @@ void vsdlss_simd_axpy_neg(double *y, const double *c, double s, csi n);
  *   v[k] -= c_k[r] * xg[r] for r ascending in [0, n).
  * Returns 1 when a result is not finite. */
 int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *v);
+/* Same for eight columns (k = 0..7): two independent accumulators, so the
+ * add latency chain is shared by twice as many entries as in dot4. */
+int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v);
 
 #endif

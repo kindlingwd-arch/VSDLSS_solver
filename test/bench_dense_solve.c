@@ -37,7 +37,8 @@ static int cmp(const void*a,const void*b){double x=*(const double*)a,y=*(const d
 
 /* Compute-only transcription of the current generic/simd_back_narrow paths:
  * contiguous external vector, no sparse index/gather or heap allocation.
- * Retains checks, 128-row forward tile, dot4, and per-element operation order.
+ * Retains checks, 128-row forward tile, dot4/dot8, blocked backward diagonal
+ * and per-element operation order.
  * Not a proposed replacement implementation. */
 static int native_core(problem*p,double*x)
 {
@@ -53,17 +54,28 @@ static int native_core(problem*p,double*x)
         for(int r=0;r<e;r+=128){
             int len=e-r<128?e-r:128;double v[128];
             memcpy(v,x+w+r,(size_t)len*8);
-            for(int j=0;j<w;j++)vsdlss_simd_axpy_neg(v,a+(size_t)j*ld+w+r,x[j],len);
+            for(int j0=0;j0<w;j0+=16)vsdlss_simd_block_update_contig(a+w+r,ld,j0,j0+16<w?j0+16:w,x,0,len,v);
             for(int i=0;i<len;i++){x[w+r+i]=v[i];bad|=!isfinite(v[i]);}
         }
     }else{
         int j=0;
+        for(;j+8<=w;j+=8)bad|=vsdlss_simd_dot8(a+(size_t)j*ld+w,ld,x+w,e,x+j);
         for(;j+4<=w;j+=4)bad|=vsdlss_simd_dot4(a+(size_t)j*ld+w,ld,x+w,e,x+j);
         for(;j<w;j++){double v=x[j];for(int r=0;r<e;r++)v-=a[(size_t)j*ld+w+r]*x[w+r];x[j]=v;bad|=!isfinite(v);}
-        for(int j=w;j-->0;){
-            double d=a[(size_t)j*ld+j],v=x[j];if(!isfinite(d)||d<=0)return 0;
-            for(int i=j+1;i<w;i++)v-=a[(size_t)j*ld+i]*x[i];
-            x[j]=v/d;bad|=!isfinite(x[j]);
+        /* Blocked diagonal (32-column blocks, below-block dot8/dot4 first). */
+        for(int k0=(w-1)/32*32;w>0;k0-=32){
+            int k1=k0+32<w?k0+32:w,j=k0;
+            if(k1<w){
+                for(;j+8<=k1;j+=8)bad|=vsdlss_simd_dot8(a+(size_t)j*ld+k1,ld,x+k1,w-k1,x+j);
+                for(;j+4<=k1;j+=4)bad|=vsdlss_simd_dot4(a+(size_t)j*ld+k1,ld,x+k1,w-k1,x+j);
+                for(;j<k1;j++){double v=x[j];for(int r=k1;r<w;r++)v-=a[(size_t)j*ld+r]*x[r];x[j]=v;}
+            }
+            for(j=k1;j-->k0;){
+                double d=a[(size_t)j*ld+j],v=x[j];if(!isfinite(d)||d<=0)return 0;
+                for(int i=j+1;i<k1;i++)v-=a[(size_t)j*ld+i]*x[i];
+                x[j]=v/d;bad|=!isfinite(x[j]);
+            }
+            if(k0==0)break;
         }
     }
     return !bad;

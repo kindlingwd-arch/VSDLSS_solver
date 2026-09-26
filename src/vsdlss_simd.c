@@ -136,6 +136,36 @@ SIMD_FN int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, 
     return _mm256_movemask_pd(_mm256_cmp_pd(z, z, _CMP_UNORD_Q)) != 0;
 }
 
+SIMD_FN int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
+{
+    const double *c1 = c0 + ld, *c2 = c1 + ld, *c3 = c2 + ld;
+    const double *c4 = c3 + ld, *c5 = c4 + ld, *c6 = c5 + ld, *c7 = c6 + ld;
+    __m256d lo = _mm256_loadu_pd(v), hi = _mm256_loadu_pd(v + 4);
+    csi r = 0;
+    for (; r + 4 <= n; r += 4) {
+        __m256d p0, p1, p2, p3, q0, q1, q2, q3;
+        TRANSPOSE4(_mm256_loadu_pd(c0 + r), _mm256_loadu_pd(c1 + r), _mm256_loadu_pd(c2 + r),
+                   _mm256_loadu_pd(c3 + r), p0, p1, p2, p3);
+        TRANSPOSE4(_mm256_loadu_pd(c4 + r), _mm256_loadu_pd(c5 + r), _mm256_loadu_pd(c6 + r),
+                   _mm256_loadu_pd(c7 + r), q0, q1, q2, q3);
+        const __m256d s0 = _mm256_set1_pd(xg[r]), s1 = _mm256_set1_pd(xg[r + 1]);
+        const __m256d s2 = _mm256_set1_pd(xg[r + 2]), s3 = _mm256_set1_pd(xg[r + 3]);
+        lo = SUBMUL(lo, p0, s0); hi = SUBMUL(hi, q0, s0);
+        lo = SUBMUL(lo, p1, s1); hi = SUBMUL(hi, q1, s1);
+        lo = SUBMUL(lo, p2, s2); hi = SUBMUL(hi, q2, s2);
+        lo = SUBMUL(lo, p3, s3); hi = SUBMUL(hi, q3, s3);
+    }
+    for (; r < n; ++r) {
+        const __m256d s = _mm256_set1_pd(xg[r]);
+        lo = SUBMUL(lo, _mm256_set_pd(c3[r], c2[r], c1[r], c0[r]), s);
+        hi = SUBMUL(hi, _mm256_set_pd(c7[r], c6[r], c5[r], c4[r]), s);
+    }
+    _mm256_storeu_pd(v, lo); _mm256_storeu_pd(v + 4, hi);
+    __m256d z = _mm256_sub_pd(lo, lo), y = _mm256_sub_pd(hi, hi);
+    return (_mm256_movemask_pd(_mm256_cmp_pd(z, z, _CMP_UNORD_Q)) |
+            _mm256_movemask_pd(_mm256_cmp_pd(y, y, _CMP_UNORD_Q))) != 0;
+}
+
 #else   /* no x86 GCC-compatible compiler: scalar paths only */
 int vsdlss_simd_enabled(void) { return 0; }
 void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
@@ -147,5 +177,7 @@ void vsdlss_simd_block_update_contig(const double *a, csi ld, csi j0, csi j1, co
 void vsdlss_simd_axpy_neg(double *y, const double *c, double s, csi n)
 { (void)y; (void)c; (void)s; (void)n; abort(); }
 int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *v)
+{ (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
+int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
 #endif

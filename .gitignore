@@ -45,3 +45,4 @@
 /bench_pardiso
 
 /bench_dense_solve
+/test_simd

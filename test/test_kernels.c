@@ -42,12 +42,24 @@ static vsdlss_status reference_solve(const double *a,csi begin,csi width,
         x[dest]=v;if(!isfinite(v))bad=1;
     }
     if(bad)return VSDLSS_ERR_NONFINITE;
-    if(back)for(csi j=width;j-- >0;){
-        double d=a[j*rows+j],v=x[begin+j];
-        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
-        for(csi r=j+1;r<width;r++)v-=a[j*rows+r]*x[begin+r];
-        x[begin+j]=v/d;
-        if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
+    /* Backward diagonal: 32-column blocks aligned to the top of J, bottom
+       block first; per entry, rows below the block ascending, then rows
+       inside the block ascending (the former single chain for width <= 32). */
+    if(back)for(csi k0=(width-1)/32*32;width>0;k0-=32){
+        csi k1=k0+32<width?k0+32:width;
+        for(csi j=k0;j<k1;j++){
+            double v=x[begin+j];
+            for(csi r=k1;r<width;r++)v-=a[j*rows+r]*x[begin+r];
+            x[begin+j]=v;
+        }
+        for(csi j=k1;j-- >k0;){
+            double d=a[j*rows+j],v=x[begin+j];
+            if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
+            for(csi r=j+1;r<k1;r++)v-=a[j*rows+r]*x[begin+r];
+            x[begin+j]=v/d;
+            if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
+        }
+        if(k0==0)break;
     }
     return VSDLSS_OK;
 }
@@ -120,13 +132,16 @@ static int check_solve(csi width,csi ext,int threads)
         CHECK(vsdlss_panel_solve_generic(a,0,width,ext,index,got,back)==VSDLSS_OK);
         CHECK(reference_solve(a,0,width,ext,index,want,back)==VSDLSS_OK);
         CHECK(memcmp(got,want,(size_t)n*sizeof(double))==0);
+        for(csi i=0;i<n;i++)got[i]=value(back,i);
+        CHECK(vsdlss_panel_solve(a,0,width,ext,index,got,back)==VSDLSS_OK);
+        CHECK(memcmp(got,want,(size_t)n*sizeof(double))==0);
     }
     free(a);free(got);free(want);free(index);return 0;
 }
 
 int main(void)
 {
-    static const csi widths[]={1,2,3,4,5,7,16,33};
+    static const csi widths[]={1,2,3,4,5,7,16,31,32,33,40,63,64,65,100,129};
     static const csi exts[]={1,2,3,4,5,8,127,128,129,255,256,257,300,1023,1024,1025};
     static const csi dims[]={1,2,3,4,5,7,8,9,12,17,63,64,65,130};
     static const csi tris[]={-9,-1,0,1,3,8,VSDLSS_GEMM_FULL};

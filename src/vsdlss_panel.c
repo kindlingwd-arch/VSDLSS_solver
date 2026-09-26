@@ -7,6 +7,104 @@
 
 #define VSDLSS_SOLVE_BLK 128
 #define VSDLSS_SOLVE_GATHER 1024
+#define VSDLSS_SOLVE_JB 16
+
+/* Diagonal block of the backward solve, J^T x = y, in column blocks of
+ * VSDLSS_BACK_NB aligned to the top of J.  Blocks are processed bottom-up.
+ * For each block [k0,k1) the rows below it (already solved) are applied first
+ * as independent dot products, eight or four columns at a time, then the
+ * small triangle is solved serially:
+ *
+ *   v = x[j]
+ *   v -= a[j,r]*x[r]   for r = k1..width-1 ascending   (below the block)
+ *   v -= a[j,r]*x[r]   for r = j+1..k1-1 ascending     (inside the block)
+ *   x[j] = v / a[j,j]
+ *
+ * The former loop ran r = j+1..width-1 in one ascending chain, so x[j] could
+ * not start before x[j+1] was final and the whole triangle was one serial
+ * add-latency chain.  Splitting the sum at k1 lets every column of a block
+ * accumulate its below-block part at the same time.  Panels no wider than
+ * VSDLSS_BACK_NB are one block with nothing below it and keep the former
+ * order exactly; wider ones round differently but deterministically: the
+ * order depends only on the width, and the SIMD dot kernels reproduce the
+ * scalar loops bitwise, so results do not depend on VSDLSS_SIMD or the
+ * thread count. */
+#define VSDLSS_BACK_NB 32
+
+/* One block with nothing below it: the former single ascending chain.  Kept
+ * separate so it inlines into the narrow-panel callers. */
+static inline vsdlss_status back_diag_small(const double *a,csi rows,csi width,double *x)
+{
+    for(csi j=width;j-- >0;){
+        double d=a[j*rows+j],v=x[j];
+        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
+        for(csi r=j+1;r<width;r++)v-=a[j*rows+r]*x[r];
+        x[j]=v/d;
+        if(!isfinite(x[j]))return VSDLSS_ERR_NONFINITE;
+    }
+    return VSDLSS_OK;
+}
+
+static vsdlss_status back_diag_blocked(const double *a,csi rows,csi width,double *x,int simd)
+{
+    for(csi k0=(width-1)/VSDLSS_BACK_NB*VSDLSS_BACK_NB;;k0-=VSDLSS_BACK_NB){
+        const csi k1=k0+VSDLSS_BACK_NB<width?k0+VSDLSS_BACK_NB:width,below=width-k1;
+        csi j=k0;
+        if(below){
+            if(simd){
+                for(;j+8<=k1;j+=8)(void)vsdlss_simd_dot8(a+j*rows+k1,rows,x+k1,below,x+j);
+                for(;j+4<=k1;j+=4)(void)vsdlss_simd_dot4(a+j*rows+k1,rows,x+k1,below,x+j);
+            }
+            for(;j<k1;j++){
+                const double *col=a+j*rows;double v=x[j];
+                for(csi r=k1;r<width;r++)v-=col[r]*x[r];
+                x[j]=v;
+            }
+        }
+        for(j=k1;j-- >k0;){
+            const double *col=a+j*rows;
+            double d=col[j],v=x[j];
+            if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
+            for(csi r=j+1;r<k1;r++)v-=col[r]*x[r];
+            x[j]=v/d;
+            if(!isfinite(x[j]))return VSDLSS_ERR_NONFINITE;
+        }
+        if(k0==0)return VSDLSS_OK;
+    }
+}
+
+static inline vsdlss_status back_diag(const double *a,csi rows,csi width,double *x,int simd)
+{
+    return width<=VSDLSS_BACK_NB?back_diag_small(a,rows,width,x)
+                                :back_diag_blocked(a,rows,width,x,simd);
+}
+
+/* One 128-row block of the forward external update (see below). */
+static int forward_ext_block(const double *a,csi rows,csi begin,csi width,csi ext,
+                             const csi *index,double *x,csi b,int simd)
+{
+    csi t0=b*VSDLSS_SOLVE_BLK,t1=t0+VSDLSS_SOLVE_BLK,t;int bad=0;
+    double v[VSDLSS_SOLVE_BLK];
+    if(t1>ext)t1=ext;
+    for(t=t0;t<t1;t++)v[t-t0]=x[index[t]];
+    /* SIMD: eight destinations stay in registers across VSDLSS_SOLVE_JB
+       columns at a time (ascending j), the same per-entry sequence as the
+       column-by-column loop.  Chunking j keeps one register strip from
+       touching hundreds of panel columns (measured: 2x slower at 256x4096
+       without it). */
+    if(simd)for(csi j0=0;j0<width;j0+=VSDLSS_SOLVE_JB)
+            vsdlss_simd_block_update_contig(a+width+t0,rows,j0,j0+VSDLSS_SOLVE_JB<width?j0+VSDLSS_SOLVE_JB:width,x+begin,0,t1-t0,v);
+    else for(csi j=0;j<width;j++){
+        double c=x[begin+j];
+        const double *col=a+j*rows+width;
+        for(t=t0;t<t1;t++)v[t-t0]-=col[t]*c;
+    }
+    for(t=t0;t<t1;t++){
+        x[index[t]]=v[t-t0];
+        if(!isfinite(v[t-t0]))bad=1;
+    }
+    return bad;
+}
 
 /* Panel factorization is the blocked dense kernel shared with M4. */
 vsdlss_status vsdlss_panel_factor(double *a, csi rows, csi width)
@@ -38,30 +136,20 @@ vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
        Reverse: gather the external x values once instead of re-reading them
        through index[] for every column of J. */
     if(!back) {
-        const csi blk=VSDLSS_SOLVE_BLK,nblocks=ext/blk+(ext%blk!=0);
+        const csi nblocks=ext/VSDLSS_SOLVE_BLK+(ext%VSDLSS_SOLVE_BLK!=0);
         int fnt=nt; if(fnt>nblocks)fnt=(int)nblocks;
-        if(fnt<1)fnt=1;
-        (void)fnt;
-        VSDLSS_OMP(omp parallel num_threads(fnt) if(fnt>1) reduction(|:bad))
-        {
-            VSDLSS_OMP(omp master)
-            vsdlss_parallel_observe();
-            VSDLSS_OMP(omp for schedule(static))
-            for(csi b=0;b<nblocks;b++){
-                csi t0=b*blk,t1=t0+blk,t;
-                double v[VSDLSS_SOLVE_BLK];
-                if(t1>ext)t1=ext;
-                for(t=t0;t<t1;t++)v[t-t0]=x[index[t]];
-                for(csi j=0;j<width;j++){
-                    double c=x[begin+j];
-                    const double *col=a+j*rows+width;
-                    if(simd){vsdlss_simd_axpy_neg(v,col+t0,c,t1-t0);continue;}
-                    for(t=t0;t<t1;t++)v[t-t0]-=col[t]*c;
-                }
-                for(t=t0;t<t1;t++){
-                    x[index[t]]=v[t-t0];
-                    if(!isfinite(v[t-t0]))bad=1;
-                }
+        /* No team for one block or none: entering even a one-thread
+           parallel region costs more than a narrow panel's whole solve. */
+        if(fnt<=1) {
+            for(csi b=0;b<nblocks;b++)bad|=forward_ext_block(a,rows,begin,width,ext,index,x,b,simd);
+        } else {
+            VSDLSS_OMP(omp parallel num_threads(fnt) reduction(|:bad))
+            {
+                VSDLSS_OMP(omp master)
+                vsdlss_parallel_observe();
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi b=0;b<nblocks;b++)
+                    bad|=forward_ext_block(a,rows,begin,width,ext,index,x,b,simd);
             }
         }
     } else if(ext) {
@@ -83,18 +171,21 @@ vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
             }
         } else {
             for(csi r=0;r<ext;r++)xg[r]=x[index[r]];
-            /* SIMD: columns in groups of four, one per lane, each in its
-               original accumulation order. */
-            const csi quads=simd?width/4:0;
+            /* SIMD: columns in groups of eight (one tail group of four),
+               one per lane, each in its original accumulation order. */
+            const csi octs=simd?width/8:0,quads=simd?(width-8*octs)/4:0;
             VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(|:bad))
             {
                 VSDLSS_OMP(omp master)
                 vsdlss_parallel_observe();
                 VSDLSS_OMP(omp for schedule(static))
-                for(csi q=0;q<quads;q++)
-                    bad|=vsdlss_simd_dot4(a+4*q*rows+width,rows,xg,ext,x+begin+4*q);
+                for(csi q=0;q<octs+quads;q++){
+                    csi c=q<octs?8*q:8*octs+4*(q-octs);
+                    if(q<octs)bad|=vsdlss_simd_dot8(a+c*rows+width,rows,xg,ext,x+begin+c);
+                    else bad|=vsdlss_simd_dot4(a+c*rows+width,rows,xg,ext,x+begin+c);
+                }
                 VSDLSS_OMP(omp for schedule(static))
-                for(csi t=4*quads;t<width;t++){
+                for(csi t=8*octs+4*quads;t<width;t++){
                     double v=x[begin+t];
                     const double *row_t=a+t*rows+width;
                     for(csi r=0;r<ext;r++)v-=row_t[r]*xg[r];
@@ -105,13 +196,7 @@ vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
         }
     }
     if(bad)return VSDLSS_ERR_NONFINITE;
-    if(back)for(csi j=width;j-- >0;){
-        double d=a[j*rows+j],v=x[begin+j];
-        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
-        for(csi r=j+1;r<width;r++)v-=a[j*rows+r]*x[begin+r];
-        x[begin+j]=v/d;
-        if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
-    }
+    if(back)return back_diag(a,rows,width,x+begin,simd);
     return VSDLSS_OK;
 }
 
@@ -129,6 +214,7 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
         if(!xg)return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,1);
         for(csi r=0;r<ext;r++)xg[r]=x[index[r]];
         csi q=0;
+        for(;q+8<=width;q+=8)bad|=vsdlss_simd_dot8(a+q*rows+width,rows,xg,ext,x+begin+q);
         for(;q+4<=width;q+=4)bad|=vsdlss_simd_dot4(a+q*rows+width,rows,xg,ext,x+begin+q);
         for(csi t=q;t<width;t++){
             double v=x[begin+t];
@@ -139,14 +225,7 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
         if(xg!=stack_gather)free(xg);
     }
     if(bad)return VSDLSS_ERR_NONFINITE;
-    for(csi j=width;j-- >0;){
-        double d=a[j*rows+j],v=x[begin+j];
-        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
-        for(csi r=j+1;r<width;r++)v-=a[j*rows+r]*x[begin+r];
-        x[begin+j]=v/d;
-        if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
-    }
-    return VSDLSS_OK;
+    return back_diag(a,rows,width,x+begin,1);
 }
 
 #ifdef VSDLSS_BLAS
