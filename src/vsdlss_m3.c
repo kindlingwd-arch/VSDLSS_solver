@@ -660,7 +660,12 @@ static void perm_plan_free(struct vsdlss_perm_plan *p)
 static int perm2_on(void)
 {
     static int on=-1;
-    if(on<0) { const char *e=getenv("VSDLSS_PERM2"); on=e && e[0]=='1'; }
+    /* On by default; VSDLSS_PERM2=0 disables.  The two-pass path is
+     * faster when the perm plan (~30 bytes per vertex) exceeds the
+     * available LLC per thread; set VSDLSS_PERM2=0 if profiling shows
+     * gather/write-back faster without it (e.g. on VMs with a very
+     * large shared LLC). */
+    if(on<0) { const char *e=getenv("VSDLSS_PERM2"); on=!(e && e[0]=='0'); }
     return on;
 }
 
