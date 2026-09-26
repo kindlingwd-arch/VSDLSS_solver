@@ -597,23 +597,44 @@ static void write_back_inverse(const solve_ctx *x)
  * the direct loop.  Pure copies: results are bitwise those of the direct
  * loops.  A plan (per thread count: each thread's slot range per bucket, and
  * each slot's offset in its block) depends only on the permutation, so it is
- * built on first use and kept with the factor.  VSDLSS_PERM2=0 disables. */
+ * built on first use and kept with the factor.  VSDLSS_PERM2=0 disables.
+ * 2026-09-26: pass 1 was bound by its B open store streams (977 at 32M,
+ * each a partial line with a read for ownership), about 75% of the time.
+ * It now fills one 64-byte line per bucket in a small buffer and writes
+ * whole lines, non-temporal for large n; pass 2 places a bucket in a staging
+ * block and streams it out; pass 1 reads uint16 bucket ids instead of
+ * decoding the maps.  Gather + write-back 0.130 -> 0.064 s on a 6M grid,
+ * see docs/reconstruction/perm2-wc-nt-20260926.md. */
 #define PERM_SH 15
-#define PERM_MASK (((csi)1<<PERM_SH)-1)
+#define PERM_BLK ((csi)1<<PERM_SH)
+#define PERM_MASK (PERM_BLK-1)
+#define PERM_WC 8                    /* doubles per 64-byte write-combining line */
 /* Smallest n using the two-pass path (tests lower it). */
 csi vsdlss_perm2_min = (csi)1<<20;
+/* Smallest n whose scratch and destinations are written with non-temporal
+ * stores: below it the vectors can stay in the last-level cache, and the
+ * next phase would rather find them there (tests lower it). */
+csi vsdlss_perm2_nt_min = (csi)1<<22;
 #define PERM_MIN vsdlss_perm2_min
+/* Scratch layout of one plan: each (thread, bucket) segment starts on a
+ * 64-byte line, so pass 1 can collect a line per bucket in a small L1/L2
+ * resident buffer and write whole lines (non-temporal for large n: no read
+ * for ownership of 2 x n doubles, and one open stream instead of B).  Pass 2
+ * places a bucket in a staging block and streams the block out. */
 typedef struct vsdlss_perm_plan {
-    int T; csi B, chunk;
-    csi *posG, *posW;            /* T*B: first buffer slot of (thread, bucket) */
-    csi *bstartG, *bstartW;      /* B+1: first slot of each bucket */
-    uint16_t *offG, *offW;       /* n: destination offset of each slot in its block */
+    int T; csi B, chunk, len;        /* len: padded scratch length (doubles) */
+    int nt;                          /* non-temporal stores */
+    csi *posG, *posW;                /* T*B: first scratch slot of (thread, bucket), line aligned */
+    csi *cntG, *cntW;                /* T*B: slots used by (thread, bucket) */
+    uint16_t *offG, *offW;           /* len: destination offset of each slot in its block */
+    uint16_t *bktG, *bktW;           /* n: pass-1 bucket in source order (NULL: derived) */
 } vsdlss_perm_plan;
 
 static void perm_plan_free(struct vsdlss_perm_plan *p)
 {
     if(!p) return;
-    free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW); free(p->offG); free(p->offW); free(p);
+    free(p->posG); free(p->posW); free(p->cntG); free(p->cntW);
+    free(p->offG); free(p->offW); free(p->bktG); free(p->bktW); free(p);
 }
 
 static int perm2_on(void)
@@ -621,6 +642,21 @@ static int perm2_on(void)
     static int on=-1;
     if(on<0) { const char *e=getenv("VSDLSS_PERM2"); on=!(e && e[0]=='0'); }
     return on;
+}
+/* VSDLSS_PERM2_BUCKETS=0: derive pass-1 buckets from the maps instead of
+ * keeping 2 x n uint16 bucket ids with the plan (4 bytes per vertex). */
+static int perm2_bkt_on(void)
+{
+    static int on=-1;
+    if(on<0) { const char *e=getenv("VSDLSS_PERM2_BUCKETS"); on=!(e && e[0]=='0'); }
+    return on;
+}
+/* VSDLSS_PERM2_NT=0/1 forces plain / non-temporal stores. */
+static int perm2_nt(csi n)
+{
+    const char *e=getenv("VSDLSS_PERM2_NT");
+    if(e && e[0]) return e[0]!='0';
+    return n>=vsdlss_perm2_nt_min;
 }
 
 /* Packed position of global vertex g, and the component holding packed p. */
@@ -637,18 +673,70 @@ static csi comp_of(const vsdlss_m3_factor *f, csi p)
     return lo;
 }
 
+/* ---- 64-byte line and block stores ---- */
+#if defined(__SSE2__) || defined(_M_X64)
+#include <emmintrin.h>
+#define PERM_HAVE_NT 1
+static inline void line_out(double *d, const double *s, int nt)
+{   /* d and s 64-byte aligned */
+    if(nt) {
+        _mm_stream_pd(d,_mm_load_pd(s)); _mm_stream_pd(d+2,_mm_load_pd(s+2));
+        _mm_stream_pd(d+4,_mm_load_pd(s+4)); _mm_stream_pd(d+6,_mm_load_pd(s+6));
+    } else memcpy(d,s,PERM_WC*sizeof(double));
+}
+static inline void perm_fence(int nt) { if(nt) _mm_sfence(); }
+/* Copies len doubles (d 8-byte aligned); returns 1 if any is not finite
+ * when check is set. */
+static inline int block_out(double *d, const double *s, csi len, int nt, int check)
+{
+    int bad=0; csi j=0;
+    if(check) for(csi i=0;i<len;i++) bad|=!isfinite(s[i]);
+    if(!nt) { memcpy(d,s,(size_t)len*sizeof(double)); return bad; }
+    for(;j<len && ((uintptr_t)(d+j)&15);j++) d[j]=s[j];
+    for(;j+2<=len;j+=2) _mm_stream_pd(d+j,_mm_loadu_pd(s+j));
+    for(;j<len;j++) d[j]=s[j];
+    return bad;
+}
+#else
+#define PERM_HAVE_NT 0
+static inline void line_out(double *d, const double *s, int nt)
+{ (void)nt; memcpy(d,s,PERM_WC*sizeof(double)); }
+static inline void perm_fence(int nt) { (void)nt; }
+static inline int block_out(double *d, const double *s, csi len, int nt, int check)
+{
+    int bad=0; (void)nt;
+    if(check) for(csi i=0;i<len;i++) bad|=!isfinite(s[i]);
+    memcpy(d,s,(size_t)len*sizeof(double)); return bad;
+}
+#endif
+
+/* Doubles of scratch a solve with plan pl needs: bucket buffer, then per
+ * thread a staging block and B write-combining lines. */
+static size_t perm_scratch_len(const vsdlss_perm_plan *pl)
+{
+    return (size_t)pl->len+(size_t)pl->T*((size_t)PERM_BLK+(size_t)pl->B*PERM_WC);
+}
+
 static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
 {
-    const csi n=f->n, B=(n>>PERM_SH)+1, chunk=(n+T-1)/T;
+    const csi n=f->n, B=(n+PERM_MASK)>>PERM_SH, chunk=(n+T-1)/T;
     const csi *off=f->components->offset;
+    const size_t S=(size_t)T*(size_t)B;
     vsdlss_perm_plan *pl=(vsdlss_perm_plan*)calloc(1,sizeof(*pl));
     if(!pl) return NULL;
-    pl->T=T; pl->B=B; pl->chunk=chunk;
-    pl->posG=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi)); pl->posW=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi));
-    pl->bstartG=(csi*)malloc((size_t)(B+1)*sizeof(csi)); pl->bstartW=(csi*)malloc((size_t)(B+1)*sizeof(csi));
-    pl->offG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->offW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
-    csi *q=(csi*)malloc((size_t)T*(size_t)B*2*sizeof(csi));
-    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->offG||!pl->offW||!q) { free(q); perm_plan_free(pl); return NULL; }
+    pl->T=T; pl->B=B; pl->chunk=chunk; pl->nt=PERM_HAVE_NT && perm2_nt(n);
+    pl->len=(n+(csi)S*PERM_WC+PERM_WC-1)/PERM_WC*PERM_WC;   /* keeps the tail 64-byte aligned */
+    pl->posG=(csi*)malloc(S*sizeof(csi)); pl->posW=(csi*)malloc(S*sizeof(csi));
+    pl->cntG=(csi*)calloc(S,sizeof(csi)); pl->cntW=(csi*)calloc(S,sizeof(csi));
+    pl->offG=(uint16_t*)vsdlss_big_malloc((size_t)pl->len*sizeof(uint16_t));
+    pl->offW=(uint16_t*)vsdlss_big_malloc((size_t)pl->len*sizeof(uint16_t));
+    if(B<=65536 && perm2_bkt_on()) {
+        pl->bktG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
+        pl->bktW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
+        if(!pl->bktG||!pl->bktW) { free(pl->bktG); free(pl->bktW); pl->bktG=pl->bktW=NULL; }
+    }
+    csi *q=(csi*)malloc(S*2*sizeof(csi));
+    if(!pl->posG||!pl->posW||!pl->cntG||!pl->cntW||!pl->offG||!pl->offW||!q) { free(q); perm_plan_free(pl); return NULL; }
     VSDLSS_OMP(omp parallel num_threads(T))
     {
 #ifdef _OPENMP
@@ -657,28 +745,28 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
         const int t=0;
 #endif
         const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
-        csi *cg=pl->posG+(size_t)t*B, *cw=pl->posW+(size_t)t*B;
-        for(csi g=lo;g<hi;g++) cg[packed_of(f,g)>>PERM_SH]++;
+        csi *cg=pl->cntG+(size_t)t*B, *cw=pl->cntW+(size_t)t*B;
+        for(csi g=lo;g<hi;g++) {
+            const csi b=packed_of(f,g)>>PERM_SH; cg[b]++;
+            if(pl->bktG) pl->bktG[g]=(uint16_t)b;
+        }
         if(lo<hi) {
             csi c=comp_of(f,lo); const csi *map=component_map(f,c);
             for(csi p=lo;p<hi;p++) {
                 while(p>=off[c+1]) { c++; map=component_map(f,c); }
-                cw[map[p-off[c]]>>PERM_SH]++;
+                const csi b=map[p-off[c]]>>PERM_SH; cw[b]++;
+                if(pl->bktW) pl->bktW[p]=(uint16_t)b;
             }
         }
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp single)
         {
             csi atg=0, atw=0;
-            for(csi b=0;b<B;b++) {
-                pl->bstartG[b]=atg; pl->bstartW[b]=atw;
-                for(int u=0;u<T;u++) {
-                    csi vg=pl->posG[(size_t)u*B+b], vw=pl->posW[(size_t)u*B+b];
-                    pl->posG[(size_t)u*B+b]=atg; atg+=vg;
-                    pl->posW[(size_t)u*B+b]=atw; atw+=vw;
-                }
+            for(csi b=0;b<B;b++) for(int u=0;u<T;u++) {
+                const size_t s=(size_t)u*B+b;
+                pl->posG[s]=atg; atg=(atg+pl->cntG[s]+PERM_WC-1)/PERM_WC*PERM_WC;
+                pl->posW[s]=atw; atw=(atw+pl->cntW[s]+PERM_WC-1)/PERM_WC*PERM_WC;
             }
-            pl->bstartG[B]=atg; pl->bstartW[B]=atw;
         }
         csi *qg=q+(size_t)t*B*2, *qw=qg+B;
         memcpy(qg,pl->posG+(size_t)t*B,(size_t)B*sizeof(csi));
@@ -709,17 +797,36 @@ static const vsdlss_perm_plan *perm_plan_get(const vsdlss_m3_factor *fc, int T)
     return pl;
 }
 
-/* Scratch vector of n doubles; NULL when a concurrent solve holds it. */
-static double *pbuf_acquire(const vsdlss_m3_factor *fc)
+/* Scratch area of at least len doubles, 64-byte aligned; NULL when a
+ * concurrent solve holds it. */
+static double *pbuf_acquire(const vsdlss_m3_factor *fc, size_t len)
 {
     vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
     if(atomic_exchange(&f->pbuf_busy,1)) return NULL;
-    if(!f->pbuf) f->pbuf=(double*)vsdlss_big_malloc((size_t)f->n*sizeof(double));
+    if(f->pbuf && f->pbuf_len<len) { free(f->pbuf); f->pbuf=NULL; f->pbuf_len=0; }
+    if(!f->pbuf && len<=SIZE_MAX/sizeof(double)) {
+        f->pbuf=(double*)vsdlss_big_malloc_aligned(64,len*sizeof(double));
+        if(f->pbuf) f->pbuf_len=len;
+    }
     if(!f->pbuf) atomic_store(&f->pbuf_busy,0);
     return f->pbuf;
 }
 static void pbuf_release(const vsdlss_m3_factor *fc)
 { atomic_store(&((vsdlss_m3_factor*)fc)->pbuf_busy,0); }
+
+/* Pass 1 append of v to thread-local bucket b (cursor q[b], line buffer w). */
+#define PERM_PUT(b,v) do { const csi k_=qt[b]++; double *ln_=w+(size_t)(b)*PERM_WC; \
+        ln_[k_&(PERM_WC-1)]=(v); \
+        if((k_&(PERM_WC-1))==PERM_WC-1) line_out(buf+(k_-(PERM_WC-1)),ln_,nt); } while(0)
+/* Flush the partial line of every bucket after pass 1. */
+static void perm_flush(double *buf, const double *w, const csi *qt, csi B, int nt)
+{
+    for(csi b=0;b<B;b++) {
+        const csi k=qt[b], r=k&(PERM_WC-1);
+        if(r) memcpy(buf+(k-r),w+(size_t)b*PERM_WC,(size_t)r*sizeof(double));
+    }
+    perm_fence(nt);
+}
 
 /* loc[c][i] = rhs[component_map(c)[i]] for all components; returns 1 when a
  * gathered value is not finite (the direct gather's check). */
@@ -727,8 +834,9 @@ static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, c
                         double *buf, double *const *loc, csi *q)
 {
     const csi n=f->n, B=pl->B, chunk=pl->chunk, *off=f->components->offset;
+    const int nt=pl->nt, T=pl->T;
     int bad=0;
-    VSDLSS_OMP(omp parallel num_threads(pl->T) reduction(|:bad))
+    VSDLSS_OMP(omp parallel num_threads(T) reduction(|:bad))
     {
 #ifdef _OPENMP
         const int t=omp_get_thread_num();
@@ -737,25 +845,33 @@ static int perm2_gather(const vsdlss_m3_factor *f, const vsdlss_perm_plan *pl, c
 #endif
         const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
         csi *qt=q+(size_t)t*B;
+        double *stage=buf+pl->len+(size_t)t*((size_t)PERM_BLK+(size_t)B*PERM_WC), *w=stage+PERM_BLK;
         memcpy(qt,pl->posG+(size_t)t*B,(size_t)B*sizeof(csi));
-        for(csi g=lo;g<hi;g++) buf[qt[packed_of(f,g)>>PERM_SH]++]=rhs[g];
+        if(pl->bktG) { const uint16_t *bk=pl->bktG; for(csi g=lo;g<hi;g++) PERM_PUT(bk[g],rhs[g]); }
+        else for(csi g=lo;g<hi;g++) PERM_PUT(packed_of(f,g)>>PERM_SH,rhs[g]);
+        perm_flush(buf,w,qt,B,nt);
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp for schedule(dynamic,4))
         for(csi b=0;b<B;b++) {
-            const csi p0=b<<PERM_SH, pend=p0+PERM_MASK+1<n?p0+PERM_MASK+1:n;
-            const csi k0=pl->bstartG[b], k1=pl->bstartG[b+1];
-            if(k0==k1) continue;
+            const csi p0=b<<PERM_SH, pend=p0+PERM_BLK<n?p0+PERM_BLK:n;
             const csi c=comp_of(f,p0);
             if(pend<=off[c+1]) {                       /* block inside one component */
-                double *d=loc[c]+(p0-off[c]);
-                for(csi k=k0;k<k1;k++) { double v=buf[k]; d[pl->offG[k]]=v; bad|=!isfinite(v); }
+                for(int u=0;u<T;u++) {
+                    const size_t s=(size_t)u*B+b; const csi k0=pl->posG[s], k1=k0+pl->cntG[s];
+                    for(csi k=k0;k<k1;k++) stage[pl->offG[k]]=buf[k];
+                }
+                bad|=block_out(loc[c]+(p0-off[c]),stage,pend-p0,nt,1);
             } else {
-                for(csi k=k0;k<k1;k++) {
-                    const csi p=p0+pl->offG[k], cc=comp_of(f,p); double v=buf[k];
-                    loc[cc][p-off[cc]]=v; bad|=!isfinite(v);
+                for(int u=0;u<T;u++) {
+                    const size_t s=(size_t)u*B+b; const csi k0=pl->posG[s], k1=k0+pl->cntG[s];
+                    for(csi k=k0;k<k1;k++) {
+                        const csi p=p0+pl->offG[k], cc=comp_of(f,p); double v=buf[k];
+                        loc[cc][p-off[cc]]=v; bad|=!isfinite(v);
+                    }
                 }
             }
         }
+        perm_fence(nt);
     }
     return bad;
 }
@@ -765,7 +881,8 @@ static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *p
                             double *const *loc, double *out, csi *q)
 {
     const csi n=f->n, B=pl->B, chunk=pl->chunk, *off=f->components->offset;
-    VSDLSS_OMP(omp parallel num_threads(pl->T))
+    const int nt=pl->nt, T=pl->T;
+    VSDLSS_OMP(omp parallel num_threads(T))
     {
 #ifdef _OPENMP
         const int t=omp_get_thread_num();
@@ -774,21 +891,32 @@ static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *p
 #endif
         const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
         csi *qt=q+(size_t)t*B;
+        double *stage=buf+pl->len+(size_t)t*((size_t)PERM_BLK+(size_t)B*PERM_WC), *w=stage+PERM_BLK;
         memcpy(qt,pl->posW+(size_t)t*B,(size_t)B*sizeof(csi));
         if(lo<hi) {
-            csi c=comp_of(f,lo); const csi *map=component_map(f,c); const double *l=loc[c];
-            for(csi p=lo;p<hi;p++) {
-                while(p>=off[c+1]) { c++; map=component_map(f,c); l=loc[c]; }
-                const csi i=p-off[c];
-                buf[qt[map[i]>>PERM_SH]++]=l[i];
+            csi c=comp_of(f,lo);
+            while(lo>=off[c+1]) c++;
+            csi p=lo;
+            while(p<hi) {                              /* one component slice at a time */
+                const csi e=off[c+1]<hi?off[c+1]:hi, base=off[c];
+                const double *l=loc[c];
+                if(pl->bktW) { const uint16_t *bk=pl->bktW; for(;p<e;p++) PERM_PUT(bk[p],l[p-base]); }
+                else { const csi *map=component_map(f,c); for(;p<e;p++) PERM_PUT(map[p-base]>>PERM_SH,l[p-base]); }
+                c++;
             }
         }
+        perm_flush(buf,w,qt,B,nt);
         VSDLSS_OMP(omp barrier)
         VSDLSS_OMP(omp for schedule(dynamic,4))
         for(csi b=0;b<B;b++) {
-            double *d=out+(b<<PERM_SH);
-            for(csi k=pl->bstartW[b];k<pl->bstartW[b+1];k++) d[pl->offW[k]]=buf[k];
+            const csi p0=b<<PERM_SH, len=p0+PERM_BLK<n?PERM_BLK:n-p0;
+            for(int u=0;u<T;u++) {
+                const size_t s=(size_t)u*B+b; const csi k0=pl->posW[s], k1=k0+pl->cntW[s];
+                for(csi k=k0;k<k1;k++) stage[pl->offW[k]]=buf[k];
+            }
+            block_out(out+p0,stage,len,nt,0);
         }
+        perm_fence(nt);
     }
 }
 
@@ -818,7 +946,7 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         int T=vsdlss_parallel_width((double)factor->n*4);
         pl=perm_plan_get(factor,T);
         if(pl) pq=(csi*)malloc((size_t)pl->T*(size_t)pl->B*sizeof(csi));
-        if(pl && pq) pbuf=pbuf_acquire(factor);
+        if(pl && pq) pbuf=pbuf_acquire(factor,perm_scratch_len(pl));
         if(pbuf) {
             double tg=trace_now();
             int bad=perm2_gather(factor,pl,rhs,pbuf,loc,pq);

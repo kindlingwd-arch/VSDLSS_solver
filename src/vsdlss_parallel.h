@@ -19,5 +19,6 @@ int vsdlss_parallel_set_budget(int threads);
 #include <stddef.h>
 void *vsdlss_big_malloc(size_t bytes);
 void *vsdlss_big_calloc(size_t count, size_t size);
+void *vsdlss_big_malloc_aligned(size_t align, size_t bytes);  /* align: power of 2, >= sizeof(void*) */
 void vsdlss_parallel_observe(void); /* master thread only */
 #endif
