@@ -1,0 +1,1 @@
+PASS: 60 shape/direction pairs; known-solution checks; 50 core checks bitwise match production (small external panels tested via API only). sink=1210
