@@ -121,11 +121,19 @@ struct vsdlss_m3_factor {
     int inv_shift;
     /* Blocked two-pass gather / write-back of original-order solves
      * (vsdlss_m3.c): plans built on first use per thread count, and a
-     * scratch vector of n doubles taken with an atomic flag. */
+     * scratch vector of n doubles.  pbuf_busy is the lock of the whole
+     * machinery: pbuf, the plans (and their scratch) and the samples.
+     * Auto mode times the gather + write-back of real solves, alternating
+     * the two paths, and fixes pchoice per thread count. */
 #define VSDLSS_PERM_PLAN_SLOTS 65
     _Atomic(struct vsdlss_perm_plan *) pplan[VSDLSS_PERM_PLAN_SLOTS];
     double *pbuf;
     atomic_int pbuf_busy;
+    atomic_int pchoice[VSDLSS_PERM_PLAN_SLOTS];  /* 0 sampling, 1 two-pass, 2 direct */
+    int psamples[VSDLSS_PERM_PLAN_SLOTS];        /* valid samples taken (under the lock) */
+    double pbest[VSDLSS_PERM_PLAN_SLOTS][2];     /* fastest sample, s: [0] two-pass, [1] direct */
+    atomic_int solving;                          /* solves in progress */
+    atomic_uint solves_begun;                    /* ... and started, for overlap detection */
 };
 
 /* Symmetric weighted adjacency (no diagonal in idx/val; diag separate). */
@@ -181,6 +189,10 @@ extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
+extern int vsdlss_perm2_mode;         /* tests: -1 VSDLSS_PERM2, 0 direct, 1 two-pass, 2 auto */
+extern double vsdlss_perm2_test_penalty[2]; /* tests: seconds added to auto samples [two-pass, direct] */
+/* Auto mode's decision for thread count T: 0 undecided, 1 two-pass, 2 direct. */
+int vsdlss_m3_perm2_choice(const vsdlss_m3_factor *, int T);
 extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's

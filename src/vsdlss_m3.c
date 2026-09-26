@@ -597,7 +597,20 @@ static void write_back_inverse(const solve_ctx *x)
  * the direct loop.  Pure copies: results are bitwise those of the direct
  * loops.  A plan (per thread count: each thread's slot range per bucket, and
  * each slot's offset in its block) depends only on the permutation, so it is
- * built on first use and kept with the factor.  VSDLSS_PERM2=0 disables. */
+ * built on first use and kept with the factor.
+ *
+ * Which path is faster depends on the machine (cache sizes, bandwidth, the
+ * thread count): on some the direct loops win.  VSDLSS_PERM2=0 forces the
+ * direct loops, 1 the two-pass path; by default (or "auto") the solves
+ * themselves are the measurement.  Every solve takes one path; the first
+ * 2*PERM_SAMPLES solves per thread count alternate them and time only the
+ * gather and the write-back, excluding one-time costs (plan build, first
+ * touch of the scratch vector), and the faster minimum is kept from then on.
+ * The direct loops go first: building the plan costs about as much as the
+ * two-pass path saves in a few solves, so a caller that solves once should
+ * not pay for it.  A sample overlapped by another solve of the same
+ * factor is discarded.  Both paths give the same bits, so the choice only
+ * affects time.  When the direct loops win, the plan is freed. */
 #define PERM_SH 15
 #define PERM_MASK (((csi)1<<PERM_SH)-1)
 /* Smallest n using the two-pass path (tests lower it). */
@@ -608,19 +621,38 @@ typedef struct vsdlss_perm_plan {
     csi *posG, *posW;            /* T*B: first buffer slot of (thread, bucket) */
     csi *bstartG, *bstartW;      /* B+1: first slot of each bucket */
     uint16_t *offG, *offW;       /* n: destination offset of each slot in its block */
+    csi *q;                      /* T*B: per-solve bucket cursors (under the lock) */
 } vsdlss_perm_plan;
+#define PERM_SAMPLES 2           /* timed solves per path before auto mode decides */
+enum { PERM_UNDECIDED=0, PERM_TWO_PASS=1, PERM_DIRECT=2 };
 
 static void perm_plan_free(struct vsdlss_perm_plan *p)
 {
     if(!p) return;
-    free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW); free(p->offG); free(p->offW); free(p);
+    free(p->posG); free(p->posW); free(p->bstartG); free(p->bstartW); free(p->offG); free(p->offW);
+    free(p->q); free(p);
 }
 
-static int perm2_on(void)
+int vsdlss_perm2_mode = -1;
+double vsdlss_perm2_test_penalty[2];
+
+/* 0 direct, 1 two-pass, 2 auto. */
+static int perm2_mode(void)
 {
-    static int on=-1;
-    if(on<0) { const char *e=getenv("VSDLSS_PERM2"); on=!(e && e[0]=='0'); }
-    return on;
+    static int env=-1;
+    if(vsdlss_perm2_mode>=0) return vsdlss_perm2_mode;
+    if(env<0) {
+        const char *e=getenv("VSDLSS_PERM2");
+        /* "0" direct, "1" two-pass; unset, "auto" or anything else: auto. */
+        env=(e && e[0]=='0' && !e[1])?0:(e && e[0]=='1' && !e[1])?1:2;
+    }
+    return env;
+}
+
+int vsdlss_m3_perm2_choice(const vsdlss_m3_factor *f, int T)
+{
+    if(!f || T<1 || T>=VSDLSS_PERM_PLAN_SLOTS) return PERM_UNDECIDED;
+    return atomic_load(&((vsdlss_m3_factor*)f)->pchoice[T]);
 }
 
 /* Packed position of global vertex g, and the component holding packed p. */
@@ -647,8 +679,9 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
     pl->posG=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi)); pl->posW=(csi*)calloc((size_t)T*(size_t)B,sizeof(csi));
     pl->bstartG=(csi*)malloc((size_t)(B+1)*sizeof(csi)); pl->bstartW=(csi*)malloc((size_t)(B+1)*sizeof(csi));
     pl->offG=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t)); pl->offW=(uint16_t*)vsdlss_big_malloc((size_t)n*sizeof(uint16_t));
+    pl->q=(csi*)malloc((size_t)T*(size_t)B*sizeof(csi));
     csi *q=(csi*)malloc((size_t)T*(size_t)B*2*sizeof(csi));
-    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->offG||!pl->offW||!q) { free(q); perm_plan_free(pl); return NULL; }
+    if(!pl->posG||!pl->posW||!pl->bstartG||!pl->bstartW||!pl->offG||!pl->offW||!pl->q||!q) { free(q); perm_plan_free(pl); return NULL; }
     VSDLSS_OMP(omp parallel num_threads(T))
     {
 #ifdef _OPENMP
@@ -696,30 +729,81 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
     return pl;
 }
 
-static const vsdlss_perm_plan *perm_plan_get(const vsdlss_m3_factor *fc, int T)
+/* The lock (pbuf_busy) guards pbuf, the plans and the samples: a solve
+ * that does not get it takes the direct loops and records nothing. */
+static int perm_lock(vsdlss_m3_factor *f) { return !atomic_exchange(&f->pbuf_busy,1); }
+static void perm_unlock(vsdlss_m3_factor *f) { atomic_store(&f->pbuf_busy,0); }
+
+/* Under the lock. */
+static const vsdlss_perm_plan *perm_plan_get(vsdlss_m3_factor *f, int T)
 {
-    vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
-    if(T<1 || T>=VSDLSS_PERM_PLAN_SLOTS) return NULL;
     vsdlss_perm_plan *pl=atomic_load(&f->pplan[T]);
-    if(pl) return pl;
-    pl=perm_plan_build(f,T);
-    if(!pl) return NULL;
-    vsdlss_perm_plan *expect=NULL;
-    if(!atomic_compare_exchange_strong(&f->pplan[T],&expect,pl)) { perm_plan_free(pl); pl=expect; }
+    if(!pl && (pl=perm_plan_build(f,T))) atomic_store(&f->pplan[T],pl);
     return pl;
 }
 
-/* Scratch vector of n doubles; NULL when a concurrent solve holds it. */
-static double *pbuf_acquire(const vsdlss_m3_factor *fc)
+/* Under the lock: the scratch vector, touched with the solve's team when
+ * first allocated, so no page fault lands in a timed pass. */
+static double *pbuf_get(vsdlss_m3_factor *f, int T)
 {
-    vsdlss_m3_factor *f=(vsdlss_m3_factor*)fc;
-    if(atomic_exchange(&f->pbuf_busy,1)) return NULL;
-    if(!f->pbuf) f->pbuf=(double*)vsdlss_big_malloc((size_t)f->n*sizeof(double));
-    if(!f->pbuf) atomic_store(&f->pbuf_busy,0);
+    if(!f->pbuf && (f->pbuf=(double*)vsdlss_big_malloc((size_t)f->n*sizeof(double)))) {
+        double *b=f->pbuf; const csi n=f->n; (void)T;
+        VSDLSS_OMP(omp parallel for num_threads(T) if(T>1) schedule(static))
+        for(csi i=0;i<n;i++) b[i]=0.0;
+    }
     return f->pbuf;
 }
-static void pbuf_release(const vsdlss_m3_factor *fc)
-{ atomic_store(&((vsdlss_m3_factor*)fc)->pbuf_busy,0); }
+
+/* Under the lock: one valid auto-mode sample of `path` (0 two-pass,
+ * 1 direct) for thread count T; decides after 2*PERM_SAMPLES of them.  When
+ * the direct loops win, the slot's plan goes, and the scratch vector too
+ * unless another thread count uses the two-pass path. */
+static void perm_record(vsdlss_m3_factor *f, int T, int path, double dt)
+{
+    const int k=f->psamples[T];            /* k 0,2: direct; 1,3: two-pass */
+    double *best=f->pbest[T];
+    dt+=vsdlss_perm2_test_penalty[path];
+    if(k<2 || dt<best[path]) best[path]=dt;
+    f->psamples[T]=k+1;
+    if(trace_on()) fprintf(stderr,"vsdlss trace: perm2 sample T=%d %-9s %8.4f s\n",T,path?"direct":"two-pass",dt);
+    if(k+1<2*PERM_SAMPLES) return;
+    const int choice=best[0]<=best[1]?PERM_TWO_PASS:PERM_DIRECT;
+    atomic_store(&f->pchoice[T],choice);
+    if(trace_on()) fprintf(stderr,"vsdlss trace: perm2 T=%d: %s (two-pass %.4f s, direct %.4f s)\n",
+                           T,choice==PERM_TWO_PASS?"two-pass":"direct",best[0],best[1]);
+    if(choice==PERM_DIRECT) {
+        perm_plan_free(atomic_exchange(&f->pplan[T],NULL));
+        int keep=0;
+        for(int t=1;t<VSDLSS_PERM_PLAN_SLOTS;t++) keep|=atomic_load(&f->pchoice[t])==PERM_TWO_PASS;
+        if(!keep) { free(f->pbuf); f->pbuf=NULL; }
+    }
+}
+
+/* loc[c][i] = rhs[component_map(c)[i]], one flat loop over the packed
+ * positions (the direct gather, done up front so it can be timed); returns 1
+ * when a gathered value is not finite. */
+static int direct_gather(const vsdlss_m3_factor *f, const double *rhs, double *const *loc, int T)
+{
+    const csi n=f->n, *off=f->components->offset, chunk=(n+T-1)/T;
+    int bad=0; (void)T;
+    VSDLSS_OMP(omp parallel num_threads(T) if(T>1) reduction(|:bad))
+    {
+#ifdef _OPENMP
+        const int t=omp_get_thread_num();
+#else
+        const int t=0;
+#endif
+        const csi lo=(csi)t*chunk<n?(csi)t*chunk:n, hi=lo+chunk<n?lo+chunk:n;
+        csi p=lo, c=lo<hi?comp_of(f,lo):0;
+        for(;p<hi;c++) {
+            const csi base=off[c], end=off[c+1]<hi?off[c+1]:hi;
+            const csi *map=component_map(f,c); double *l=loc[c];
+            for(csi i=p-base;i<end-base;i++) { double v=rhs[map[i]]; l[i]=v; bad|=!isfinite(v); }
+            if(end>p) p=end;
+        }
+    }
+    return bad;
+}
 
 /* loc[c][i] = rhs[component_map(c)[i]] for all components; returns 1 when a
  * gathered value is not finite (the direct gather's check). */
@@ -796,12 +880,22 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
                                   const double *rhs, double *solution, int internal)
 {
     vsdlss_status status=VSDLSS_OK, *results=NULL; solve_ws *ws=NULL; double **loc=NULL;
-    const vsdlss_perm_plan *pl=NULL; double *pbuf=NULL; csi *pq=NULL;
+    vsdlss_m3_factor *f=(vsdlss_m3_factor*)factor;
+    const vsdlss_perm_plan *pl=NULL; double *pbuf=NULL;
+    int mode=0, T=1, locked=0, counted=0, sample=-1;  /* sample: path timed, 0 two-pass, 1 direct */
+    unsigned begun=0; double dt=0;
     csi c, taken=0;
     if(!factor || !factor->components || !factor->component || !rhs || !solution)
         return VSDLSS_ERR_INVALID;
     if(!count_fits(factor->count,sizeof(solve_ws))) return VSDLSS_ERR_OOM;
     const int inverse=!internal && (factor->inv32 || factor->inv64);
+    if(inverse && !factor->disk_mode && factor->n>=PERM_MIN) {
+        mode=perm2_mode();
+        T=vsdlss_parallel_width((double)factor->n*4);
+    }
+    /* Every solve of this factor counts (internal-order ones too): any of
+     * them overlapping a timed pass would skew the sample. */
+    atomic_fetch_add(&f->solving,1); atomic_fetch_add(&f->solves_begun,1); counted=1;
     ws=(solve_ws*)calloc((size_t)factor->count,sizeof(*ws));
     results=(vsdlss_status*)calloc((size_t)factor->count,sizeof(*results));
     if(inverse) loc=(double**)malloc((size_t)factor->count*sizeof(*loc));
@@ -812,33 +906,60 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         if(loc) loc[taken]=ws[taken].local;
     }
     solve_ctx ctx={factor,rhs,solution,ws,internal,loc,0};
-    if(inverse && !factor->disk_mode && factor->n>=PERM_MIN && perm2_on()) {
-        /* Two-pass gather here, two-pass write-back below (plan, scratch
-         * vector and queues permitting; otherwise the direct loops). */
-        int T=vsdlss_parallel_width((double)factor->n*4);
-        pl=perm_plan_get(factor,T);
-        if(pl) pq=(csi*)malloc((size_t)pl->T*(size_t)pl->B*sizeof(csi));
-        if(pl && pq) pbuf=pbuf_acquire(factor);
-        if(pbuf) {
-            double tg=trace_now();
-            int bad=perm2_gather(factor,pl,rhs,pbuf,loc,pq);
-            TRACE("solve: two-pass gather",tg);
-            if(bad) { status=VSDLSS_ERR_NONFINITE; goto done; }
-            ctx.pregathered=1;
+    if(mode) {
+        /* Path: two-pass when forced or chosen (lock, plan and scratch
+         * permitting), the direct loops otherwise; in auto mode before the
+         * decision, the next sample's path.  Either way the gather is done
+         * here, up front, and timed when sampling. */
+        const int slot=T<VSDLSS_PERM_PLAN_SLOTS?T:0;
+        int use2=0;
+        if(slot && (mode==1 || atomic_load(&f->pchoice[slot])!=PERM_DIRECT) && perm_lock(f)) {
+            locked=1;
+            const int choice=mode==1?PERM_TWO_PASS:atomic_load(&f->pchoice[slot]);
+            /* Direct first: a caller that solves once never builds a plan. */
+            if(choice==PERM_UNDECIDED) sample=(f->psamples[slot]&1)^1;
+            if(choice==PERM_TWO_PASS || sample==0) {
+                pl=perm_plan_get(f,T);
+                pbuf=pl?pbuf_get(f,T):NULL;
+                use2=pbuf!=NULL;
+                if(!use2 && sample==0) atomic_store(&f->pchoice[slot],PERM_DIRECT);  /* out of memory */
+                if(!use2) sample=-1;
+            }
+            if(!use2 && sample<0) { perm_unlock(f); locked=0; }
         }
+        if(sample>=0) {                        /* another solve running: no sample */
+            begun=atomic_load(&f->solves_begun);
+            if(atomic_load(&f->solving)!=1) {
+                sample=-1;
+                if(!use2) { perm_unlock(f); locked=0; }   /* direct: lock not needed */
+            }
+        }
+        double tg=trace_now();
+        int bad=use2?perm2_gather(factor,pl,rhs,pbuf,loc,pl->q):direct_gather(factor,rhs,loc,T);
+        dt=trace_now()-tg;
+        if(trace_on()) fprintf(stderr,"vsdlss trace: %-22s %8.3f s\n",use2?"solve: two-pass gather":"solve: direct gather",dt);
+        if(bad) { status=VSDLSS_ERR_NONFINITE; goto done; }
+        ctx.pregathered=1;
+        if(!use2) pbuf=NULL;                   /* write-back below: direct */
     }
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
     double t0=trace_now();
-    if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq);
+    if(pbuf) perm2_writeback(factor,pl,pbuf,loc,solution,pl->q);
     else if(inverse) write_back_inverse(&ctx);
     else run_components(factor,factor->disk_mode,scatter_local,&ctx,results);
+    if(sample>=0) {
+        dt+=trace_now()-t0;
+        /* Valid only if no other solve of this factor started meanwhile. */
+        if(atomic_load(&f->solving)==1 && atomic_load(&f->solves_begun)==begun)
+            perm_record(f,T,sample,dt);
+    }
     TRACE("solve: scatter",t0);
 done:
-    if(pbuf) pbuf_release(factor);
-    free(pq);
+    if(locked) perm_unlock(f);
     if(ws) for(c=0;c<taken;c++) ws_release(factor,c,ws+c);
     free(ws); free(results); free(loc);
+    if(counted) atomic_fetch_sub(&f->solving,1);
     return status;
 }
 

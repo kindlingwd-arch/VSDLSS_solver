@@ -343,7 +343,8 @@ static int two_pass_permutation(void)
     vsdlss_m3_factor_free(f);
     vsdlss_perm2_min=1;
     int maxt=vsdlss_parallel_enabled()?4:1;
-    for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+    for(int mode=1;mode<=2;mode++) for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+        vsdlss_perm2_mode=mode;                     /* forced two-pass; auto (samples both) */
         vsdlss_m3_inverse_force64=wide;
         CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
         f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
@@ -359,8 +360,84 @@ static int two_pass_permutation(void)
         for(csi i=0;i<n;i++) CHECK(x[i]==55);
         vsdlss_m3_factor_free(f);
     }
-    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min;
+    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_mode=-1;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
+    return 0;
+}
+
+/* Auto mode: the first 2*PERM_SAMPLES solves per thread count alternate the
+ * paths (direct first, so a single solve builds no plan), then the faster one is kept (a test penalty makes either lose).
+ * Same bits throughout; failed solves take no sample; when the direct loops
+ * win the plan and scratch vector are freed; thread counts decide
+ * separately; the forced modes never decide. */
+static int perm2_auto(void)
+{
+    vsdlss *A=two_nets(); CHECK(A);
+    const csi n=A->n, saved_min=vsdlss_perm2_min;
+    double *b=malloc(n*8),*bb=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8);
+    CHECK(b&&bb&&ref&&x);
+    for(csi i=0;i<n;i++) b[i]=sin(0.013*(double)i)+0.5;
+    memcpy(bb,b,(size_t)n*8); bb[n/2]=NAN;
+    vsdlss_m3_factor *f=NULL;
+    vsdlss_perm2_min=(csi)1<<62;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+    CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
+    vsdlss_m3_factor_free(f);
+    vsdlss_perm2_min=1; vsdlss_perm2_mode=2;
+    for(int loser=0;loser<2;loser++){               /* 0: two-pass loses, 1: direct loses */
+        vsdlss_perm2_test_penalty[0]=loser==0?1.0:0.0;
+        vsdlss_perm2_test_penalty[1]=loser==1?1.0:0.0;
+        const int want=loser==0?2:1;
+        f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);   /* a single solve: no plan */
+        CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        CHECK(f->psamples[1]==1 && atomic_load(&f->pplan[1])==NULL && !f->pbuf);
+        for(int s=1;s<4;s++){
+            CHECK(vsdlss_m3_perm2_choice(f,1)==0);
+            for(csi i=0;i<n;i++) x[i]=55;
+            CHECK(vsdlss_m3_solve(f,bb,x)==VSDLSS_ERR_NONFINITE);   /* no sample */
+            for(csi i=0;i<n;i++) CHECK(x[i]==55);
+            CHECK(f->psamples[1]==s);
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        CHECK(vsdlss_m3_perm2_choice(f,1)==want);
+        CHECK((atomic_load(&f->pplan[1])!=NULL)==(want==1));
+        CHECK((f->pbuf!=NULL)==(want==1));
+        for(int rep=0;rep<3;rep++){
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        CHECK(f->psamples[1]==4);
+        if(vsdlss_parallel_enabled()){             /* another thread count starts over */
+            CHECK(vsdlss_set_num_threads(2)==VSDLSS_OK);
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            CHECK(f->psamples[2]==1 && vsdlss_m3_perm2_choice(f,2)==0);
+            CHECK(atomic_load(&f->pplan[2])==NULL);  /* direct first: no plan yet */
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            CHECK(f->psamples[2]==2 && vsdlss_m3_perm2_choice(f,2)==0);
+            CHECK(atomic_load(&f->pplan[2])!=NULL && f->pbuf!=NULL);
+            CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+        }
+        vsdlss_m3_factor_free(f);
+    }
+    for(int mode=0;mode<2;mode++){                 /* forced: no samples */
+        vsdlss_perm2_mode=mode;
+        f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        for(int rep=0;rep<5;rep++){
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        CHECK(f->psamples[1]==0 && vsdlss_m3_perm2_choice(f,1)==0);
+        CHECK((atomic_load(&f->pplan[1])!=NULL)==(mode==1));
+        vsdlss_m3_factor_free(f);
+    }
+    vsdlss_perm2_test_penalty[0]=vsdlss_perm2_test_penalty[1]=0;
+    vsdlss_perm2_min=saved_min; vsdlss_perm2_mode=-1;
     vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
     return 0;
 }
@@ -371,6 +448,7 @@ int main(void)
     CHECK(kernels()==0);
     CHECK(internal_order_solve()==0);
     CHECK(two_pass_permutation()==0);
+    CHECK(perm2_auto()==0);
     if(vsdlss_parallel_enabled()){
         CHECK(components_and_rhs()==0);CHECK(components_threads_equal()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);
     }
