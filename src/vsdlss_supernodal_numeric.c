@@ -378,6 +378,11 @@ typedef struct {
     csi *sub;        /* nsub subtree roots */
     csi *sub_end;    /* postorder position of each root */
     char *in_sub;    /* count: panel belongs to a split subtree */
+    /* 1 when every parent follows its children (so a source's rows inside
+     * its subtree precede the rows above it) and each subtree's postorder
+     * is ascending (push and pull then apply sources in the same order):
+     * the subtree phase may use the push form. */
+    int ascending;
 } sn_split;
 
 #define SN_SPLIT_SLOTS 257
@@ -427,6 +432,12 @@ static sn_split *split_build(const vsdlss_sn_factor *f, const tree_info *t, int 
             for (csi q = t->first[d]; q <= k; ++q) s->in_sub[t->order[q]] = 1;
         }
     }
+    s->ascending = 1;
+    for (csi d = 0; d < count && s->ascending; ++d)
+        if (f->sn_parent[d] >= 0 && f->sn_parent[d] <= d) s->ascending = 0;
+    for (csi i = 0; i < s->nsub && s->ascending; ++i)
+        for (csi q = t->first[s->sub[i]]; q < s->sub_end[i]; ++q)
+            if (t->order[q] >= t->order[q + 1]) { s->ascending = 0; break; }
     return s;
 }
 
@@ -620,14 +631,7 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
             for (csi r = r0; r < r1; ++r) x[R[r]] -= col[r] * xj;
         }
     }
-    for (csi j = 0; j < wd; ++j) {
-        double dj = a[j * rd + j];
-        if (!isfinite(dj) || dj <= 0) return 1;
-        x[bd + j] /= dj;
-        if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, a + j * rd + j + 1, x[bd + j], wd - j - 1);
-        else for (csi r = j + 1; r < wd; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
-    }
-    return 0;
+    return vsdlss_panel_forward_diag(a, rd, wd, x + bd, simd, 0) == VSDLSS_OK ? 0 : 1;
 }
 
 /* Work of forward_pull(d) in multiply-adds (source-block updates plus the
@@ -753,6 +757,38 @@ static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
     return st == VSDLSS_OK ? 0 : st == VSDLSS_ERR_NONFINITE ? 2 : 1;
 }
 
+/* Forward step of source sn inside a split subtree whose columns end at
+ * `hi`, in push form: solve sn's diagonal block and subtract its external
+ * rows below hi (a prefix of its ascending row list, since every ancestor
+ * inside the subtree has smaller columns than any ancestor above it).  The
+ * remaining rows land in tree-top targets, which pull them later.
+ *
+ * Pull and push agree bit for bit: each entry receives the same
+ * subtractions, sources in ascending order (the subtree postorder visits
+ * them ascending: checked when the split is built) and columns ascending
+ * within a source.  Push reads each source panel once, contiguously; pull
+ * revisits it in small pieces per target (power-grid cores: ~4 rows x 4
+ * columns per block), which made the subtree phase ~1.5x slower than the
+ * serial push solve. */
+static int forward_push_sub(const vsdlss_sn_factor *f, csi sn, csi hi, double *x)
+{
+    const csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+    const csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
+    const csi *R = ext ? f->row_index + f->row_ptr[sn] : NULL;
+    const csi p = ext ? lower_bound_csi(R, 0, ext, hi) : 0;
+    vsdlss_status st = vsdlss_panel_forward_prefix(f->panel + f->panel_offset[sn], b, w, ext, p, R, x);
+    return st == VSDLSS_OK ? 0 : st == VSDLSS_ERR_NONFINITE ? 2 : 1;
+}
+
+/* VSDLSS_FWD_SUB_PUSH=0 restores the pull form in the subtree phase (A/B
+ * comparisons; same bits either way). */
+static int fwd_sub_push(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("VSDLSS_FWD_SUB_PUSH"); v = !(e && e[0] == '0'); }
+    return v;
+}
+
 /* Tree-parallel solves: independent subtrees in parallel, the top of the
  * tree in order (forward: subtrees first; backward: top first).  The tree
  * and the split for nt come from the factor's cache when it has one. */
@@ -789,9 +825,13 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
     if (prof < 0) { const char *e = getenv("VSDLSS_SOLVE_PROFILE"); prof = e && *e && *e != '0'; }
     double tp[5] = {0}; if (prof) tp[0] = omp_get_wtime();
 #endif
+    const int push = fwd_sub_push() && sp->ascending;
     VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
-    for (csi i = 0; i < nsub; ++i)
-        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
+    for (csi i = 0; i < nsub; ++i) {
+        const csi hi = f->column_start[sub[i] + 1];
+        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k)
+            bad |= push ? forward_push_sub(f, t->order[k], hi, x) : forward_pull(f, t->order[k], x);
+    }
 #ifdef _OPENMP
     if (prof) tp[1] = omp_get_wtime();
 #endif

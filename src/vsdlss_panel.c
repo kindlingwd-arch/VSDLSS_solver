@@ -79,6 +79,29 @@ static inline vsdlss_status back_diag(const double *a,csi rows,csi width,double 
                                 :back_diag_blocked(a,rows,width,x,simd);
 }
 
+/* Diagonal block of the forward solve, J x = y, column by column (axpy of
+ * each solved x[j] into the rows below it).  Shared by the push-form panel
+ * solves and the pull-form forward_pull.  check_finite = 0 keeps the pull
+ * contract (only pivots checked here; the caller scans the solution).
+ * Measured: a register-tiled variant (triangle blocks of 16/32/64 columns,
+ * rows below updated by vsdlss_simd_block_update_contig) is bitwise equal
+ * but no faster at 16 and up to 1.8x slower at 32/64 for widths >= 256,
+ * because the tile reads the panel with stride `rows`; the axpy form
+ * streams it and already matches DTRSV. */
+vsdlss_status vsdlss_panel_forward_diag(const double *a,csi rows,csi width,double *x,
+                                        int simd,int check_finite)
+{
+    for(csi j=0;j<width;j++){
+        double d=a[j*rows+j];
+        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
+        x[j]/=d;
+        if(check_finite&&!isfinite(x[j]))return VSDLSS_ERR_NONFINITE;
+        if(simd)vsdlss_simd_axpy_neg(x+j+1,a+j*rows+j+1,x[j],width-j-1);
+        else for(csi r=j+1;r<width;r++)x[r]-=a[j*rows+r]*x[j];
+    }
+    return VSDLSS_OK;
+}
+
 /* One 128-row block of the forward external update (see below). */
 static int forward_ext_block(const double *a,csi rows,csi begin,csi width,csi ext,
                              const csi *index,double *x,csi b,int simd)
@@ -120,13 +143,9 @@ vsdlss_status vsdlss_panel_solve_generic(const double *a,csi begin,csi width,
     const int simd=vsdlss_simd_enabled();
     /* External rows have no dependency on J until the triangular solve ends.
        Reverse solve applies the external contribution before solving J^T. */
-    if(!back)for(csi j=0;j<width;j++){
-        double d=a[j*rows+j];
-        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
-        x[begin+j]/=d;
-        if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
-        if(simd)vsdlss_simd_axpy_neg(x+begin+j+1,a+j*rows+j+1,x[begin+j],width-j-1);
-        else for(csi r=j+1;r<width;r++)x[begin+r]-=a[j*rows+r]*x[begin+j];
+    if(!back){
+        vsdlss_status st=vsdlss_panel_forward_diag(a,rows,width,x+begin,simd,1);
+        if(st!=VSDLSS_OK)return st;
     }
     /* External phase.  Both directions keep the per-element accumulation
        order of the original element-at-a-time loops and only change which
@@ -307,4 +326,22 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
 #undef CASE
         default: return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,back);
     }
+}
+
+/* Forward solve of one panel restricted to its first `prefix` external rows
+ * (rows = width + ext stays the leading dimension).  Used by the subtree
+ * phase of the tree-parallel solve: rows inside the thread's own subtree are
+ * pushed here, the rest are pulled later by their tree-top targets.  Same
+ * per-entry operation sequence as vsdlss_panel_solve(back = 0); serial. */
+vsdlss_status vsdlss_panel_forward_prefix(const double *a,csi begin,csi width,csi ext,
+                                          csi prefix,const csi *index,double *x)
+{
+    const csi rows=width+ext;
+    const int simd=vsdlss_simd_enabled();
+    int bad=0;
+    vsdlss_status st=vsdlss_panel_forward_diag(a,rows,width,x+begin,simd,1);
+    if(st!=VSDLSS_OK)return st;
+    const csi nblocks=prefix/VSDLSS_SOLVE_BLK+(prefix%VSDLSS_SOLVE_BLK!=0);
+    for(csi b=0;b<nblocks;b++)bad|=forward_ext_block(a,rows,begin,width,prefix,index,x,b,simd);
+    return bad?VSDLSS_ERR_NONFINITE:VSDLSS_OK;
 }

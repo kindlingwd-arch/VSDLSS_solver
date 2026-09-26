@@ -1,0 +1,90 @@
+base 5 SOLVE threads=1 min=0.1240 med=0.1251 max=0.1411 bitwise_same=1
+base 5 SOLVE threads=2 min=0.1289 med=0.1328 max=0.1384 bitwise_same=1
+base 5 # xhash=d66679200a521863
+base 5 INTERNAL threads=1 min=0.0739 med=0.0752 max=0.0762 bitwise_same_as_solve=1
+base 5 INTERNAL threads=2 min=0.0776 med=0.0798 max=0.0819 bitwise_same_as_solve=1
+mid 5 SOLVE threads=1 min=0.1181 med=0.1199 max=0.1244 bitwise_same=1
+mid 5 SOLVE threads=2 min=0.1256 med=0.1282 max=0.1363 bitwise_same=1
+mid 5 # xhash=9a2819713df5e69d
+mid 5 INTERNAL threads=1 min=0.0663 med=0.0673 max=0.0689 bitwise_same_as_solve=1
+mid 5 INTERNAL threads=2 min=0.0749 med=0.0758 max=0.0792 bitwise_same_as_solve=1
+VSDLSS_solver 5 SOLVE threads=1 min=0.1214 med=0.1279 max=0.1311 bitwise_same=1
+VSDLSS_solver 5 SOLVE threads=2 min=0.1290 med=0.1325 max=0.1389 bitwise_same=1
+VSDLSS_solver 5 # xhash=9a2819713df5e69d
+VSDLSS_solver 5 INTERNAL threads=1 min=0.0668 med=0.0675 max=0.0691 bitwise_same_as_solve=1
+VSDLSS_solver 5 INTERNAL threads=2 min=0.0728 med=0.0741 max=0.0749 bitwise_same_as_solve=1
+base 6 SOLVE threads=1 min=0.1209 med=0.1234 max=0.1318 bitwise_same=1
+base 6 SOLVE threads=2 min=0.1196 med=0.1214 max=0.1276 bitwise_same=1
+base 6 # xhash=d865c04f502e168a
+base 6 INTERNAL threads=1 min=0.0730 med=0.0774 max=0.0796 bitwise_same_as_solve=1
+base 6 INTERNAL threads=2 min=0.0708 med=0.0721 max=0.0734 bitwise_same_as_solve=1
+mid 6 SOLVE threads=1 min=0.1162 med=0.1187 max=0.1264 bitwise_same=1
+mid 6 SOLVE threads=2 min=0.1190 med=0.1232 max=0.1293 bitwise_same=1
+mid 6 # xhash=58bb0cb55f73eab7
+mid 6 INTERNAL threads=1 min=0.0656 med=0.0668 max=0.0700 bitwise_same_as_solve=1
+mid 6 INTERNAL threads=2 min=0.0702 med=0.0731 max=0.0747 bitwise_same_as_solve=1
+VSDLSS_solver 6 SOLVE threads=1 min=0.1187 med=0.1193 max=0.1223 bitwise_same=1
+VSDLSS_solver 6 SOLVE threads=2 min=0.1232 med=0.1257 max=0.1275 bitwise_same=1
+VSDLSS_solver 6 # xhash=58bb0cb55f73eab7
+VSDLSS_solver 6 INTERNAL threads=1 min=0.0648 med=0.0650 max=0.0663 bitwise_same_as_solve=1
+VSDLSS_solver 6 INTERNAL threads=2 min=0.0668 med=0.0680 max=0.0708 bitwise_same_as_solve=1
+base 5 SOLVE threads=1 min=0.1218 med=0.1244 max=0.1264 bitwise_same=1
+base 5 SOLVE threads=2 min=0.1279 med=0.1327 max=0.1426 bitwise_same=1
+base 5 # xhash=d66679200a521863
+base 5 INTERNAL threads=1 min=0.0723 med=0.0729 max=0.0802 bitwise_same_as_solve=1
+base 5 INTERNAL threads=2 min=0.0757 med=0.0780 max=0.0813 bitwise_same_as_solve=1
+mid 5 SOLVE threads=1 min=0.1220 med=0.1247 max=0.1260 bitwise_same=1
+mid 5 SOLVE threads=2 min=0.1525 med=0.1652 max=0.1880 bitwise_same=1
+mid 5 # xhash=9a2819713df5e69d
+mid 5 INTERNAL threads=1 min=0.0816 med=0.0835 max=0.0869 bitwise_same_as_solve=1
+mid 5 INTERNAL threads=2 min=0.0890 med=0.0933 max=0.0940 bitwise_same_as_solve=1
+VSDLSS_solver 5 SOLVE threads=1 min=0.1219 med=0.1232 max=0.1245 bitwise_same=1
+VSDLSS_solver 5 SOLVE threads=2 min=0.1241 med=0.1262 max=0.1314 bitwise_same=1
+VSDLSS_solver 5 # xhash=9a2819713df5e69d
+VSDLSS_solver 5 INTERNAL threads=1 min=0.0647 med=0.0658 max=0.0671 bitwise_same_as_solve=1
+VSDLSS_solver 5 INTERNAL threads=2 min=0.0725 med=0.0734 max=0.0759 bitwise_same_as_solve=1
+base 6 SOLVE threads=1 min=0.1270 med=0.1289 max=0.1386 bitwise_same=1
+base 6 SOLVE threads=2 min=0.1238 med=0.1256 max=0.1291 bitwise_same=1
+base 6 # xhash=d865c04f502e168a
+base 6 INTERNAL threads=1 min=0.0711 med=0.0737 max=0.0755 bitwise_same_as_solve=1
+base 6 INTERNAL threads=2 min=0.0721 med=0.0733 max=0.0754 bitwise_same_as_solve=1
+mid 6 SOLVE threads=1 min=0.1163 med=0.1189 max=0.1220 bitwise_same=1
+mid 6 SOLVE threads=2 min=0.1254 med=0.1268 max=0.1543 bitwise_same=1
+mid 6 # xhash=58bb0cb55f73eab7
+mid 6 INTERNAL threads=1 min=0.0813 med=0.0839 max=0.0877 bitwise_same_as_solve=1
+mid 6 INTERNAL threads=2 min=0.0884 med=0.0959 max=0.0989 bitwise_same_as_solve=1
+VSDLSS_solver 6 SOLVE threads=1 min=0.1288 med=0.1616 max=0.1981 bitwise_same=1
+VSDLSS_solver 6 SOLVE threads=2 min=0.1295 med=0.1341 max=0.1477 bitwise_same=1
+VSDLSS_solver 6 # xhash=58bb0cb55f73eab7
+VSDLSS_solver 6 INTERNAL threads=1 min=0.0630 med=0.0660 max=0.0704 bitwise_same_as_solve=1
+VSDLSS_solver 6 INTERNAL threads=2 min=0.0660 med=0.0676 max=0.0685 bitwise_same_as_solve=1
+base 5 SOLVE threads=1 min=0.1248 med=0.1273 max=0.1365 bitwise_same=1
+base 5 SOLVE threads=2 min=0.1285 med=0.1319 max=0.1363 bitwise_same=1
+base 5 # xhash=d66679200a521863
+base 5 INTERNAL threads=1 min=0.0730 med=0.0749 max=0.0766 bitwise_same_as_solve=1
+base 5 INTERNAL threads=2 min=0.0772 med=0.0785 max=0.0901 bitwise_same_as_solve=1
+mid 5 SOLVE threads=1 min=0.1221 med=0.1248 max=0.1298 bitwise_same=1
+mid 5 SOLVE threads=2 min=0.1281 med=0.1293 max=0.1423 bitwise_same=1
+mid 5 # xhash=9a2819713df5e69d
+mid 5 INTERNAL threads=1 min=0.0668 med=0.0676 max=0.0685 bitwise_same_as_solve=1
+mid 5 INTERNAL threads=2 min=0.0744 med=0.0777 max=0.0789 bitwise_same_as_solve=1
+VSDLSS_solver 5 SOLVE threads=1 min=0.1193 med=0.1226 max=0.1297 bitwise_same=1
+VSDLSS_solver 5 SOLVE threads=2 min=0.1239 med=0.1271 max=0.1354 bitwise_same=1
+VSDLSS_solver 5 # xhash=9a2819713df5e69d
+VSDLSS_solver 5 INTERNAL threads=1 min=0.0654 med=0.0667 max=0.0691 bitwise_same_as_solve=1
+VSDLSS_solver 5 INTERNAL threads=2 min=0.0702 med=0.0745 max=0.0757 bitwise_same_as_solve=1
+base 6 SOLVE threads=1 min=0.1228 med=0.1261 max=0.1273 bitwise_same=1
+base 6 SOLVE threads=2 min=0.1213 med=0.1257 max=0.1327 bitwise_same=1
+base 6 # xhash=d865c04f502e168a
+base 6 INTERNAL threads=1 min=0.0725 med=0.0776 max=0.0921 bitwise_same_as_solve=1
+base 6 INTERNAL threads=2 min=0.0724 med=0.0812 max=0.0837 bitwise_same_as_solve=1
+mid 6 SOLVE threads=1 min=0.1194 med=0.1208 max=0.1296 bitwise_same=1
+mid 6 SOLVE threads=2 min=0.1216 med=0.1238 max=0.1257 bitwise_same=1
+mid 6 # xhash=58bb0cb55f73eab7
+mid 6 INTERNAL threads=1 min=0.0628 med=0.0633 max=0.0643 bitwise_same_as_solve=1
+mid 6 INTERNAL threads=2 min=0.0698 med=0.0704 max=0.0732 bitwise_same_as_solve=1
+VSDLSS_solver 6 SOLVE threads=1 min=0.1170 med=0.1188 max=0.1238 bitwise_same=1
+VSDLSS_solver 6 SOLVE threads=2 min=0.1210 med=0.1224 max=0.1328 bitwise_same=1
+VSDLSS_solver 6 # xhash=58bb0cb55f73eab7
+VSDLSS_solver 6 INTERNAL threads=1 min=0.0623 med=0.0635 max=0.0643 bitwise_same_as_solve=1
+VSDLSS_solver 6 INTERNAL threads=2 min=0.0668 med=0.0680 max=0.0708 bitwise_same_as_solve=1

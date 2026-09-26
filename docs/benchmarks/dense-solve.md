@@ -228,3 +228,79 @@ CHOLMOD 5.2 / OpenBLAS 0.3.26（pthread 版，`OPENBLAS_NUM_THREADS=1`）。
 `test_supernodal` 通过；`test_simd` 增加 dot8 逐位与非有限检测；
 `bench_dense_solve` 两轮全部检查通过（`native_core` 已同步为新顺序）；
 `git diff --check` 通过。原始数据：`dense-solve-20260926-blocked*.csv`。
+
+## 多线程前代：子树相位改为推式（2026-09-26，第二轮）
+
+### 问题定位
+
+多线程求解（`solve_tree`）的前代走拉式 `forward_pull`，上一轮的改动只作用于
+推式 `vsdlss_panel_solve`。在 power-grid 用例的核心上（见下），单线程计时拆分：
+拉式前代比推式慢 1.5–1.7×，其中约 80% 是源块更新。源块平均只有 3.9 行 × 3.7 列，
+共约 18.5 万个；拉式按目标把一个源面板拆成小片、在不同时间多次访问，每片要
+触碰 ws 条缓存行却只用几个 double。推式每个源面板连续读一次。
+
+### 改动（结果逐位不变）
+
+- 子树相位（各线程独占的子树）改用推式：源 sn 解对角块后，只推送行号小于
+  子树末列 `hi` 的外部行，其余行留给树顶目标照旧拉取。
+  - 正确性：超节点父号大于子号，所以子树内祖先的列都小于子树外祖先，
+    子树内目标行恰是升序行表的前缀（`lower_bound`）。
+  - 逐位：拉式对每项按源升序、源内列升序做减法；子树后序若为升序，推式
+    顺序相同。`split_build` 检查“父号>子号”且每棵子树后序升序，不满足则
+    回退拉式（`sn_split.ascending`）。`VSDLSS_FWD_SUB_PUSH=0` 可强制拉式做 A/B。
+  - 新入口 `vsdlss_panel_forward_prefix`（串行，不开并行区）；前代对角三角
+    抽成 `vsdlss_panel_forward_diag`，推式和拉式共用。
+- 试过且**放弃**：前代对角三角寄存器分块（块内 axpy + 下方
+  `block_update_contig`）。逐位相同，但块宽 16 无收益、32/64 在宽度≥256
+  最多慢 1.8×（按 `rows` 跨步读面板）；原 axpy 形式已与 DTRSV 持平。
+
+### 测试用例：power-grid 生成器（`bench_pg_solve`）
+
+客户用例（N=22,875,397）按度数比例缩放到 N=3,000,000，度数分布精确命中：
+
+```
+./bench_pg_solve <order> 1 1 1 3000000 335897 2002676 655789 5625 10 3
+# d1=335897 d2=2002676 d3=655789 d4=5625 d5=10 d6+=3；lattice=550x595
+# 约简后核心 n=201818（6.73%），AMD 61309 个超节点 maxw=890，METIS 47306 个 maxw=599
+```
+
+METIS：自建 METIS 5.2（KarypisLab，`i64=1`，64 位 idx_t），`make METIS=1`，order 6。
+
+### 实测（**注意：本机只有 1 个 CPU 核**）
+
+2 线程在 1 核上是分时运行，测不出并行加速，只能测工作量效率。子树相位是
+尴尬并行的，所以其总工作量的减少会按比例体现在多核墙钟上。多核实际加速需在
+多核机器上复测（`OMP_WAIT_POLICY=passive`，下同）。
+
+子树相位前代（`VSDLSS_SOLVE_PROFILE=1`，2 线程，A/B 交替 45 次取最小）：
+
+| 排序 | 拉式 | 推式 | 提速 |
+|---|---:|---:|---:|
+| AMD | 10.3 ms | 8.1 ms | 1.27× |
+| METIS | 9.4 ms | 6.7 ms | 1.40× |
+
+端到端 `bench_pg_solve`（三版本交替三轮取最小，ms）：
+
+| | 原始 | 上一轮 | 本轮 |
+|---|---:|---:|---:|
+| AMD INTERNAL 1 线程 | 72.3 | 66.3 | 64.7 |
+| AMD INTERNAL 2 线程 | 75.7 | 74.4 | 70.2 |
+| AMD SOLVE 1 线程 | 121.8 | 118.1 | 119.3 |
+| METIS INTERNAL 1 线程 | 71.1 | 62.8 | 62.3 |
+| METIS INTERNAL 2 线程 | 70.8 | 69.8 | 66.0 |
+| METIS SOLVE 1 线程 | 120.9 | 116.2 | 117.0 |
+
+xhash 上一轮与本轮相同（AMD `9a2819713df5e69d`，METIS `58bb0cb55f73eab7`），
+各线程数 `bitwise_same=1`。
+
+### 结论：power-grid 上稠密内核已不是主要瓶颈
+
+- 核心超节点求解约 11–17 ms（单线程），只占 INTERNAL（~63 ms）的 1/4 左右；
+  其余主要是约简回放（93% 的节点在约简中消去）。SOLVE 与 INTERNAL 之差
+  （~55 ms）是原序排列/收集/写回。两轮稠密内核优化合计让 INTERNAL 快
+  1.07–1.14×，SOLVE 只快 1–3%（在噪声内）。
+- 对 power-grid，下一步杠杆在约简回放与排列写回，而不是稠密内核。
+
+验证：`make test`（`-Werror`）全绿；`VSDLSS_SIMD=0`、`VSDLSS_FWD_SUB_PUSH=0`
+及二者组合下 `test_supernodal`（1/2/4 线程逐位对比单线程）、`test_parallel`、
+`test_m3` 通过。原始数据：`pg-solve-20260926-e2e.txt`、`pg-solve-20260926-subtree-ab.txt`。

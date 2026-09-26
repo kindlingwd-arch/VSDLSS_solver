@@ -227,6 +227,12 @@ void vsdlss_sn_factor_free(vsdlss_sn_factor *);
 vsdlss_status vsdlss_panel_factor(double *, csi rows, csi width);
 vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
                                 csi ext, const csi *index, double *, int back);
+/* Forward diagonal triangle of a panel (x points at the panel's first
+ * column); forward solve restricted to the first `prefix` external rows. */
+vsdlss_status vsdlss_panel_forward_diag(const double *a, csi rows, csi width, double *x,
+                                        int simd, int check_finite);
+vsdlss_status vsdlss_panel_forward_prefix(const double *a, csi begin, csi width, csi ext,
+                                          csi prefix, const csi *index, double *x);
 #ifdef VSDLSS_BLAS
 /* 1 when wide panels are solved with BLAS (VSDLSS_BLAS_SOLVE_MIN > 0). */
 int vsdlss_panel_solve_uses_blas(void);
