@@ -1,0 +1,24 @@
+# dump: components=2 core n=2823462 simd=1
+#   width 1-6     supernodes=715930    share of L=  7.6%
+#   width 7-32    supernodes=105019    share of L= 31.7%
+#   width 33-128  supernodes=2708      share of L= 22.3%
+#   width >128    supernodes=242       share of L= 38.4%
+scope	forward_ms	backward_ms
+all	290.510	270.651
+1-6	40.555	46.316
+7-32	147.198	115.549
+33-128	52.725	52.381
+>128	77.108	77.451
+# hash forward=c29ac0bdc9592f2a forward+backward=607cea675533481c
+# dump: components=2 core n=2823462 simd=1
+#   width 1-6     supernodes=715930    share of L=  7.6%
+#   width 7-32    supernodes=105019    share of L= 31.7%
+#   width 33-128  supernodes=2708      share of L= 22.3%
+#   width >128    supernodes=242       share of L= 38.4%
+scope	forward_ms	backward_ms
+all	279.879	264.282
+1-6	45.050	51.639
+7-32	148.323	112.790
+33-128	51.188	51.442
+>128	76.281	77.267
+# hash forward=c29ac0bdc9592f2a forward+backward=607cea675533481c

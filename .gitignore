@@ -46,3 +46,4 @@
 
 /bench_dense_solve
 /test_simd
+/bench_sn_replay
