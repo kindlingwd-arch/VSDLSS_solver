@@ -107,7 +107,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_perm2_only bench_perm3 bench_perm_lib bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -227,6 +227,14 @@ bench_perm2_only: test/bench_perm2_only.c
 # staged non-temporal pass 2); -DSHIFT=16 for 512 KB blocks.
 bench_perm3: test/bench_perm3.c
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_perm3.c $(LDLIBS)
+
+# The library's own gather / write-back at full size on a synthetic component
+# layout, no factorization.  PERM_TREE=<checkout> builds it against another
+# tree's sources for A/B (e.g. a worktree of c3fffd0, the pre-change code).
+PERM_TREE ?= .
+bench_perm_lib: test/bench_perm_lib.c $(LIBSRCS) src/vsdlss_m3_internal.h
+	$(CC) $(filter-out -Iinclude,$(CFLAGS)) -I$(PERM_TREE)/include -I$(PERM_TREE)/src $(PARFLAGS) -o $@ \
+	    test/bench_perm_lib.c $(filter-out $(PERM_TREE)/src/vsdlss_m3.c,$(addprefix $(PERM_TREE)/,$(LIBSRCS))) $(LDLIBS)
 
 # Customer degree profile, 22,875,397 nodes (needs ~6 GB RAM), AMD, 2 threads
 bench-pg-profile: bench_pg_profile

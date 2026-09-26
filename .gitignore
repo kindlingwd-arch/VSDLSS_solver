@@ -40,6 +40,7 @@
 /bench_pg_profile
 /bench_perm2_only
 /bench_perm3
+/bench_perm_lib
 /bench_pg_solve
 /bench_ibmpg
 /bench_dense
