@@ -1,0 +1,13 @@
+# nets: VDD n=4160001 lattice=1400x1483  GND n=3839999 lattice=1366x1403
+# pg_profile n=8000000 edges=10000000 nnz_upper=18000000 nnz_full=28000000 max_degree=10 lattice=1400x1483 gen=2.6s
+# degree  target:   d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3
+# degree  achieved: d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3 (d0=0)
+# rss after build: 766 MB
+# factor: order=5 threads=1 time=14.88s components=2 core_n=2152277 (26.90%) core_nnzL=160.2M peak_rss=2597 MB page_faults=317832
+# reference cfg=0 backward_error=3.21e-17 fuse_min=64 fuse_k=16
+# full solve (vsdlss_m3_solve, 15 rounds, rotated order):
+AB_FULL cfg=0  median=0.68420s min=0.67017s paired_ratio_median=1.0000 q25=1.0000 q75=1.0000 bitwise=ref
+AB_FULL cfg=15 median=0.60221s min=0.59115s paired_ratio_median=0.8816 q25=0.8700 q75=0.8961 bitwise=ref
+AB_FULL cfg=23 median=0.68811s min=0.68529s paired_ratio_median=1.0114 q25=1.0060 q75=1.0191 bitwise=ref
+AB_FULL cfg=31 median=0.62970s min=0.61859s paired_ratio_median=0.9306 q25=0.9159 q75=0.9366 bitwise=ref
+# peak_rss=2691 MB huge_pages=2038 MB

@@ -4,6 +4,9 @@
  * must reproduce it bitwise; bit 8 (unordered triangle sums) reports its
  * largest relative difference.  Build with -DVSDLSS_PROF_BACK to also time
  * the >=32-column panel calls per width bucket.
+ * Bit 16 of a setting runs the multi-threaded tree schedule, split for
+ * AB_TREE_NT threads (default 8), whatever the thread count; with
+ * OMP_THREAD_LIMIT=1 it executes serially, which measures its total work.
  * Derived from bench_solve_v2.c:
  * Generator and arguments are those of bench_pg_profile.c (copied below);
  * after one factorization it alternates vsdlss_solve_v2 = 0 (previous
@@ -283,21 +286,21 @@ int main(int argc,char **argv)
     double *b=malloc((size_t)n*sizeof(double)),*x=malloc((size_t)n*sizeof(double)),*xr=malloc((size_t)n*sizeof(double));
     if(!b||!x||!xr){puts("alloc failed");return 1;}
     for(csi i=0;i<n;i++)b[i]=uni(-1e-3,0);
+    { const char *e=getenv("AB_SOLVE_THREADS"); if(e&&atoi(e)>0&&vsdlss_set_num_threads(atoi(e))!=VSDLSS_OK){puts("bad solve thread count");return 1;} }
+    int tree_nt=8; { const char *e=getenv("AB_TREE_NT"); if(e&&atoi(e)>1)tree_nt=atoi(e); }
     int cfgs[8],nc=0; { const char *e=getenv("AB_CFGS"); char buf[64]; snprintf(buf,sizeof buf,"%s",e?e:"3,7");
         for(char *t=strtok(buf,",");t&&nc<8;t=strtok(NULL,","))cfgs[nc++]=atoi(t); }
-    vsdlss_solve_v2=cfgs[0]; st=vsdlss_m3_solve(f,b,xr);
+    vsdlss_solve_v2=cfgs[0]&15; vsdlss_solve_tree_nt=(cfgs[0]&16)?tree_nt:0; st=vsdlss_m3_solve(f,b,xr);
     if(st!=VSDLSS_OK){printf("solve failed: %s\n",vsdlss_status_string(st));return 1;}
     double eta;vsdlss_backward_error(A,xr,b,&eta);
     printf("# reference cfg=%d backward_error=%.2e fuse_min=%lld fuse_k=%d\n",cfgs[0],eta,(long long)vsdlss_fuse_min,vsdlss_fuse_k);
-    double xm=0; for(csi i=0;i<n;i++)if(fabs(xr[i])>xm)xm=fabs(xr[i]);
     const char *e=getenv("AB_ROUNDS"); int rounds=e?atoi(e):15; if(rounds<3)rounds=3; if(rounds>200)rounds=200;
     static double T[8][200];
 #ifdef VSDLSS_PROF_BACK
     extern double vsdlss_prof_back[8]; extern long long vsdlss_prof_back_n[8];
     static double PB[8][8][200];
 #endif
-    double maxrel[8]={0};
-    for(int r=0;r<rounds;r++)for(int k=0;k<nc;k++){int ci=(k+r)%nc; vsdlss_solve_v2=cfgs[ci];
+    for(int r=0;r<rounds;r++)for(int k=0;k<nc;k++){int ci=(k+r)%nc; vsdlss_solve_v2=cfgs[ci]&15; vsdlss_solve_tree_nt=(cfgs[ci]&16)?tree_nt:0;
 #ifdef VSDLSS_PROF_BACK
         memset(vsdlss_prof_back,0,sizeof vsdlss_prof_back);
 #endif
@@ -306,8 +309,7 @@ int main(int argc,char **argv)
         for(int q=0;q<8;q++)PB[ci][q][r]=vsdlss_prof_back[q];
 #endif
         if(st!=VSDLSS_OK){printf("solve failed cfg %d\n",cfgs[ci]);return 1;}
-        if(cfgs[ci]&8){ double d=0; for(csi i=0;i<n;i++){double t=fabs(x[i]-xr[i]);if(t>d)d=t;} if(d/xm>maxrel[ci])maxrel[ci]=d/xm; }
-        else if(memcmp(x,xr,(size_t)n*sizeof(double))){printf("round %d cfg %d differs from reference\n",r,cfgs[ci]);return 1;}
+        if(memcmp(x,xr,(size_t)n*sizeof(double))){printf("round %d cfg %d differs from reference\n",r,cfgs[ci]);return 1;}
     }
     printf("# full solve (vsdlss_m3_solve, %d rounds, rotated order):\n",rounds);
     for(int c=0;c<nc;c++){
@@ -317,8 +319,7 @@ int main(int argc,char **argv)
         for(int r=0;r<rounds;r++)ratio[r]=T[c][r]/T[0][r];
         qsort(ratio,rounds,sizeof(double),cmpd);
         printf("AB_FULL cfg=%-2d median=%.5fs min=%.5fs paired_ratio_median=%.4f q25=%.4f q75=%.4f %s",cfgs[c],s[rounds/2],s[0],
-               ratio[rounds/2],ratio[rounds/4],ratio[(3*rounds)/4],cfgs[c]&8?"":"bitwise=ref");
-        if(cfgs[c]&8)printf("max_rel_diff=%.2e",maxrel[c]);
+               ratio[rounds/2],ratio[rounds/4],ratio[(3*rounds)/4],"bitwise=ref");
         puts("");
     }
 #ifdef VSDLSS_PROF_BACK

@@ -231,6 +231,12 @@ vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
 /* 1 when wide panels are solved with BLAS (VSDLSS_BLAS_SOLVE_MIN > 0). */
 int vsdlss_panel_solve_uses_blas(void);
 #endif
+vsdlss_status vsdlss_panel_forward_prefix(const double *, csi begin, csi width, csi ext,
+                                          csi used, const csi *index, double *);
+/* Test/benchmark hook: when > 1, vsdlss_sn_solve_inplace always runs the
+ * tree schedule split for this many threads (with OMP_THREAD_LIMIT=1 it
+ * then executes serially). */
+extern int vsdlss_solve_tree_nt;
 /* Solve-kernel selection bits (see vsdlss_panel.c); -1 until first use. */
 extern int vsdlss_solve_v2;
 extern csi vsdlss_fuse_min;

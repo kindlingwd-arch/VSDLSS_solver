@@ -174,8 +174,9 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
 /* Solve-kernel selection (bit 1: register-resident forward external update;
  * bit 2: interleaved backward dot products; bit 4: backward triangle
  * interleaved with the external dots for widths >= VSDLSS_FUSE_MIN, default
- * 64, one 4-row dot step per VSDLSS_FUSE_K triangle terms, default 16).
- * Default 7; VSDLSS_SOLVE_V2 overrides.  Every setting gives the same bits. */
+ * 64, one 4-row dot step per VSDLSS_FUSE_K triangle terms, default 16;
+ * bit 8: the multi-threaded solve's subtree forward phase in push form
+ * instead of pull form, see solve_tree).  Default 15; VSDLSS_SOLVE_V2 overrides.  Every setting gives the same bits. */
 int vsdlss_solve_v2 = -1;
 csi vsdlss_fuse_min = 64;
 int vsdlss_fuse_k = 16;
@@ -186,7 +187,7 @@ void vsdlss_solve_v2_init(void)
         e = getenv("VSDLSS_FUSE_MIN"); if (e && atoll(e) > 0) vsdlss_fuse_min = atoll(e);
         e = getenv("VSDLSS_FUSE_K"); if (e && atoi(e) > 0) vsdlss_fuse_k = atoi(e);
         e = getenv("VSDLSS_SOLVE_V2");
-        vsdlss_solve_v2 = e ? atoi(e) & 7 : 7;
+        vsdlss_solve_v2 = e ? atoi(e) & 15 : 15;
     }
 }
 
@@ -210,6 +211,34 @@ static vsdlss_status simd_fwd_narrow(const double *a,csi begin,csi width,
     if(ext&&vsdlss_simd_ext_update(a+width,rows,width,x+begin,index,ext,x))
         return VSDLSS_ERR_NONFINITE;
     return VSDLSS_OK;
+}
+
+/* Forward step of one panel in push form, external update restricted to the
+ * first `used` of its `ext` rows (the rows inside the caller's subtree; the
+ * rest are pulled later by their targets).  Per entry the operations are
+ * those of vsdlss_panel_solve(back=0): same bits. */
+vsdlss_status vsdlss_panel_forward_prefix(const double *a,csi begin,csi width,csi ext,
+                                          csi used,const csi *index,double *x)
+{
+    const csi rows=width+ext;
+    const int simd=vsdlss_simd_enabled();
+    for(csi j=0;j<width;j++){
+        double d=a[j*rows+j];
+        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
+        x[begin+j]/=d;
+        if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
+        if(simd)vsdlss_simd_axpy_neg(x+begin+j+1,a+j*rows+j+1,x[begin+j],width-j-1);
+        else for(csi r=j+1;r<width;r++)x[begin+r]-=a[j*rows+r]*x[begin+j];
+    }
+    if(used<=0)return VSDLSS_OK;
+    if(simd)return vsdlss_simd_ext_update(a+width,rows,width,x+begin,index,used,x)?VSDLSS_ERR_NONFINITE:VSDLSS_OK;
+    int bad=0;
+    for(csi r=0;r<used;r++){
+        double v=x[index[r]];
+        for(csi j=0;j<width;j++)v-=a[j*rows+width+r]*x[begin+j];
+        x[index[r]]=v; if(!isfinite(v))bad=1;
+    }
+    return bad?VSDLSS_ERR_NONFINITE:VSDLSS_OK;
 }
 
 #ifdef VSDLSS_BLAS

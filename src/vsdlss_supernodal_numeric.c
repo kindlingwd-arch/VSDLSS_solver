@@ -614,7 +614,11 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
         const double *as = f->panel + f->panel_offset[sn] + ws;
         const csi *R = f->row_index + f->row_ptr[sn];
         const csi r0 = f->blk_first[b], r1 = f->blk_end[b];
-        if (simd) { vsdlss_simd_block_update(as, rs, ws, x + bs, R, r0, r1, x); continue; }
+        if (simd) {
+            if (vsdlss_solve_v2 & 8) (void)vsdlss_simd_ext_update(as + r0, rs, ws, x + bs, R + r0, r1 - r0, x);
+            else vsdlss_simd_block_update(as, rs, ws, x + bs, R, r0, r1, x);
+            continue;
+        }
         for (csi j = 0; j < ws; ++j) {
             const double xj = x[bs + j], *col = as + j * rs;
             for (csi r = r0; r < r1; ++r) x[R[r]] -= col[r] * xj;
@@ -693,7 +697,13 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
             const csi *R = f->row_index + f->row_ptr[sn];
             const csi s = lower_bound_csi(R, f->blk_first[b], f->blk_end[b], lo);
             const csi e = lower_bound_csi(R, s, f->blk_end[b], hi);
-            if (simd) { if (s < e) vsdlss_simd_block_update(as, rs, ws, x + bs, R, s, e, x); continue; }
+            if (simd) {
+                if (s < e) {
+                    if (vsdlss_solve_v2 & 8) (void)vsdlss_simd_ext_update(as + s, rs, ws, x + bs, R + s, e - s, x);
+                    else vsdlss_simd_block_update(as, rs, ws, x + bs, R, s, e, x);
+                }
+                continue;
+            }
             for (csi j = 0; j < ws && s < e; ++j) {
                 const double xj = x[bs + j], *col = as + j * rs;
                 for (csi r = s; r < e; ++r) x[R[r]] -= col[r] * xj;
@@ -738,11 +748,46 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
     return bad;
 }
 
+/* A subtree whose postorder is the index range order[k0] .. order[k1]
+ * (ascending, contiguous).  Then its supernodes are exactly the sources that
+ * precede its root, in the serial solve's order, and its columns are
+ * [column_start[order[k0]], column_start[order[k1] + 1]). */
+static int subtree_contiguous(const tree_info *t, csi k0, csi k1)
+{
+    const csi s0 = t->order[k0];
+    for (csi k = k0 + 1; k <= k1; ++k) if (t->order[k] != s0 + (k - k0)) return 0;
+    return 1;
+}
+
+/* Forward phase of one contiguous subtree in push form.  Each panel pushes
+ * its external update into the rows below the subtree root's last column
+ * (an ascending prefix of its row list: the ancestors inside the subtree);
+ * rows of tree-top targets are left for those targets' forward_pull.  Per
+ * entry: an entry of a subtree target receives its sources' subtractions in
+ * ascending source order, columns ascending, then its own triangle -- the
+ * push-form serial solve; an entry of a top target is untouched here and
+ * pulled as before.  So the result is bitwise that of forward_pull.
+ * Returns 1 (invalid pivot) or 2 (non-finite) like the other phases. */
+static int forward_push_subtree(const vsdlss_sn_factor *f, const tree_info *t, csi k0, csi k1, double *x)
+{
+    const csi s0 = t->order[k0], s1 = t->order[k1], limit = f->column_start[s1 + 1];
+    for (csi d = s0; d <= s1; ++d) {
+        const csi b = f->column_start[d], w = f->column_start[d + 1] - b;
+        const csi ext = f->row_ptr[d + 1] - f->row_ptr[d];
+        const csi *R = ext ? f->row_index + f->row_ptr[d] : NULL;
+        const csi used = ext ? lower_bound_csi(R, 0, ext, limit) : 0;
+        vsdlss_status st = vsdlss_panel_forward_prefix(f->panel + f->panel_offset[d], b, w, ext, used, R, x);
+        if (st != VSDLSS_OK) return st == VSDLSS_ERR_NONFINITE ? 2 : 1;
+    }
+    return 0;
+}
+
 /* Forward tree top on one team for the whole top (default; 0 selects a team
  * per large target, the former schedule).  Targets run in the same order
  * either way: runs of small targets on one thread, each large target on
  * the team, so the results are the same bits. */
 int vsdlss_fwd_top_team = 1;
+int vsdlss_solve_tree_nt = 0;
 
 static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
 {
@@ -789,9 +834,14 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
     if (prof < 0) { const char *e = getenv("VSDLSS_SOLVE_PROFILE"); prof = e && *e && *e != '0'; }
     double tp[5] = {0}; if (prof) tp[0] = omp_get_wtime();
 #endif
+    vsdlss_solve_v2_init();
+    const int push_sub = (vsdlss_solve_v2 & 8) != 0;
     VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
-    for (csi i = 0; i < nsub; ++i)
-        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
+    for (csi i = 0; i < nsub; ++i) {
+        const csi k0 = t->first[sub[i]], k1 = sub_end[i];
+        if (push_sub && subtree_contiguous(t, k0, k1)) bad |= forward_push_subtree(f, t, k0, k1, x);
+        else for (csi k = k0; !bad && k <= k1; ++k) bad |= forward_pull(f, t->order[k], x);
+    }
 #ifdef _OPENMP
     if (prof) tp[1] = omp_get_wtime();
 #endif
@@ -880,6 +930,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
      * count takes the serial path (results then match for all counts). */
     if (vsdlss_panel_solve_uses_blas()) nt = 1;
 #endif
+    if (vsdlss_solve_tree_nt > 1) nt = vsdlss_solve_tree_nt;
     if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) return solve_tree(f, x, nt);
     for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
         csi sn = back ? f->count - 1 - t : t;

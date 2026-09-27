@@ -1,6 +1,7 @@
 #include "../src/vsdlss_m3_internal.h"
 #include "vsdlss.h"
 #include <string.h>
+#include <math.h>
 #define CHECK(e) do{if(!(e)){fprintf(stderr,"FAIL parallel %d: %s\n",__LINE__,#e);return 1;}}while(0)
 /* Construct A(:,J)=L(:,J)*L(J,J)^T independently; cover empty,
    partial, and multiple external row tiles in both build modes. */
@@ -365,12 +366,54 @@ static int two_pass_permutation(void)
     return 0;
 }
 
+/* Multi-threaded solve schedule, forced for several splits: pull-form and
+ * push-form subtree forward (VSDLSS_SOLVE_V2 bit 8) must both reproduce the
+ * serial push-form solve bitwise, for 1 and 4 threads. */
+static int tree_forward_forms(void)
+{
+    const csi g=90,n=g*g; vsdlss *A=vsdlss_spalloc(n,n,3*n,1,0); CHECK(A);
+    csi p=0;
+    for(csi j=0;j<n;j++){
+        A->p[j]=p;
+        if(j>=g){A->i[p]=j-g;A->x[p++]=-1.0-0.001*(j%7);}
+        if(j%g){A->i[p]=j-1;A->x[p++]=-1.0-0.002*(j%5);}
+        A->i[p]=j;A->x[p++]=4.5;
+    }
+    A->p[n]=p;
+    double *b=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8); CHECK(b&&ref&&x);
+    for(csi i=0;i<n;i++)b[i]=(i%3?1:-1)*(0.25+0.001*i);
+    vsdlss_m3_factor *f=NULL;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+    const int v2=vsdlss_solve_v2;
+    vsdlss_solve_v2=0; vsdlss_solve_tree_nt=0;
+    CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
+    static const int cfg[]={0,7,15},tnt[]={2,3,8,64};
+    for(int th=1;th<=4;th+=3){
+        if(th>1&&!vsdlss_parallel_enabled())break;
+        CHECK(vsdlss_set_num_threads(th)==VSDLSS_OK);
+        for(int c=0;c<3;c++)for(int k=0;k<4;k++){
+            vsdlss_solve_v2=cfg[c]; vsdlss_solve_tree_nt=tnt[k];
+            memset(x,0,n*8);
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,n*8)==0);
+        }
+    }
+    b[n/2]=NAN; vsdlss_solve_v2=15; vsdlss_solve_tree_nt=8;
+    CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_ERR_NONFINITE);
+    vsdlss_solve_v2=v2; vsdlss_solve_tree_nt=0;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    vsdlss_m3_factor_free(f); vsdlss_spfree(A); free(b); free(ref); free(x);
+    return 0;
+}
+
 int main(void)
 {
     CHECK(panel_tile_boundaries()==0);
     CHECK(kernels()==0);
     CHECK(internal_order_solve()==0);
     CHECK(two_pass_permutation()==0);
+    CHECK(tree_forward_forms()==0);
     if(vsdlss_parallel_enabled()){
         CHECK(components_and_rhs()==0);CHECK(components_threads_equal()==0);CHECK(disk()==0);CHECK(solve_kernel()==0);
     }
