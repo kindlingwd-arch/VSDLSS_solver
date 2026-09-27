@@ -45,3 +45,6 @@
 /bench_pardiso
 
 /bench_dense_solve
+
+/bench_solve_buckets
+/.bench-profile/

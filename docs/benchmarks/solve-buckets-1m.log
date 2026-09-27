@@ -1,0 +1,75 @@
+# nets: VDD n=520001 lattice=500x521  GND n=479999 lattice=480x501
+# pg_profile n=1000000 edges=1250000 nnz_upper=2250000 nnz_full=3500000 max_degree=10 lattice=500x521 gen=0.3s
+# degree  target:   d1=100000 d2=302038 d3=595948 d4=2001 d5=10 d6+=3
+# degree  achieved: d1=100000 d2=302038 d3=595948 d4=2001 d5=10 d6+=3 (d0=0)
+# rss after build: 94 MB
+# factor: order=5 threads=1 time=1.02s components=2 core_n=261267 (26.13%) core_nnzL=14.6M peak_rss=283 MB page_faults=66493
+PROFILE_STRUCTURE n=1000000 core_n=261267 reduced=738733 max_width=734
+PROFILE_SHAPE bucket=0 count=67825 columns=129402 bytes=14003728
+PROFILE_SHAPE bucket=1 count=9365 columns=112086 bytes=55524424
+PROFILE_SHAPE bucket=2 count=213 columns=9058 bytes=17640640
+PROFILE_SHAPE bucket=3 count=62 columns=5290 bytes=17441000
+PROFILE_SHAPE bucket=4 count=21 columns=3535 bytes=18284360
+PROFILE_SHAPE bucket=5 count=2 columns=526 bytes=2850064
+PROFILE_SHAPE bucket=6 count=2 columns=1370 bytes=7546016
+PROFILE_CLOCK seconds=0.000000030 small_panel_sampling=1/64
+PROFILE_BASELINE median=0.050791099 min=0.048227486 max=0.051745296
+PROFILE_RUN run=0 total=0.048442539 core=0.032452417 reduce_fwd=0.002806218 reduce_back=0.002499856 other=0.010684048 checked=bitwise
+PROFILE_BUCKET run=0 bucket=0 fwd=0.001583032 back=0.003083700 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=0 bucket=1 fwd=0.008868655 back=0.007604637 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=0 bucket=2 fwd=0.001656927 back=0.010972624 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=0 bucket=3 fwd=0.001687687 back=0.001209593 back_diag=0.000307455 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=0 bucket=4 fwd=0.001648073 back=0.000980057 back_diag=0.000326291 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=0 bucket=5 fwd=0.000213432 back=0.000216297 back_diag=0.000129997 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=0 bucket=6 fwd=0.000339531 back=0.000418390 back_diag=0.000417219 calls_fwd=2 calls_back=2
+PROFILE_RUN run=1 total=0.048173004 core=0.032065674 reduce_fwd=0.002594209 reduce_back=0.002586587 other=0.010926534 checked=bitwise
+PROFILE_BUCKET run=1 bucket=0 fwd=0.001498741 back=0.004307144 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=1 bucket=1 fwd=0.009919524 back=0.007266663 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=1 bucket=2 fwd=0.002283999 back=0.001369448 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=1 bucket=3 fwd=0.001956433 back=0.001077590 back_diag=0.000235969 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=1 bucket=4 fwd=0.001825653 back=0.000950816 back_diag=0.000288236 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=1 bucket=5 fwd=0.000216236 back=0.000153190 back_diag=0.000071968 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=1 bucket=6 fwd=0.000317328 back=0.000458330 back_diag=0.000457249 calls_fwd=2 calls_back=2
+PROFILE_RUN run=2 total=0.047664327 core=0.032122279 reduce_fwd=0.002377232 reduce_back=0.002533869 other=0.010630947 checked=bitwise
+PROFILE_BUCKET run=2 bucket=0 fwd=0.001502772 back=0.002916411 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=2 bucket=1 fwd=0.005723490 back=0.007002262 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=2 bucket=2 fwd=0.001468351 back=0.001898540 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=2 bucket=3 fwd=0.001687781 back=0.001075555 back_diag=0.000235943 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=2 bucket=4 fwd=0.001628506 back=0.000901899 back_diag=0.000288764 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=2 bucket=5 fwd=0.000235514 back=0.000155645 back_diag=0.000071598 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=2 bucket=6 fwd=0.000318811 back=0.000415707 back_diag=0.000414766 calls_fwd=2 calls_back=2
+PROFILE_RUN run=3 total=0.047223523 core=0.030872006 reduce_fwd=0.002879318 reduce_back=0.002528470 other=0.010943729 checked=bitwise
+PROFILE_BUCKET run=3 bucket=0 fwd=0.001398603 back=0.002700139 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=3 bucket=1 fwd=0.006677436 back=0.007796713 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=3 bucket=2 fwd=0.001973765 back=0.001134278 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=3 bucket=3 fwd=0.001777377 back=0.001055251 back_diag=0.000237068 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=3 bucket=4 fwd=0.001667167 back=0.000916601 back_diag=0.000290460 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=3 bucket=5 fwd=0.000231959 back=0.000169436 back_diag=0.000072029 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=3 bucket=6 fwd=0.000318189 back=0.000412863 back_diag=0.000411551 calls_fwd=2 calls_back=2
+PROFILE_RUN run=4 total=0.049195564 core=0.032882845 reduce_fwd=0.002578334 reduce_back=0.002550423 other=0.011183962 checked=bitwise
+PROFILE_BUCKET run=4 bucket=0 fwd=0.001529105 back=0.002784092 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=4 bucket=1 fwd=0.011947880 back=0.007068458 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=4 bucket=2 fwd=0.001365969 back=0.001343249 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=4 bucket=3 fwd=0.001928006 back=0.001078229 back_diag=0.000236203 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=4 bucket=4 fwd=0.001873312 back=0.000973067 back_diag=0.000348536 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=4 bucket=5 fwd=0.000214763 back=0.000160122 back_diag=0.000073341 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=4 bucket=6 fwd=0.000436639 back=0.000414273 back_diag=0.000413322 calls_fwd=2 calls_back=2
+PROFILE_RUN run=5 total=0.052513733 core=0.036268056 reduce_fwd=0.002587889 reduce_back=0.002992659 other=0.010665129 checked=bitwise
+PROFILE_BUCKET run=5 bucket=0 fwd=0.001653395 back=0.003000041 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=5 bucket=1 fwd=0.006369932 back=0.007546715 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=5 bucket=2 fwd=0.001354538 back=0.002215697 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=5 bucket=3 fwd=0.002256447 back=0.001106361 back_diag=0.000236999 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=5 bucket=4 fwd=0.001789338 back=0.001049686 back_diag=0.000320249 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=5 bucket=5 fwd=0.000216136 back=0.000157418 back_diag=0.000073130 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=5 bucket=6 fwd=0.000335715 back=0.000801617 back_diag=0.000800376 calls_fwd=2 calls_back=2
+PROFILE_RUN run=6 total=0.050633450 core=0.033533655 reduce_fwd=0.002608109 reduce_back=0.002959469 other=0.011532217 checked=bitwise
+PROFILE_BUCKET run=6 bucket=0 fwd=0.001442561 back=0.003023268 back_diag=0.000000000 calls_fwd=67825 calls_back=67825
+PROFILE_BUCKET run=6 bucket=1 fwd=0.007172564 back=0.007070832 back_diag=0.000000000 calls_fwd=9365 calls_back=9365
+PROFILE_BUCKET run=6 bucket=2 fwd=0.001760516 back=0.001269267 back_diag=0.000000000 calls_fwd=213 calls_back=213
+PROFILE_BUCKET run=6 bucket=3 fwd=0.001936600 back=0.001200269 back_diag=0.000304198 calls_fwd=62 calls_back=62
+PROFILE_BUCKET run=6 bucket=4 fwd=0.001738451 back=0.000970706 back_diag=0.000307612 calls_fwd=21 calls_back=21
+PROFILE_BUCKET run=6 bucket=5 fwd=0.000211189 back=0.000157938 back_diag=0.000072809 calls_fwd=2 calls_back=2
+PROFILE_BUCKET run=6 bucket=6 fwd=0.000332841 back=0.000405210 back_diag=0.000404149 calls_fwd=2 calls_back=2
+# solve: first=0.74743s warm=0.04830s batch1=0.05093s (0.05093s/RHS) backward_error=1.64e-17 peak_rss=283 MB huge_pages=154 MB
+# packed: warm=0.03887s checked=bitwise (permutation construction excluded)
+# paired: ordinary_median=0.04842s packed_median=0.03891s (alternating order, 6 each)
