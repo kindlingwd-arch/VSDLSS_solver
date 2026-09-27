@@ -630,7 +630,17 @@ static vsdlss_status blas_fwd_diag(const vsdlss_sn_factor *f, csi d, double *x, 
     return vsdlss_panel_blas_forward(f->panel + f->panel_offset[d], bd, wd,
                                      f->row_ptr[d + 1] - f->row_ptr[d], x, bf->t + bf->toff[d]);
 }
+static vsdlss_status blas_fwd_diag_team(const vsdlss_sn_factor *f, csi d, double *x, const blas_fwd *bf,
+                                        int tid, int T)
+{
+    const csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
+    return vsdlss_panel_blas_forward_team(f->panel + f->panel_offset[d], bd, wd,
+                                          f->row_ptr[d + 1] - f->row_ptr[d], x, bf->t + bf->toff[d], tid, T);
+}
 #else
+static vsdlss_status blas_fwd_diag_team(const vsdlss_sn_factor *f, csi d, double *x, const blas_fwd *bf,
+                                        int tid, int T)
+{ (void)f; (void)d; (void)x; (void)bf; (void)tid; (void)T; return VSDLSS_ERR_INVALID; }
 static vsdlss_status blas_fwd_diag(const vsdlss_sn_factor *f, csi d, double *x, const blas_fwd *bf)
 { (void)f; (void)d; (void)x; (void)bf; return VSDLSS_ERR_INVALID; }
 #endif
@@ -760,11 +770,10 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
         }
         VSDLSS_OMP(omp barrier)
         if (bf && bf->toff[d] >= 0) {
-            /* One dtrsv + dgemv, as in the serial solve (splitting them
-             * would change the rounding); the single's barrier publishes
-             * x_J and t_d to the team. */
-            VSDLSS_OMP(omp single)
-            if (blas_fwd_diag(f, d, x, bf) != VSDLSS_OK) *bad = 1;
+            /* The blocked BLAS step split over this team: the same BLAS
+             * calls as the serial solve, so the same bits; it ends with a
+             * barrier that publishes x_J and t_d. */
+            if (blas_fwd_diag_team(f, d, x, bf, tid, T) != VSDLSS_OK && tid == 0) *bad = 1;
             return;
         }
         for (csi jb = 0; jb < wd; jb += FWD_TOP_BLK) {

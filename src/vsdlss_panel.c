@@ -176,48 +176,143 @@ static csi solve_blas_min(void)
 }
 int vsdlss_panel_solve_uses_blas(void) { return solve_blas_min() > 0; }
 csi vsdlss_panel_solve_blas_min(void) { return solve_blas_min(); }
-/* Forward BLAS step of one panel without the scatter: dtrsv on the
- * diagonal block, then t = L_ext * x_J (dgemv, beta 0) for the ext external
- * rows.  The push form subtracts t[r] from x[index[r]]; the tree solve
- * stores t and lets each target pull its rows, so both apply the same t
- * with one subtraction per entry and give the same bits.  Pivots are
- * checked first; non-finite results are left to the caller's scan. */
-vsdlss_status vsdlss_panel_blas_forward(const double *a, csi begin, csi width,
-                                        csi ext, double *x, double *t)
-{
-    const csi rows = width + ext;
-    int W = (int)width, E = (int)ext, LD = (int)rows, one = 1;
-    double p1 = 1.0, zero = 0.0;
-    for (csi j = 0; j < width; j++) {
-        double d = a[j * rows + j];
-        if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
-    }
-    dtrsv_("L", "N", "N", &W, a, &LD, x + begin, &one);
-    if (E) dgemv_("N", &E, &W, &p1, a + width, &LD, x + begin, &one, &zero, t, &one);
-    return VSDLSS_OK;
-}
-/* Backward BLAS step in fixed column blocks of VSDLSS_BLAS_BWD_BLK
- * (default 64; 0 selects the single dgemv + dtrsv form, one thread):
- *   1. x_J -= L_ext^T t, one dgemv per column block;
- *   2. L_JJ^T x_J = y right-looking over the same blocks from the last:
- *      dtrsv on the diagonal block, then one dgemv per earlier column block
- *      subtracts that block's contribution.
- * Every BLAS call and its arguments depend only on the panel and the block
- * size, never on the team size; the calls of one step touch disjoint
- * columns, so a team may split them.  Results are therefore the same bits
- * for every thread count (they differ from the single-call form). */
-static csi bwd_blk(void)
+
+/* BLAS panel solves run in fixed column blocks of VSDLSS_BLAS_SOLVE_BLK
+ * (default 64; 0 selects the single-call forms, dtrsv + dgemv on one
+ * thread).  Every BLAS call and its arguments depend only on the panel and
+ * the block size, never on the team size, and the calls of one step write
+ * disjoint parts of x (or t), so a thread team may split them: results are
+ * the same bits for every thread count.  They differ from the single-call
+ * forms. */
+static csi solve_blk(void)
 {
     static atomic_llong cached = -1;
     long long v = atomic_load_explicit(&cached, memory_order_relaxed);
     if (v < 0) {
-        const char *e = getenv("VSDLSS_BLAS_BWD_BLK");
+        const char *e = getenv("VSDLSS_BLAS_SOLVE_BLK");
         v = e ? atoll(e) : 64;
         if (v < 0) v = 0;
         atomic_store_explicit(&cached, v, memory_order_relaxed);
     }
     return (csi)v;
 }
+
+/* External rows per dgemv of the blocked forward step: taller than a
+ * column block, since a short dgemv_n over all W columns runs slowly and
+ * the external product needs no finer split for a team. */
+#define FWD_EXT_ROWS(B) (4 * (B))
+
+static int blas_pivots_ok(const double *a, csi width, csi rows)
+{
+    for (csi j = 0; j < width; j++) {
+        double d = a[j * rows + j];
+        if (!isfinite(d) || d <= 0) return 0;
+    }
+    return 1;
+}
+
+/* Team size for a blocked BLAS step: several blocks and enough work. */
+static int blas_team(csi width, csi ext, csi B)
+{
+    if (!B) return 1;
+    const csi nblk = (width + B - 1) / B + (ext + FWD_EXT_ROWS(B) - 1) / FWD_EXT_ROWS(B);
+    if (nblk < 2) return 1;
+    int nt = vsdlss_parallel_width((double)width * (double)(width + ext));
+    if (nt > nblk) nt = (int)nblk;
+    return nt < 1 ? 1 : nt;
+}
+
+/* Blocked forward step, called by every thread (tid of T) of a team, or
+ * with T = 1 anywhere (then no worksharing or barrier directive is reached:
+ * inside a subtree task it would bind to that task's team):
+ *   1. L_JJ x_J = b left to right: dtrsv on diagonal block k (one thread),
+ *      then one dgemv per later row block subtracts block k's columns;
+ *   2. t = L_ext x_J, one dgemv per block of B external rows.
+ * Ends with a team barrier, so x_J and t are visible to the whole team. */
+static void blas_forward_blocked(const double *a, csi begin, csi width, csi ext,
+                                 double *x, double *t, csi B, int tid, int T)
+{
+    const csi rows = width + ext, nb = (width + B - 1) / B, EB = FWD_EXT_ROWS(B);
+    int LD = (int)rows, one = 1, W = (int)width;
+    double p1 = 1.0, m1 = -1.0, zero = 0.0;
+    double *xj = x + begin;
+    for (csi k = 0; k < nb; ++k) {
+        const csi jb = k * B, je = jb + B < width ? jb + B : width;
+        int K = (int)(je - jb);
+        if (T > 1) {
+            VSDLSS_OMP(omp single)
+            dtrsv_("L", "N", "N", &K, a + jb * rows + jb, &LD, xj + jb, &one);
+        } else dtrsv_("L", "N", "N", &K, a + jb * rows + jb, &LD, xj + jb, &one);
+        if (k == nb - 1) break;
+        for (csi c = k + 1 + tid; c < nb; c += T) {
+            const csi r0 = c * B, r1 = r0 + B < width ? r0 + B : width;
+            int M = (int)(r1 - r0);
+            dgemv_("N", &M, &K, &m1, a + jb * rows + r0, &LD, xj + jb, &one, &p1, xj + r0, &one);
+        }
+        if (T > 1) { VSDLSS_OMP(omp barrier) }
+    }
+    for (csi c = tid; c * EB < ext; c += T) {
+        const csi r0 = c * EB, r1 = r0 + EB < ext ? r0 + EB : ext;
+        int M = (int)(r1 - r0);
+        dgemv_("N", &M, &W, &p1, a + width + r0, &LD, xj, &one, &zero, t + r0, &one);
+    }
+    if (T > 1) { VSDLSS_OMP(omp barrier) }
+}
+
+/* Forward BLAS step of one panel without the scatter: x_J = L_JJ^{-1} x_J,
+ * then t = L_ext * x_J for the ext external rows.  The push form subtracts
+ * t[r] from x[index[r]]; the tree solve stores t and lets each target pull
+ * its rows, so both apply the same t with one subtraction per entry and
+ * give the same bits.  Pivots are checked first; non-finite results are
+ * left to the caller's scan.  Opens a team for large panels. */
+vsdlss_status vsdlss_panel_blas_forward(const double *a, csi begin, csi width,
+                                        csi ext, double *x, double *t)
+{
+    const csi rows = width + ext, B = solve_blk();
+    if (!blas_pivots_ok(a, width, rows)) return VSDLSS_ERR_INVALID;
+    if (!B) {
+        int W = (int)width, E = (int)ext, LD = (int)rows, one = 1;
+        double p1 = 1.0, zero = 0.0;
+        dtrsv_("L", "N", "N", &W, a, &LD, x + begin, &one);
+        if (E) dgemv_("N", &E, &W, &p1, a + width, &LD, x + begin, &one, &zero, t, &one);
+        return VSDLSS_OK;
+    }
+    int nt = blas_team(width, ext, B);
+    if (nt > 1) {
+        VSDLSS_OMP(omp parallel num_threads(nt))
+        {
+#ifdef _OPENMP
+            if (omp_get_thread_num() == 0) vsdlss_parallel_observe();
+            blas_forward_blocked(a, begin, width, ext, x, t, B, omp_get_thread_num(), omp_get_num_threads());
+#endif
+        }
+    } else blas_forward_blocked(a, begin, width, ext, x, t, B, 0, 1);
+    return VSDLSS_OK;
+}
+
+/* The same step by every thread (tid of T) of an existing team; the status
+ * is the same on every thread.  Same bits as vsdlss_panel_blas_forward. */
+vsdlss_status vsdlss_panel_blas_forward_team(const double *a, csi begin, csi width,
+                                             csi ext, double *x, double *t, int tid, int T)
+{
+    const csi B = solve_blk();
+    if (!blas_pivots_ok(a, width, width + ext)) return VSDLSS_ERR_INVALID;
+    if (T <= 1) return vsdlss_panel_blas_forward(a, begin, width, ext, x, t);
+    if (!B) {                                   /* single-call form: one thread */
+        VSDLSS_OMP(omp single)
+        (void)vsdlss_panel_blas_forward(a, begin, width, ext, x, t);
+        return VSDLSS_OK;
+    }
+    blas_forward_blocked(a, begin, width, ext, x, t, B, tid, T);
+    return VSDLSS_OK;
+}
+
+/* Backward BLAS step in the same fixed column blocks:
+ *   1. x_J -= L_ext^T t, one dgemv per column block;
+ *   2. L_JJ^T x_J = y right-looking over the same blocks from the last:
+ *      dtrsv on the diagonal block, then one dgemv per earlier column block
+ *      subtracts that block's contribution. */
+#define bwd_blk solve_blk
 
 /* Called by every thread (tid of T) of a team, or with T = 1 outside a
  * parallel region: contains team barriers. */
@@ -281,6 +376,7 @@ static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
             /* A team only when there are several blocks and enough work. */
             int nt = width > B ? vsdlss_parallel_width((double)width * (double)(width + ext)) : 1;
             if (nt > (width + B - 1) / B) nt = (int)((width + B - 1) / B);
+            if (nt < 1) nt = 1;
             if (nt > 1) {
                 VSDLSS_OMP(omp parallel num_threads(nt))
                 {

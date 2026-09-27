@@ -232,11 +232,16 @@ vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
 int vsdlss_panel_solve_uses_blas(void);
 /* Width from which vsdlss_panel_solve uses BLAS (0: never). */
 csi vsdlss_panel_solve_blas_min(void);
-/* Forward BLAS panel step without the scatter: dtrsv on the diagonal
- * block, t = L_ext * x_J for the external rows.  vsdlss_panel_solve's BLAS
- * forward is this followed by x[index[r]] -= t[r]. */
+/* Forward BLAS panel step without the scatter: L_JJ^{-1} on x_J, then
+ * t = L_ext * x_J for the external rows, in the fixed column blocks of
+ * VSDLSS_BLAS_SOLVE_BLK (a team for large panels).  vsdlss_panel_solve's
+ * BLAS forward is this followed by x[index[r]] -= t[r]. */
 vsdlss_status vsdlss_panel_blas_forward(const double *a, csi begin, csi width,
                                         csi ext, double *x, double *t);
+/* The same step run by every thread (tid of T) of an existing team (it
+ * contains team barriers); same bits as vsdlss_panel_blas_forward. */
+vsdlss_status vsdlss_panel_blas_forward_team(const double *a, csi begin, csi width,
+                                             csi ext, double *x, double *t, int tid, int T);
 #endif
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);

@@ -183,12 +183,11 @@ static int solve_kernel(void)
         CHECK(vsdlss_set_num_threads(4)==VSDLSS_OK);
         CHECK(vsdlss_panel_solve(a,0,width,ext,index,x,back)==VSDLSS_OK);
 #ifdef VSDLSS_BLAS
-        /* BLAS-solved panels: the forward step runs on one thread; the
-         * backward step splits its fixed column blocks over a team.  Same
-         * result either way. */
+        /* BLAS-solved panels: both steps split their fixed column blocks
+         * over a team (unless VSDLSS_BLAS_SOLVE_BLK=0).  Same result. */
         if(vsdlss_panel_solve_uses_blas()){
-            const char *e=getenv("VSDLSS_BLAS_BWD_BLK");   /* 0: single-call form, one thread */
-            CHECK((!back||(e&&atoll(e)<=0)||vsdlss_parallel_last_team_size()>1)&&memcmp(x,ref,rows*8)==0);
+            const char *e=getenv("VSDLSS_BLAS_SOLVE_BLK");   /* 0: single-call form, one thread */
+            CHECK(((e&&atoll(e)<=0)||vsdlss_parallel_last_team_size()>1)&&memcmp(x,ref,rows*8)==0);
         } else
 #endif
         CHECK(vsdlss_parallel_last_team_size()>1&&memcmp(x,ref,rows*8)==0);
