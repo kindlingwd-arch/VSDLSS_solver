@@ -3,6 +3,10 @@
 最后更新：2026-09-23。
 
 
+## 2026-09-27 增补：求解账本与内核
+
+分支 `perf/solve-ledger-kernels-20260927`（基于 `590190b`），见第 25 篇。新增 `VSDLSS_SOLVE_LEDGER` 单步时间账本、`vsdlss_m3_solve_packed_inplace`、默认 KV=2 面板内核（单线程求解 −15%，逐位一致）、opt-in KV=3 松弛回代。实测仅 1 vCPU，最大 4M；多线程与 8M 以上未测。
+
 ## 当前最新状态（2026-09-23）
 
 `main` 位于 `be9dc61`。远端所有 `codex/*`、`integrate/*` 分支与用户三批附件的工作均已合入。未合入的只有本地分支 `perf/components-parallel-20260922`，它已被第三批附件覆盖，建议废弃（见 [merge-20260923-c](merge-20260923-c.md)）。本节为当前口径；下文各节按里程碑保留历史记录。
