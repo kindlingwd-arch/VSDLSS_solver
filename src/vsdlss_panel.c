@@ -196,6 +196,65 @@ vsdlss_status vsdlss_panel_blas_forward(const double *a, csi begin, csi width,
     if (E) dgemv_("N", &E, &W, &p1, a + width, &LD, x + begin, &one, &zero, t, &one);
     return VSDLSS_OK;
 }
+/* Backward BLAS step in fixed column blocks of VSDLSS_BLAS_BWD_BLK
+ * (default 64; 0 selects the single dgemv + dtrsv form, one thread):
+ *   1. x_J -= L_ext^T t, one dgemv per column block;
+ *   2. L_JJ^T x_J = y right-looking over the same blocks from the last:
+ *      dtrsv on the diagonal block, then one dgemv per earlier column block
+ *      subtracts that block's contribution.
+ * Every BLAS call and its arguments depend only on the panel and the block
+ * size, never on the team size; the calls of one step touch disjoint
+ * columns, so a team may split them.  Results are therefore the same bits
+ * for every thread count (they differ from the single-call form). */
+static csi bwd_blk(void)
+{
+    static atomic_llong cached = -1;
+    long long v = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("VSDLSS_BLAS_BWD_BLK");
+        v = e ? atoll(e) : 64;
+        if (v < 0) v = 0;
+        atomic_store_explicit(&cached, v, memory_order_relaxed);
+    }
+    return (csi)v;
+}
+
+/* Called by every thread (tid of T) of a team, or with T = 1 outside a
+ * parallel region: contains team barriers. */
+static void blas_backward_team(const double *a, csi begin, csi width, csi ext,
+                               const double *t, double *x, csi B, int tid, int T)
+{
+    const csi rows = width + ext, nb = (width + B - 1) / B;
+    int LD = (int)rows, E = (int)ext, one = 1;
+    double p1 = 1.0, m1 = -1.0;
+    if (ext) {
+        for (csi c = tid; c < nb; c += T) {
+            const csi c0 = c * B, c1 = c0 + B < width ? c0 + B : width;
+            int N = (int)(c1 - c0);
+            dgemv_("T", &E, &N, &m1, a + c0 * rows + width, &LD, t, &one, &p1, x + begin + c0, &one);
+        }
+        if (T > 1) { VSDLSS_OMP(omp barrier) }
+    }
+    for (csi k = nb - 1; k >= 0; --k) {
+        const csi jb = k * B, je = jb + B < width ? jb + B : width;
+        int M = (int)(je - jb);
+        /* T == 1 may run inside another team (a subtree task): no
+         * worksharing or barriers then, they would bind to that team. */
+        if (T > 1) {
+            VSDLSS_OMP(omp single)
+            dtrsv_("L", "T", "N", &M, a + jb * rows + jb, &LD, x + begin + jb, &one);
+        } else dtrsv_("L", "T", "N", &M, a + jb * rows + jb, &LD, x + begin + jb, &one);
+        if (k == 0) break;
+        for (csi c = tid; c < k; c += T) {
+            const csi c0 = c * B, c1 = c0 + B;
+            int M = (int)(je - jb), N = (int)(c1 - c0);
+            dgemv_("T", &M, &N, &m1, a + c0 * rows + jb, &LD, x + begin + jb, &one, &p1, x + begin + c0, &one);
+        }
+        if (T > 1) { VSDLSS_OMP(omp barrier) }
+    }
+    (void)tid; (void)T;
+}
+
 static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
                                       csi ext, const csi *index, double *x, int back)
 {
@@ -213,11 +272,25 @@ static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
         (void)vsdlss_panel_blas_forward(a, begin, width, ext, x, t);   /* pivots checked above */
         for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
     } else {
-        if (E) {
-            for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
-            dgemv_("T", &E, &W, &m1, a + width, &LD, t, &one, &p1, x + begin, &one);
+        const csi B = bwd_blk();
+        for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
+        if (!B) {
+            if (E) dgemv_("T", &E, &W, &m1, a + width, &LD, t, &one, &p1, x + begin, &one);
+            dtrsv_("L", "T", "N", &W, a, &LD, x + begin, &one);
+        } else {
+            /* A team only when there are several blocks and enough work. */
+            int nt = width > B ? vsdlss_parallel_width((double)width * (double)(width + ext)) : 1;
+            if (nt > (width + B - 1) / B) nt = (int)((width + B - 1) / B);
+            if (nt > 1) {
+                VSDLSS_OMP(omp parallel num_threads(nt))
+                {
+#ifdef _OPENMP
+                    if (omp_get_thread_num() == 0) vsdlss_parallel_observe();
+                    blas_backward_team(a, begin, width, ext, t, x, B, omp_get_thread_num(), omp_get_num_threads());
+#endif
+                }
+            } else blas_backward_team(a, begin, width, ext, t, x, B, 0, 1);
         }
-        dtrsv_("L", "T", "N", &W, a, &LD, x + begin, &one);
     }
     if (t != stack) free(t);
     for (csi j = 0; j < width; j++) if (!isfinite(x[begin + j])) return VSDLSS_ERR_NONFINITE;

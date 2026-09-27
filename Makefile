@@ -9,7 +9,9 @@ endif
 # Optional BLAS/LAPACK for wide supernodes (dgemm, dpotrf+dtrsm, dtrsv+dgemv):
 #   make BLAS=1 BLAS_LIBS='-lopenblas'
 # Runtime: VSDLSS_BLAS_MIN / VSDLSS_BLAS_SOLVE_MIN (panel width, default 32,
-# 0 disables).  The BLAS must be thread safe and single threaded inside the
+# 0 disables); VSDLSS_BLAS_BWD_BLK (column block of the BLAS backward
+# step, default 64, split over a thread team; 0: single dtrsv + dgemv on one
+# thread).  The BLAS must be thread safe and single threaded inside the
 # solver (e.g. OpenBLAS with OPENBLAS_NUM_THREADS=1 and OMP_NUM_THREADS=1, or
 # MKL sequential); results then match for every solver thread count but are
 # not bitwise equal to the built-in kernels.
