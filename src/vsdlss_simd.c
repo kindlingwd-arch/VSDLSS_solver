@@ -296,6 +296,58 @@ SIMD_FN int vsdlss_simd_dot_tail(const double *c0, csi ld, csi m, const double *
     return bad;
 }
 
+
+SIMD_FN int vsdlss_simd_back_fused(const double *a, csi rows, csi w, csi e, const double *xg,
+                                   double *xb, int K)
+{
+    const csi m = w % 8, G = (w - m) / 8;
+    int bad = 0;
+    csi q = w - m;
+    for (; q + 4 <= w; q += 4) bad |= vsdlss_simd_dot4b(a + q * rows + w, rows, xg, e, xb + q);
+    if (q < w) bad |= vsdlss_simd_dot_tail(a + q * rows + w, rows, w - q, xg, e, xb + q);
+    /* Column groups [8g, 8g+8), g = G-1 .. 0, accumulated by a cursor that
+     * runs ahead of the triangle; done_lo is the lowest finished column. */
+    csi done_lo = w - m, cg = G - 1, cr = 0;
+    const double *c0 = a, *c1 = a, *c2 = a, *c3 = a, *c4 = a, *c5 = a, *c6 = a, *c7 = a;
+    __m256d a0 = _mm256_setzero_pd(), a1 = a0, badv = a0;
+#define FG_LOAD() do { if (cg >= 0) { c0 = a + (8 * cg) * rows + w; c1 = c0 + rows; c2 = c1 + rows; \
+        c3 = c2 + rows; c4 = c3 + rows; c5 = c4 + rows; c6 = c5 + rows; c7 = c6 + rows; \
+        a0 = _mm256_loadu_pd(xb + 8 * cg); a1 = _mm256_loadu_pd(xb + 8 * cg + 4); cr = 0; } } while (0)
+#define FG_STEP() do { if (cr + 4 <= e) { __m256d p0, p1, p2, p3, q0, q1, q2, q3; \
+        ROWS4(c0, c1, c2, c3, cr, p0, p1, p2, p3); ROWS4(c4, c5, c6, c7, cr, q0, q1, q2, q3); \
+        __m256d s = _mm256_set1_pd(xg[cr]); a0 = SUBMUL(a0, p0, s); a1 = SUBMUL(a1, q0, s); \
+        s = _mm256_set1_pd(xg[cr + 1]); a0 = SUBMUL(a0, p1, s); a1 = SUBMUL(a1, q1, s); \
+        s = _mm256_set1_pd(xg[cr + 2]); a0 = SUBMUL(a0, p2, s); a1 = SUBMUL(a1, q2, s); \
+        s = _mm256_set1_pd(xg[cr + 3]); a0 = SUBMUL(a0, p3, s); a1 = SUBMUL(a1, q3, s); cr += 4; } \
+      else { for (; cr < e; ++cr) { const __m256d s = _mm256_set1_pd(xg[cr]); \
+            a0 = SUBMUL(a0, _mm256_set_pd(c3[cr], c2[cr], c1[cr], c0[cr]), s); \
+            a1 = SUBMUL(a1, _mm256_set_pd(c7[cr], c6[cr], c5[cr], c4[cr]), s); } \
+        _mm256_storeu_pd(xb + 8 * cg, a0); _mm256_storeu_pd(xb + 8 * cg + 4, a1); \
+        badv = _mm256_or_pd(badv, _mm256_or_pd(_mm256_sub_pd(a0, a0), _mm256_sub_pd(a1, a1))); \
+        done_lo = 8 * cg; --cg; FG_LOAD(); } } while (0)
+    FG_LOAD();
+    for (csi j = w; j-- > 0;) {
+        while (j < done_lo) FG_STEP();
+        const double *dj = a + j * rows;
+        const double d = dj[j];
+        double v = xb[j];
+        csi r = j + 1;
+        while (cg >= 0 && r + K <= w) {
+            for (int k = 0; k < K; ++k, ++r) v -= dj[r] * xb[r];
+            FG_STEP();
+        }
+        for (; r < w; ++r) v -= dj[r] * xb[r];
+        if (!isfinite(d) || d <= 0) return 1;
+        xb[j] = v / d;
+        if (!isfinite(xb[j])) return 1;
+    }
+#undef FG_LOAD
+#undef FG_STEP
+    return bad | NONFINITE(badv);
+}
+
+
+
 #else   /* no x86 GCC-compatible compiler: scalar paths only */
 int vsdlss_simd_enabled(void) { return 0; }
 void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
@@ -315,6 +367,8 @@ int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
 int vsdlss_simd_dot4b(const double *c0, csi ld, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
+int vsdlss_simd_back_fused(const double *a, csi rows, csi w, csi e, const double *xg, double *xb, int K)
+{ (void)a; (void)rows; (void)w; (void)e; (void)xg; (void)xb; (void)K; abort(); }
 int vsdlss_simd_dot_tail(const double *c0, csi ld, csi m, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)m; (void)xg; (void)n; (void)v; abort(); }
 #endif

@@ -233,6 +233,8 @@ int vsdlss_panel_solve_uses_blas(void);
 #endif
 /* Solve-kernel selection bits (see vsdlss_panel.c); -1 until first use. */
 extern int vsdlss_solve_v2;
+extern csi vsdlss_fuse_min;
+extern int vsdlss_fuse_k;
 void vsdlss_solve_v2_init(void);
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);

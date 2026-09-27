@@ -40,5 +40,12 @@ int vsdlss_simd_dot4b(const double *c0, csi ld, const double *xg, csi n, double 
 /* dot4 for the last m (1..3) columns: lanes >= m repeat column m-1 and are
  * discarded; only v[0..m) is read and written. */
 int vsdlss_simd_dot_tail(const double *c0, csi ld, csi m, const double *xg, csi n, double *v);
-
+/* Whole backward solve of one panel with e >= 1 external rows: the external
+ * dot products (8-column groups, top to bottom) are interleaved with the
+ * triangular solve, one 4-row step per K triangle terms.  Every output keeps
+ * the order of vsdlss_panel_solve_generic.  Returns nonzero on a non-finite
+ * external result, an invalid pivot or a non-finite x; xb is then partly
+ * overwritten and the caller must restore it and rerun the plain path. */
+int vsdlss_simd_back_fused(const double *a, csi rows, csi w, csi e, const double *xg,
+                           double *xb, int K);
 #endif

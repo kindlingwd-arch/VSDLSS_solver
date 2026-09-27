@@ -1,0 +1,21 @@
+# nets: VDD n=4160001 lattice=1400x1483  GND n=3839999 lattice=1366x1403
+# pg_profile n=8000000 edges=10000000 nnz_upper=18000000 nnz_full=28000000 max_degree=10 lattice=1400x1483 gen=2.2s
+# degree  target:   d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3
+# degree  achieved: d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3 (d0=0)
+# rss after build: 766 MB
+# factor: order=5 threads=1 time=14.16s components=2 core_n=2152277 (26.90%) core_nnzL=160.2M peak_rss=2598 MB page_faults=317039
+# reference cfg=3 backward_error=3.21e-17 fuse_min=64 fuse_k=16
+# full solve (vsdlss_m3_solve, 15 rounds, rotated order):
+AB_FULL cfg=3  median=0.62783s min=0.61322s paired_ratio_median=1.0000 q25=1.0000 q75=1.0000 bitwise=ref
+AB_FULL cfg=7  median=0.61677s min=0.59740s paired_ratio_median=0.9815 q25=0.9625 q75=0.9878 bitwise=ref
+# >=32-column panel calls inside the solve (median ms per solve):
+bucket          cfg=3      cfg=7    
+fwd 32-63          14.679     14.530   (1770 calls)
+fwd 64-255         34.536     34.522   (615 calls)
+fwd 256-511        17.206     17.189   (42 calls)
+fwd >=512          19.144     19.202   (16 calls)
+back 32-63         19.717     19.438   (1770 calls)
+back 64-255        33.679     30.118   (615 calls)
+back 256-511       15.702     13.185   (42 calls)
+back >=512         19.698     17.785   (16 calls)
+# peak_rss=2694 MB huge_pages=2054 MB

@@ -48,10 +48,16 @@ int main(void){
    vsdlss_solve_v2=0;vsdlss_status s2=vsdlss_panel_solve(A,3,w,ext,ext?ix:NULL,x2,back);
    CHECK(s0==s1&&s0==s2);
    if(s0==VSDLSS_OK||fault==3){CHECK(memcmp(x0,x1,sizeof(double)*XN)==0);CHECK(memcmp(x0,x2,sizeof(double)*XN)==0);}
+   /* fused backward (bit 4) with several interleave steps, fallback on faults */
+   if(back){ static const int ks[]={1,3,16}; csi fm=vsdlss_fuse_min; int fk=vsdlss_fuse_k; vsdlss_fuse_min=4;
+    for(int kk=0;kk<3;kk++){ vsdlss_fuse_k=ks[kk]; memcpy(x1,o,sizeof(double)*XN);
+     vsdlss_solve_v2=7; vsdlss_status s3=vsdlss_panel_solve(A,3,w,ext,ext?ix:NULL,x1,back);
+     CHECK(s3==s0); if(s0==VSDLSS_OK||fault==3)CHECK(memcmp(x0,x1,sizeof(double)*XN)==0); }
+    vsdlss_fuse_min=fm; vsdlss_fuse_k=fk; }
   }
   vsdlss_solve_v2=saved;
   free(A);free(o);free(x0);free(x1);free(x2);free(ix);
-  puts("small: widths 7..40, ext 0..1100, new and previous kernels bitwise equal to generic");
+  puts("small: widths 7..40, ext 0..1100, new, fused and previous kernels bitwise equal to generic");
  }
  puts("width generic_ms specialized_ms speedup (50000 calls, ext=16)");
  for(csi w=1;w<=6;w++){

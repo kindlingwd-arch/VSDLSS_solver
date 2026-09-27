@@ -107,7 +107,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_solve_v2 bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_solve_v2 bench_solve_back bench_parallel bench_m3 bench_sn bench_pg_solve bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -215,6 +215,9 @@ bench-powergrid: bench_powergrid
 	./bench_powergrid 2e7 5 2 4
 
 .PHONY: bench-powergrid
+
+bench_solve_back: test/bench_solve_back.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_solve_back.c $(LIBSRCS) $(LDLIBS)
 
 bench_solve_v2: test/bench_solve_v2.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_solve_v2.c $(LIBSRCS) $(LDLIBS)

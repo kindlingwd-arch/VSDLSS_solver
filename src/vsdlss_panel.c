@@ -129,6 +129,18 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
         double *xg=ext<=VSDLSS_SOLVE_GATHER?stack_gather:(double*)malloc((size_t)ext*sizeof(double));
         if(!xg)return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,1);
         for(csi r=0;r<ext;r++)xg[r]=x[index[r]];
+        if((vsdlss_solve_v2&4)&&width>=vsdlss_fuse_min){
+            /* Triangle interleaved with the external dots; on any fault
+               restore z and redo the plain path for the exact status. */
+            double sv_stack[512],*sv=width<=512?sv_stack:(double*)malloc((size_t)width*sizeof(double));
+            if(sv){
+                memcpy(sv,x+begin,(size_t)width*sizeof(double));
+                int f=vsdlss_simd_back_fused(a,rows,width,ext,xg,x+begin,vsdlss_fuse_k);
+                if(f)memcpy(x+begin,sv,(size_t)width*sizeof(double));
+                if(sv!=sv_stack)free(sv);
+                if(!f){if(xg!=stack_gather)free(xg);return VSDLSS_OK;}
+            }
+        }
         csi q=0;
         if(vsdlss_solve_v2&2){
             /* Two independent four-column accumulators per pass, then the
@@ -160,14 +172,21 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
 
 
 /* Solve-kernel selection (bit 1: register-resident forward external update;
- * bit 2: interleaved backward dot products).  Default 3; VSDLSS_SOLVE_V2
- * overrides.  Every setting gives the same bits. */
+ * bit 2: interleaved backward dot products; bit 4: backward triangle
+ * interleaved with the external dots for widths >= VSDLSS_FUSE_MIN, default
+ * 64, one 4-row dot step per VSDLSS_FUSE_K triangle terms, default 16).
+ * Default 7; VSDLSS_SOLVE_V2 overrides.  Every setting gives the same bits. */
 int vsdlss_solve_v2 = -1;
+csi vsdlss_fuse_min = 64;
+int vsdlss_fuse_k = 16;
 void vsdlss_solve_v2_init(void)
 {
     if (vsdlss_solve_v2 < 0) {
         const char *e = getenv("VSDLSS_SOLVE_V2");
-        vsdlss_solve_v2 = e ? atoi(e) & 3 : 3;
+        e = getenv("VSDLSS_FUSE_MIN"); if (e && atoll(e) > 0) vsdlss_fuse_min = atoll(e);
+        e = getenv("VSDLSS_FUSE_K"); if (e && atoi(e) > 0) vsdlss_fuse_k = atoi(e);
+        e = getenv("VSDLSS_SOLVE_V2");
+        vsdlss_solve_v2 = e ? atoi(e) & 7 : 7;
     }
 }
 
@@ -251,6 +270,21 @@ static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
 }
 #endif
 
+#ifdef VSDLSS_PROF_BACK
+#include <time.h>
+double vsdlss_prof_back[8]; long long vsdlss_prof_back_n[8];
+static double prof_now(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec*1e-9;}
+static vsdlss_status panel_solve_impl(const double *a,csi begin,csi width,csi ext,const csi *index,double *x,int back);
+vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,csi ext,const csi *index,double *x,int back)
+{
+    if(width<32)return panel_solve_impl(a,begin,width,ext,index,x,back);
+    int k=(back?4:0)+(width<64?0:width<256?1:width<512?2:3);
+    double t=prof_now(); vsdlss_status st=panel_solve_impl(a,begin,width,ext,index,x,back);
+    vsdlss_prof_back[k]+=prof_now()-t; vsdlss_prof_back_n[k]++; return st;
+}
+#define vsdlss_panel_solve panel_solve_impl
+static
+#endif
 vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
                                 csi ext,const csi *index,double *x,int back)
 {

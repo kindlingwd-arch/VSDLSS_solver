@@ -44,4 +44,5 @@
 /bench_cholmod
 /bench_pardiso
 bench_solve_v2
+bench_solve_back
 test_simd
