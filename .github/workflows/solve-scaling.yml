@@ -1,0 +1,77 @@
+# Multi-thread single-RHS solve scaling A/B on a GitHub-hosted runner
+# (public repositories: 4 vCPU, 16 GB).  Runs tools/ci_solve_scaling.sh:
+# original (1dbf969) vs this commit vs this commit with the subtree phase
+# in pull form, on the 8M VDD/GND dual-net power grid, METIS and AMD.
+# The summary appears on the run page; raw logs are an artifact.
+#
+# Shared VMs are noisy and have only 4 cores: read the trend, not the last
+# digit.  For production numbers run the same script on the target machine.
+name: solve-scaling
+
+on:
+  push:
+    branches: ["test/dense-solve-kernels-**"]
+    paths:
+      - "src/**"
+      - "tools/ci_solve_scaling.sh"
+      - "tools/ci_solve_summary.py"
+      - ".github/workflows/solve-scaling.yml"
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: "matrix scale"
+        type: choice
+        options: ["8m", "3m"]
+        default: "8m"
+      orders:
+        description: "orderings (6 = METIS, 5 = AMD)"
+        default: "6 5"
+      rounds:
+        description: "interleaved rounds"
+        default: "2"
+
+concurrency:
+  group: solve-scaling-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scaling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # the base commit must be reachable
+
+      - name: Runner
+        run: |
+          nproc; free -g; grep -m1 'model name' /proc/cpuinfo
+          sudo apt-get update -q && sudo apt-get install -y -q build-essential cmake
+
+      - name: Cache METIS (64-bit idx_t)
+        uses: actions/cache@v4
+        with:
+          path: ~/metis64
+          key: metis64-${{ runner.os }}-v1
+
+      - name: Scaling A/B
+        env:
+          OUT: ${{ github.workspace }}/solve-scaling-out
+          METIS_PREFIX: /home/runner/metis64
+        run: |
+          tools/ci_solve_scaling.sh "${{ inputs.scale || '8m' }}" "${{ inputs.orders || '6 5' }}" "${{ inputs.rounds || '2' }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          f=solve-scaling-out/summary.md
+          [ -f "$f" ] && cat "$f" >> "$GITHUB_STEP_SUMMARY" || echo "no summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: solve-scaling-${{ github.sha }}
+          path: |
+            solve-scaling-out/*.log
+            solve-scaling-out/summary.md
+            solve-scaling-out/meta.txt
