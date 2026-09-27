@@ -384,6 +384,10 @@ typedef struct {
 struct vsdlss_sn_solve_tree {
     tree_info t;
     _Atomic(sn_split *) split[SN_SPLIT_SLOTS];   /* indexed by thread count */
+    /* BLAS solves: offset of each BLAS-solved panel's external product
+     * t = L_ext * x_J in the per-solve buffer (-1: built-in kernels), and
+     * the buffer length.  NULL without BLAS solves. */
+    csi *blas_toff, blas_tlen;
 };
 
 static void split_free(sn_split *s)
@@ -394,6 +398,7 @@ static void solve_tree_free(struct vsdlss_sn_solve_tree *st)
     if (!st) return;
     tree_free(&st->t);
     for (int i = 0; i < SN_SPLIT_SLOTS; ++i) split_free(atomic_load(&st->split[i]));
+    free(st->blas_toff);
     free(st);
 }
 
@@ -402,7 +407,23 @@ static struct vsdlss_sn_solve_tree *solve_tree_new(const vsdlss_sn_factor *f)
     struct vsdlss_sn_solve_tree *st = malloc(sizeof(*st));
     if (!st) return NULL;
     for (int i = 0; i < SN_SPLIT_SLOTS; ++i) atomic_init(&st->split[i], NULL);
+    st->blas_toff = NULL; st->blas_tlen = 0;
     if (!tree_build(f, f->sn_parent, 1, &st->t)) { free(st); return NULL; }
+#ifdef VSDLSS_BLAS
+    {
+        const csi m = vsdlss_panel_solve_blas_min();
+        if (m > 0) {
+            if (!(st->blas_toff = malloc((size_t)f->count * sizeof(csi)))) { solve_tree_free(st); return NULL; }
+            for (csi d = 0; d < f->count; ++d) {
+                const csi w = f->column_start[d + 1] - f->column_start[d];
+                const csi e = f->row_ptr[d + 1] - f->row_ptr[d];
+                /* Same test as vsdlss_panel_solve's BLAS dispatch. */
+                if (w >= m && w + e < INT_MAX) { st->blas_toff[d] = st->blas_tlen; st->blas_tlen += e; }
+                else st->blas_toff[d] = -1;
+            }
+        }
+    }
+#endif
     return st;
 }
 
@@ -589,6 +610,31 @@ fail:
     return st;
 }
 
+/* BLAS solves in the tree schedule.  The serial solve's BLAS forward step
+ * of a wide panel s is dtrsv on its diagonal block, t_s = L_ext(s) * x_J(s)
+ * (one dgemv), then x[R_s[r]] -= t_s[r] for every external row.  In pull
+ * form the target d owning such a row subtracts the stored t_s[r] instead:
+ * the same value, one subtraction, applied in the same ascending-source
+ * position, so the tree solve reproduces the serial BLAS solve bit for bit
+ * at every thread count.  t_s is written once, by the task that solves s,
+ * before any target of s runs (tree order), and only read afterwards. */
+typedef struct {
+    const csi *toff;   /* count: offset of t_s in t, -1 for built-in panels */
+    double *t;         /* blas_tlen entries, private to one solve call */
+} blas_fwd;
+
+#ifdef VSDLSS_BLAS
+static vsdlss_status blas_fwd_diag(const vsdlss_sn_factor *f, csi d, double *x, const blas_fwd *bf)
+{
+    const csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
+    return vsdlss_panel_blas_forward(f->panel + f->panel_offset[d], bd, wd,
+                                     f->row_ptr[d + 1] - f->row_ptr[d], x, bf->t + bf->toff[d]);
+}
+#else
+static vsdlss_status blas_fwd_diag(const vsdlss_sn_factor *f, csi d, double *x, const blas_fwd *bf)
+{ (void)f; (void)d; (void)x; (void)bf; return VSDLSS_ERR_INVALID; }
+#endif
+
 /* Forward step of target d in pull form: subtract every source block that
  * lands in J_d (sources ascending, columns j ascending per entry), then
  * solve the diagonal block.  For each entry this is exactly the operation
@@ -602,7 +648,7 @@ fail:
  * Entries are not checked one by one: a non-finite value stays non-finite
  * through every later subtraction and division, so the caller's single scan
  * of the result reports it. */
-static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
+static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x, const blas_fwd *bf)
 {
     csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
     csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
@@ -614,12 +660,19 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
         const double *as = f->panel + f->panel_offset[sn] + ws;
         const csi *R = f->row_index + f->row_ptr[sn];
         const csi r0 = f->blk_first[b], r1 = f->blk_end[b];
+        if (bf && bf->toff[sn] >= 0) {          /* BLAS source: its stored product */
+            const double *ts = bf->t + bf->toff[sn];
+            for (csi r = r0; r < r1; ++r) x[R[r]] -= ts[r];
+            continue;
+        }
         if (simd) { vsdlss_simd_block_update(as, rs, ws, x + bs, R, r0, r1, x); continue; }
         for (csi j = 0; j < ws; ++j) {
             const double xj = x[bs + j], *col = as + j * rs;
             for (csi r = r0; r < r1; ++r) x[R[r]] -= col[r] * xj;
         }
     }
+    if (bf && bf->toff[d] >= 0)
+        return blas_fwd_diag(f, d, x, bf) != VSDLSS_OK;
     for (csi j = 0; j < wd; ++j) {
         double dj = a[j * rd + j];
         if (!isfinite(dj) || dj <= 0) return 1;
@@ -678,7 +731,8 @@ static double fwd_top_work(void)
 #define FWD_TOP_PAR_WORK fwd_top_work()   /* below this a team costs more than it saves */
 /* Called by every thread (tid of T) of an existing team: it contains team
  * barriers.  *bad is set by the thread solving a triangle block. */
-static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int tid, int T, int *bad)
+static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int tid, int T, int *bad,
+                              const blas_fwd *bf)
 {
     const csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
     const csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
@@ -693,6 +747,11 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
             const csi *R = f->row_index + f->row_ptr[sn];
             const csi s = lower_bound_csi(R, f->blk_first[b], f->blk_end[b], lo);
             const csi e = lower_bound_csi(R, s, f->blk_end[b], hi);
+            if (bf && bf->toff[sn] >= 0) {
+                const double *ts = bf->t + bf->toff[sn];
+                for (csi r = s; r < e; ++r) x[R[r]] -= ts[r];
+                continue;
+            }
             if (simd) { if (s < e) vsdlss_simd_block_update(as, rs, ws, x + bs, R, s, e, x); continue; }
             for (csi j = 0; j < ws && s < e; ++j) {
                 const double xj = x[bs + j], *col = as + j * rs;
@@ -700,6 +759,14 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
             }
         }
         VSDLSS_OMP(omp barrier)
+        if (bf && bf->toff[d] >= 0) {
+            /* One dtrsv + dgemv, as in the serial solve (splitting them
+             * would change the rounding); the single's barrier publishes
+             * x_J and t_d to the team. */
+            VSDLSS_OMP(omp single)
+            if (blas_fwd_diag(f, d, x, bf) != VSDLSS_OK) *bad = 1;
+            return;
+        }
         for (csi jb = 0; jb < wd; jb += FWD_TOP_BLK) {
             const csi je = jb + FWD_TOP_BLK < wd ? jb + FWD_TOP_BLK : wd;
             VSDLSS_OMP(omp single)
@@ -722,7 +789,7 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
     }
 }
 
-static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
+static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt, const blas_fwd *bf)
 {
     int bad = 0;
     (void)nt;
@@ -733,7 +800,7 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt)
 #else
         const int tid = 0, T = 1;
 #endif
-        forward_pull_team(f, d, x, tid, T, &bad);
+        forward_pull_team(f, d, x, tid, T, &bad, bf);
     }
     return bad;
 }
@@ -756,7 +823,7 @@ static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
 /* Tree-parallel solves: independent subtrees in parallel, the top of the
  * tree in order (forward: subtrees first; backward: top first).  The tree
  * and the split for nt come from the factor's cache when it has one. */
-static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
+static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, const blas_fwd *bf)
 {
     csi count = f->count;
     tree_info local_t; const tree_info *t; int bad = 0;
@@ -791,7 +858,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
 #endif
     VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
     for (csi i = 0; i < nsub; ++i)
-        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
+        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x, bf);
 #ifdef _OPENMP
     if (prof) tp[1] = omp_get_wtime();
 #endif
@@ -819,9 +886,9 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
                 VSDLSS_OMP(omp single)
                 for (csi kk = k; kk < kend; ++kk) {
                     const csi d = t->order[kk];
-                    if (!in_sub[d]) badt |= forward_pull(f, d, x);
+                    if (!in_sub[d]) badt |= forward_pull(f, d, x, bf);
                 }
-                if (i < nbig) forward_pull_team(f, t->order[kend], x, tid, T, &badt);
+                if (i < nbig) forward_pull_team(f, t->order[kend], x, tid, T, &badt, bf);
                 k = kend + 1;
             }
         }
@@ -832,9 +899,9 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
         const csi d = t->order[k];
         if (in_sub[d]) continue;
         if (nt_top > 1 && forward_pull_work(f, d) >= FWD_TOP_PAR_WORK)
-            bad |= forward_pull_par(f, d, x, nt_top);
+            bad |= forward_pull_par(f, d, x, nt_top, bf);
         else
-            bad |= forward_pull(f, d, x);
+            bad |= forward_pull(f, d, x, bf);
     }
 #ifdef _OPENMP
     if (prof) tp[2] = omp_get_wtime();
@@ -874,13 +941,26 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
 {
     if (!f || !x || f->n < 1) return VSDLSS_ERR_INVALID;
     int nt = vsdlss_parallel_width((double)f->l_nnz * 2);
+    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) {
 #ifdef VSDLSS_BLAS
-    /* The tree schedule's pull-form forward step has no BLAS form with the
-     * same rounding as the panel solve, so with BLAS solves every thread
-     * count takes the serial path (results then match for all counts). */
-    if (vsdlss_panel_solve_uses_blas()) nt = 1;
+        if (vsdlss_panel_solve_uses_blas()) {
+            /* BLAS solves: the tree schedule pulls each wide panel's stored
+             * external product (see blas_fwd), which gives the serial
+             * path's bits.  Without the cached offsets or the buffer, the
+             * serial path below. */
+            const struct vsdlss_sn_solve_tree *st = f->solve_tree;
+            double *tb = st && st->blas_toff ?
+                malloc((size_t)(st->blas_tlen ? st->blas_tlen : 1) * sizeof(double)) : NULL;
+            if (tb) {
+                blas_fwd bf = { st->blas_toff, tb };
+                vsdlss_status s = solve_tree(f, x, nt, &bf);
+                free(tb);
+                return s;
+            }
+        } else
 #endif
-    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) return solve_tree(f, x, nt);
+        return solve_tree(f, x, nt, NULL);
+    }
     for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
         csi sn = back ? f->count - 1 - t : t;
         csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;

@@ -175,12 +175,33 @@ static csi solve_blas_min(void)
     return (csi)v;
 }
 int vsdlss_panel_solve_uses_blas(void) { return solve_blas_min() > 0; }
+csi vsdlss_panel_solve_blas_min(void) { return solve_blas_min(); }
+/* Forward BLAS step of one panel without the scatter: dtrsv on the
+ * diagonal block, then t = L_ext * x_J (dgemv, beta 0) for the ext external
+ * rows.  The push form subtracts t[r] from x[index[r]]; the tree solve
+ * stores t and lets each target pull its rows, so both apply the same t
+ * with one subtraction per entry and give the same bits.  Pivots are
+ * checked first; non-finite results are left to the caller's scan. */
+vsdlss_status vsdlss_panel_blas_forward(const double *a, csi begin, csi width,
+                                        csi ext, double *x, double *t)
+{
+    const csi rows = width + ext;
+    int W = (int)width, E = (int)ext, LD = (int)rows, one = 1;
+    double p1 = 1.0, zero = 0.0;
+    for (csi j = 0; j < width; j++) {
+        double d = a[j * rows + j];
+        if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
+    }
+    dtrsv_("L", "N", "N", &W, a, &LD, x + begin, &one);
+    if (E) dgemv_("N", &E, &W, &p1, a + width, &LD, x + begin, &one, &zero, t, &one);
+    return VSDLSS_OK;
+}
 static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
                                       csi ext, const csi *index, double *x, int back)
 {
     const csi rows = width + ext;
     int W = (int)width, E = (int)ext, LD = (int)rows, one = 1;
-    double p1 = 1.0, m1 = -1.0, zero = 0.0;
+    double p1 = 1.0, m1 = -1.0;
     for (csi j = 0; j < width; j++) {
         double d = a[j * rows + j];
         if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
@@ -189,11 +210,8 @@ static vsdlss_status blas_panel_solve(const double *a, csi begin, csi width,
     double *t = ext <= VSDLSS_SOLVE_GATHER ? stack : (double *)malloc((size_t)ext * sizeof(double));
     if (!t) return vsdlss_panel_solve_generic(a, begin, width, ext, index, x, back);
     if (!back) {
-        dtrsv_("L", "N", "N", &W, a, &LD, x + begin, &one);
-        if (E) {
-            dgemv_("N", &E, &W, &p1, a + width, &LD, x + begin, &one, &zero, t, &one);
-            for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
-        }
+        (void)vsdlss_panel_blas_forward(a, begin, width, ext, x, t);   /* pivots checked above */
+        for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
     } else {
         if (E) {
             for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
