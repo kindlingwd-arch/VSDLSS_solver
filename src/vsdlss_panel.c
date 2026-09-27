@@ -3,6 +3,7 @@
 #include "vsdlss_simd.h"
 #include "vsdlss_dense.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define VSDLSS_SOLVE_BLK 128
@@ -129,6 +130,14 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
         if(!xg)return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,1);
         for(csi r=0;r<ext;r++)xg[r]=x[index[r]];
         csi q=0;
+        if(vsdlss_solve_v2&2){
+            /* Two independent four-column accumulators per pass, then the
+               1-3 leftover columns in one padded vector.  Each lane is one
+               output in its original order: same bits. */
+            for(;q+8<=width;q+=8)bad|=vsdlss_simd_dot8(a+q*rows+width,rows,xg,ext,x+begin+q);
+            for(;q+4<=width;q+=4)bad|=vsdlss_simd_dot4b(a+q*rows+width,rows,xg,ext,x+begin+q);
+            if(q<width){bad|=vsdlss_simd_dot_tail(a+q*rows+width,rows,width-q,xg,ext,x+begin+q);q=width;}
+        }
         for(;q+4<=width;q+=4)bad|=vsdlss_simd_dot4(a+q*rows+width,rows,xg,ext,x+begin+q);
         for(csi t=q;t<width;t++){
             double v=x[begin+t];
@@ -146,6 +155,41 @@ static vsdlss_status simd_back_narrow(const double *a,csi begin,csi width,
         x[begin+j]=v/d;
         if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
     }
+    return VSDLSS_OK;
+}
+
+
+/* Solve-kernel selection (bit 1: register-resident forward external update;
+ * bit 2: interleaved backward dot products).  Default 3; VSDLSS_SOLVE_V2
+ * overrides.  Every setting gives the same bits. */
+int vsdlss_solve_v2 = -1;
+void vsdlss_solve_v2_init(void)
+{
+    if (vsdlss_solve_v2 < 0) {
+        const char *e = getenv("VSDLSS_SOLVE_V2");
+        vsdlss_solve_v2 = e ? atoi(e) & 3 : 3;
+    }
+}
+
+/* Forward solve of one panel on one thread: the diagonal triangle as in
+   vsdlss_panel_solve_generic, then every external row updated with up to 16
+   destinations held in registers across all columns j (the generic path
+   re-loads and re-stores a 128-row stack buffer once per column).  Per entry
+   the subtractions run in ascending j as before, so results and status codes
+   equal the generic path. */
+static vsdlss_status simd_fwd_narrow(const double *a,csi begin,csi width,
+                                     csi ext,const csi *index,double *x)
+{
+    const csi rows=width+ext;
+    for(csi j=0;j<width;j++){
+        double d=a[j*rows+j];
+        if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID;
+        x[begin+j]/=d;
+        if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
+        vsdlss_simd_axpy_neg(x+begin+j+1,a+j*rows+j+1,x[begin+j],width-j-1);
+    }
+    if(ext&&vsdlss_simd_ext_update(a+width,rows,width,x+begin,index,ext,x))
+        return VSDLSS_ERR_NONFINITE;
     return VSDLSS_OK;
 }
 
@@ -214,6 +258,7 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
     { csi m=solve_blas_min();
       if(m && width>=m && width+ext<INT_MAX) return blas_panel_solve(a,begin,width,ext,index,x,back); }
 #endif
+    if(vsdlss_solve_v2<0)vsdlss_solve_v2_init();
     /* Keep large external-row work on the existing parallel path. */
     if(vsdlss_parallel_width((double)width*ext)>1)
         return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,back);
@@ -222,6 +267,11 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
        OpenMP region, whose entry cost would dominate narrow panels. */
     if(back && width>=4 && vsdlss_simd_enabled())
         return simd_back_narrow(a,begin,width,ext,index,x);
+    /* Forward, widths 7..511: register-resident external update.  Wider
+       panels keep the generic 128-row blocks (their long column sweeps were
+       ~5% slower with 16-row blocks on the 8M case). */
+    if(!back && width>6 && width<512 && (vsdlss_solve_v2&1) && vsdlss_simd_enabled())
+        return simd_fwd_narrow(a,begin,width,ext,index,x);
     switch(width) {
 #define CASE(N) case N: return solve_##N(a,begin,ext,index,x,back)
         CASE(1); CASE(2); CASE(3); CASE(4); CASE(5); CASE(6);

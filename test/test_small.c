@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/vsdlss_m3_internal.h"
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #define CHECK(e) do {if(!(e)){fprintf(stderr,"small: line %d\n",__LINE__);return 1;}}while(0)
@@ -20,6 +21,38 @@ int main(void){
   CHECK(memcmp(x,y,sizeof(x))==0);
  }
  puts("small: all widths, directions, ext 0..64, strided indices, faults bitwise OK");
+ {
+  /* Widths 7..40 (the register-resident forward update and the 8-column /
+     padded-tail backward dots) against the generic kernel and against the
+     previous kernels (vsdlss_solve_v2 = 0): ext across the 16/8/4 register
+     blocks, the 128-row forward block and the 1024-entry gather buffer;
+     indices mixing consecutive runs and gaps. */
+  enum{EMAX=1100,XN=4*EMAX+64};
+  double *A=malloc(sizeof(double)*40*(40+EMAX)),*o=malloc(sizeof(double)*XN),
+         *x0=malloc(sizeof(double)*XN),*x1=malloc(sizeof(double)*XN),*x2=malloc(sizeof(double)*XN);
+  csi *ix=malloc(sizeof(csi)*EMAX);
+  CHECK(A&&o&&x0&&x1&&x2&&ix);
+  for(int i=0;i<XN;i++)o[i]=sin(0.37*i+0.5);
+  csi at=48;for(csi r=0;r<EMAX;r++){ix[r]=at;at+=(r%7==3)?3:1;}
+  static const csi exts[]={0,1,2,3,4,5,7,8,11,15,16,17,31,33,63,127,128,129,200,1023,1024,1025,1100};
+  int saved=vsdlss_solve_v2;
+  for(csi w=7;w<=40;w++)for(size_t ei=0;ei<sizeof exts/sizeof*exts;ei++)for(int back=0;back<2;back++)for(int fault=0;fault<4;fault++){
+   csi ext=exts[ei],rows=w+ext;
+   for(csi j=0;j<w;j++)for(csi r=0;r<rows;r++)A[j*rows+r]=r<j?0:r==j?2+0.1*j:0.01*cos(r+3*j);
+   if(fault==1)A[(w/2)*rows+w/2]=-1;
+   if(fault==2)A[(w-1)*rows+w-1]=NAN;
+   if(fault==3&&ext)A[(w-1)*rows+rows-1]=INFINITY;
+   memcpy(x0,o,sizeof(double)*XN);memcpy(x1,o,sizeof(double)*XN);memcpy(x2,o,sizeof(double)*XN);
+   vsdlss_status s0=vsdlss_panel_solve_generic(A,3,w,ext,ext?ix:NULL,x0,back);
+   vsdlss_solve_v2=3;vsdlss_status s1=vsdlss_panel_solve(A,3,w,ext,ext?ix:NULL,x1,back);
+   vsdlss_solve_v2=0;vsdlss_status s2=vsdlss_panel_solve(A,3,w,ext,ext?ix:NULL,x2,back);
+   CHECK(s0==s1&&s0==s2);
+   if(s0==VSDLSS_OK||fault==3){CHECK(memcmp(x0,x1,sizeof(double)*XN)==0);CHECK(memcmp(x0,x2,sizeof(double)*XN)==0);}
+  }
+  vsdlss_solve_v2=saved;
+  free(A);free(o);free(x0);free(x1);free(x2);free(ix);
+  puts("small: widths 7..40, ext 0..1100, new and previous kernels bitwise equal to generic");
+ }
  puts("width generic_ms specialized_ms speedup (50000 calls, ext=16)");
  for(csi w=1;w<=6;w++){
   csi rows=w+16;memset(a,0,sizeof(a));

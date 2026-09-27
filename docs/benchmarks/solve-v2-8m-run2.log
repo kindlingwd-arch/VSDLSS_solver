@@ -1,0 +1,44 @@
+# nets: VDD n=4160001 lattice=1400x1483  GND n=3839999 lattice=1366x1403
+# pg_profile n=8000000 edges=10000000 nnz_upper=18000000 nnz_full=28000000 max_degree=10 lattice=1400x1483 gen=3.3s
+# degree  target:   d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3
+# degree  achieved: d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3 (d0=0)
+# rss after build: 766 MB
+# factor: order=5 threads=1 time=16.93s components=2 core_n=2152277 (26.90%) core_nnzL=160.2M peak_rss=2599 MB page_faults=317737
+# check: cfg 1/2/3 bitwise equal to cfg 0, backward_error=3.21e-17
+# full solve (vsdlss_m3_solve, 21 rounds, rotated order, all bitwise checked):
+AB_FULL cfg=0 previous   median=0.74435s min=0.71292s paired_ratio_median=1.0000 q25=1.0000 q75=1.0000
+AB_FULL cfg=1 fwd_reg    median=0.67112s min=0.64284s paired_ratio_median=0.9040 q25=0.8768 q75=0.9269
+AB_FULL cfg=2 back_dot8  median=0.72639s min=0.69756s paired_ratio_median=0.9849 q25=0.9656 q75=1.0234
+AB_FULL cfg=3 both       median=0.66586s min=0.63131s paired_ratio_median=0.8946 q25=0.8787 q75=0.9178
+AB_RAW round=0 t0=0.75223 t1=0.64284 t2=0.70488 t3=0.67679
+AB_RAW round=1 t0=0.74435 t1=0.69818 t2=0.73414 t3=0.66850
+AB_RAW round=2 t0=0.76903 t1=0.70126 t2=0.72375 t3=0.70578
+AB_RAW round=3 t0=0.77724 t1=0.67112 t2=0.69924 t3=0.68101
+AB_RAW round=4 t0=0.71484 t1=0.68489 t2=0.73867 t3=0.65428
+AB_RAW round=5 t0=0.71861 t1=0.66607 t2=0.72103 t3=0.64319
+AB_RAW round=6 t0=0.73127 t1=0.65614 t2=0.70612 t3=0.65169
+AB_RAW round=7 t0=0.73519 t1=0.68428 t2=0.80298 t3=0.63726
+AB_RAW round=8 t0=0.81583 t1=0.71435 t2=0.70322 t3=0.64372
+AB_RAW round=9 t0=0.71848 t1=0.64952 t2=0.69756 t3=0.63131
+AB_RAW round=10 t0=0.71292 t1=0.65048 t2=0.70381 t3=0.63776
+AB_RAW round=11 t0=0.73227 t1=0.64734 t2=0.71565 t3=0.64827
+AB_RAW round=12 t0=0.74468 t1=0.65037 t2=0.71071 t3=0.63826
+AB_RAW round=13 t0=0.76353 t1=0.67654 t2=0.79326 t3=0.68174
+AB_RAW round=14 t0=0.76651 t1=0.75506 t2=0.77647 t3=0.71677
+AB_RAW round=15 t0=0.76889 t1=0.67413 t2=0.75725 t3=0.71011
+AB_RAW round=16 t0=0.74011 t1=0.66404 t2=0.72639 t3=0.68487
+AB_RAW round=17 t0=0.76603 t1=0.69832 t2=0.74535 t3=0.66586
+AB_RAW round=18 t0=0.80777 t1=0.66961 t2=0.84846 t3=0.78058
+AB_RAW round=19 t0=0.71415 t1=0.69138 t2=0.73089 t3=0.63604
+AB_RAW round=20 t0=0.73410 t1=0.66377 t2=0.77325 t3=0.68673
+# bucket replay (panel kernels only, 11 reps each, previous vs both, alternating; results bitwise equal):
+# bucket panels  fwd_prev_ms fwd_new_ms fwd_speedup  back_prev_ms back_new_ms back_speedup
+AB_BUCKET 1-6       558154     38.994    39.707  0.982x      46.871    46.293  1.012x
+AB_BUCKET 7-31       77030    122.941    70.131  1.753x      89.395    84.527  1.058x
+AB_BUCKET 32-63       1713     23.540    17.114  1.375x      23.749    21.434  1.108x
+AB_BUCKET 64-127       468     26.494    19.737  1.342x      23.985    21.330  1.124x
+AB_BUCKET 128-255      128     22.421    18.851  1.189x      20.336    18.461  1.102x
+AB_BUCKET 256-511       41     24.176    20.818  1.161x      20.454    19.785  1.034x
+AB_BUCKET >=512         16     23.710    24.156  0.982x      25.208    23.653  1.066x
+# peak_rss=2692 MB huge_pages=2054 MB
+

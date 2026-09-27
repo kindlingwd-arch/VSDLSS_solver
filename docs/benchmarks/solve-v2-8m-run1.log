@@ -1,0 +1,38 @@
+# nets: VDD n=4160001 lattice=1400x1483  GND n=3839999 lattice=1366x1403
+# pg_profile n=8000000 edges=10000000 nnz_upper=18000000 nnz_full=28000000 max_degree=10 lattice=1400x1483 gen=2.8s
+# degree  target:   d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3
+# degree  achieved: d1=800000 d2=2416038 d3=4767948 d4=16001 d5=10 d6+=3 (d0=0)
+# rss after build: 766 MB
+# factor: order=5 threads=1 time=17.31s components=2 core_n=2152277 (26.90%) core_nnzL=160.2M peak_rss=2599 MB page_faults=318820
+# check: cfg 1/2/3 bitwise equal to cfg 0, backward_error=3.21e-17
+# full solve (vsdlss_m3_solve, 15 rounds, rotated order, all bitwise checked):
+AB_FULL cfg=0 previous   median=0.74113s min=0.70559s paired_ratio_median=1.0000 q25=1.0000 q75=1.0000
+AB_FULL cfg=1 fwd_reg    median=0.66169s min=0.63494s paired_ratio_median=0.9004 q25=0.8824 q75=0.9131
+AB_FULL cfg=2 back_dot8  median=0.71936s min=0.68691s paired_ratio_median=0.9779 q25=0.9569 q75=0.9928
+AB_FULL cfg=3 both       median=0.65990s min=0.63096s paired_ratio_median=0.8997 q25=0.8857 q75=0.9046
+AB_RAW round=0 t0=0.76308 t1=0.68622 t2=0.74924 t3=0.69032
+AB_RAW round=1 t0=0.72433 t1=0.65648 t2=0.71911 t3=0.65215
+AB_RAW round=2 t0=0.72266 t1=0.63766 t2=0.71127 t3=0.65020
+AB_RAW round=3 t0=0.82281 t1=0.66973 t2=0.71936 t3=0.65990
+AB_RAW round=4 t0=0.71236 t1=0.63494 t2=0.68691 t3=0.63096
+AB_RAW round=5 t0=0.70782 t1=0.63824 t2=0.68814 t3=0.63684
+AB_RAW round=6 t0=0.70559 t1=0.64425 t2=0.69572 t3=0.63224
+AB_RAW round=7 t0=0.72519 t1=0.64970 t2=0.70477 t3=0.65259
+AB_RAW round=8 t0=0.71450 t1=0.65179 t2=0.72113 t3=0.65134
+AB_RAW round=9 t0=0.75510 t1=0.67993 t2=0.72257 t3=0.67759
+AB_RAW round=10 t0=0.80786 t1=0.74616 t2=0.71902 t3=0.69430
+AB_RAW round=11 t0=0.75279 t1=0.69000 t2=0.73615 t3=0.68936
+AB_RAW round=12 t0=0.74113 t1=0.68121 t2=0.75655 t3=0.66471
+AB_RAW round=13 t0=0.81416 t1=0.67021 t2=0.72770 t3=0.69478
+AB_RAW round=14 t0=0.75920 t1=0.66169 t2=0.81109 t3=0.70910
+# bucket replay (panel kernels only, 11 reps each, previous vs both, alternating; results bitwise equal):
+# bucket panels  fwd_prev_ms fwd_new_ms fwd_speedup  back_prev_ms back_new_ms back_speedup
+AB_BUCKET 1-6       558154     38.376    37.975  1.011x      44.531    44.889  0.992x
+AB_BUCKET 7-31       77030    119.544    64.487  1.854x      87.096    83.147  1.047x
+AB_BUCKET 32-63       1713     23.443    16.507  1.420x      23.551    21.380  1.102x
+AB_BUCKET 64-127       468     25.505    20.174  1.264x      22.257    21.287  1.046x
+AB_BUCKET 128-255      128     21.359    18.904  1.130x      19.872    17.782  1.117x
+AB_BUCKET 256-511       41     20.768    18.744  1.108x      18.118    17.012  1.065x
+AB_BUCKET >=512         16     19.668    20.811  0.945x      21.077    21.031  1.002x
+# peak_rss=2693 MB huge_pages=2056 MB
+

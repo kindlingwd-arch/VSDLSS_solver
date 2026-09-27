@@ -49,6 +49,30 @@ int main(void)
             int bad=vsdlss_simd_dot4(a,rs,x,n,v);
             for(int k=0;k<4;k++){double t=w[k];for(csi r=0;r<n;r++)t-=a[k*rs+r]*x[r];w[k]=t;}
             CHECK(memcmp(v,w,4*8)==0 && bad==0);
+            for(int k=0;k<4;k++)v[k]=w[k]=uni();
+            bad=vsdlss_simd_dot4b(a,rs,x,n,v);
+            for(int k=0;k<4;k++){double t=w[k];for(csi r=0;r<n;r++)t-=a[k*rs+r]*x[r];w[k]=t;}
+            CHECK(memcmp(v,w,4*8)==0 && bad==0);
+        }
+        /* eight dot products and the padded 1..3-column tail */
+        if(ws>=8){
+            for(int k=0;k<8;k++)v[k]=w[k]=uni();
+            int bad=vsdlss_simd_dot8(a,rs,x,n,v);
+            for(int k=0;k<8;k++){double t=w[k];for(csi r=0;r<n;r++)t-=a[k*rs+r]*x[r];w[k]=t;}
+            CHECK(memcmp(v,w,8*8)==0 && bad==0);
+        }
+        {
+            csi m=1+(csi)(rnd()%3); if(m>ws)m=ws;
+            for(int k=0;k<8;k++)v[k]=w[k]=uni();
+            int bad=vsdlss_simd_dot_tail(a,rs,m,x,n,v);
+            for(csi k=0;k<m;k++){double t=w[k];for(csi r=0;r<n;r++)t-=a[k*rs+r]*x[r];w[k]=t;}
+            CHECK(memcmp(v,w,8*8)==0 && bad==0);   /* v[m..8) untouched */
+        }
+        /* whole-panel forward external update (rows 0..n of R) */
+        {
+            int bad=vsdlss_simd_ext_update(a,rs,ws,xs,R,n,x);
+            for(csi r=0;r<n;r++){double t=y[R[r]];for(csi j=0;j<ws;j++)t-=a[j*rs+r]*xs[j];y[R[r]]=t;}
+            CHECK(memcmp(x,y,N*8)==0 && bad==0);
         }
     }
     /* non-finite results are reported */
@@ -58,6 +82,21 @@ int main(void)
     CHECK(vsdlss_simd_dot4(a,64,x,8,v)==1);
     x[3]=1; v[0]=v[1]=v[2]=v[3]=0;
     CHECK(vsdlss_simd_dot4(a,64,x,8,v)==0);
+    for(int k=0;k<64*8;k++)a[k]=1;
+    x[3]=NAN; for(int k=0;k<8;k++)v[k]=0;
+    CHECK(vsdlss_simd_dot8(a,64,x,8,v)==1);
+    for(int k=0;k<8;k++)v[k]=0;
+    CHECK(vsdlss_simd_dot_tail(a,64,3,x,8,v)==1);
+    x[3]=1; for(int k=0;k<8;k++)v[k]=0;
+    CHECK(vsdlss_simd_dot8(a,64,x,8,v)==0 && vsdlss_simd_dot_tail(a,64,2,x,8,v)==0);
+    /* forward update: a non-finite destination in every remainder position */
+    for(csi n=1;n<=40;n++)for(csi p=0;p<n;p++){
+        for(csi r=0;r<n;r++){R[r]=2*r;} for(csi i=0;i<N;i++)x[i]=1;
+        x[R[p]]=INFINITY; xs[0]=1;
+        CHECK(vsdlss_simd_ext_update(a,64,1,xs,R,n,x)==1);
+        x[R[p]]=1;
+        CHECK(vsdlss_simd_ext_update(a,64,1,xs,R,n,x)==0);
+    }
     free(x);free(y);free(a);free(xs);free(v);free(w);free(R);
     puts("test_simd: kernels bitwise equal to the scalar loops (2000 random cases)");
     return 0;
