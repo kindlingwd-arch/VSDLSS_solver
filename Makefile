@@ -101,7 +101,7 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal test-solve-kv test-selinv
+	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal test-solve-kv test-selinv test-relabel
 
 src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h src/vsdlss_ledger.h src/vsdlss_simd.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
@@ -290,3 +290,10 @@ test-selinv: test_selinv
 test: test-selinv
 bench_selinv_panel: test/bench_selinv_panel.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_selinv_panel.c $(LIBSRCS) $(LDLIBS)
+
+# Solve-order relabel (VSDLSS_RELABEL); see docs/reconstruction/27-replay-small-panels-20260928.md.
+test_relabel: test/test_relabel.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_relabel.c $(LIBSRCS) $(LDLIBS)
+test-relabel: test_relabel
+	./test_relabel
+test: test-relabel

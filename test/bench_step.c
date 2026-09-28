@@ -289,6 +289,12 @@ int main(int argc,char **argv)
             for(csi q=0;q<s->count;q++){ csi w=s->column_start[q+1]-s->column_start[q], e=s->row_ptr[q+1]-s->row_ptr[q];
                 int bw=vsdlss_ledger_bucket(w), be=0; while(be<6&&e>=eb[be+1]) be++; if(e==0) be=7;
                 hn[bw][be]++; hb[bw][be]+=8.0*(w*(w+1)/2+w*e); } }
+        long long dh[4]={0}, runs=0; int last=-1;
+        for(csi k=0;k<f->count;k++){ const vsdlss_reduction *r=f->component[k].reduction;
+            for(csi q=0;q<r->pk_count;q++) for(csi i=0;i<r->pk[q].count;i++){ int d=(int)(r->pk[q].head[i]>>30); dh[d]++; if(d!=last) runs++; last=d; } }
+        { long long nb_=0,maxb=0,tail=0,tot=0; for(csi k=0;k<f->count;k++){ const vsdlss_reduction *r=f->component[k].reduction; if(r->blocks>=1&&r->pk_count==r->blocks+1){ nb_+=r->blocks; for(csi b=0;b<r->blocks;b++){ if(r->pk[b].count>maxb)maxb=r->pk[b].count; } tail+=r->pk[r->blocks].count; } tot+=r->count; }
+          printf("# replay blocks %lld (largest %lld records), sequential tail %lld of %lld records\n",nb_,maxb,tail,tot); }
+        printf("# replay records by degree 0/1/2/3: %lld %lld %lld %lld, degree changes %lld\n",dh[0],dh[1],dh[2],dh[3],runs);
         printf("# (w,e) panels / MB of L: e buckets 1-3,4-7,8-15,16-31,32-63,64-127,>=128,e=0\n");
         for(int bw=0;bw<LG_NB;bw++){ printf("#  w-bucket %d:",bw); for(int be=0;be<8;be++) printf(" %lld/%.1f",hn[bw][be],hb[bw][be]/1e6); printf("\n"); }
     }

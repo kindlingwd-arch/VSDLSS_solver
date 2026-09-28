@@ -52,3 +52,5 @@
 /tskv_asan
 /test_selinv
 /bench_selinv_panel
+/test_relabel
+/test_kernels_asan
