@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Supernodal symbolic analysis.
@@ -81,14 +82,27 @@ done:
     return st;
 }
 
-/* CHOLMOD's default amalgamation rule (nrelax = 4/16/48, zrelax 0.8/0.1/0.05). */
-static int relax_ok(csi cols, double zeros, double total)
+/* Amalgamation rule: always merge up to p[0] columns; up to p[1] columns
+ * below a p[3] zero fraction; up to p[2] below p[4]; otherwise below p[5].
+ * CHOLMOD's default is 4/16/48, 0.8/0.1/0.05.  VSDLSS_SN_RELAX="n0,n1,n2,
+ * z1,z2,z3" overrides it (read per analysis into a local copy, so
+ * concurrent component analyses share no state). */
+static void relax_params(double p[6])
+{
+    static const double def[6] = {4, 16, 48, 0.8, 0.1, 0.05};
+    memcpy(p, def, sizeof def);
+    const char *e = getenv("VSDLSS_SN_RELAX");
+    double v[6];
+    if (e && *e && sscanf(e, "%lf,%lf,%lf,%lf,%lf,%lf", v, v + 1, v + 2, v + 3, v + 4, v + 5) == 6)
+        memcpy(p, v, sizeof v);
+}
+static int relax_ok(const double p[6], csi cols, double zeros, double total)
 {
     double frac = total > 0 ? zeros / total : 0;
-    if (cols <= 4) return 1;
-    if (cols <= 16 && frac < 0.8) return 1;
-    if (cols <= 48 && frac < 0.1) return 1;
-    return frac < 0.05;
+    if (cols <= p[0]) return 1;
+    if (cols <= p[1] && frac < p[3]) return 1;
+    if (cols <= p[2] && frac < p[4]) return 1;
+    return frac < p[5];
 }
 
 static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int relax)
@@ -193,6 +207,8 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int rela
             gtrue[s] = (double)w * (double)(w + 1) / 2 +
                        (double)w * (double)(fptr[s + 1] - fptr[s]);
         }
+        double rp[6];
+        if (relax) relax_params(rp);
         if (relax) for (s = fcount - 2; s >= 0; --s) {
             csi g = s + 1, ext, cols;
             double panel;
@@ -200,7 +216,7 @@ static vsdlss_status analyze(const vsdlss *A, vsdlss_sn_symbolic **out, int rela
             ext = fptr[gtop[g] + 1] - fptr[gtop[g]];
             cols = gcols[g] + gcols[s];
             panel = (double)cols * (double)(cols + 1) / 2 + (double)cols * (double)ext;
-            if (!relax_ok(cols, panel - gtrue[g] - gtrue[s], panel)) continue;
+            if (!relax_ok(rp, cols, panel - gtrue[g] - gtrue[s], panel)) continue;
             merged[g] = 1;               /* g no longer starts a group */
             gcols[s] = cols; gtop[s] = gtop[g]; gtrue[s] += gtrue[g];
         }

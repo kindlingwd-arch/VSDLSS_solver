@@ -50,3 +50,5 @@
 /test_solve_kv
 /bench_transient
 /tskv_asan
+/test_relabel
+/test_kernels_asan

@@ -229,6 +229,49 @@ static int sn_reorder_on(void)
     return on;
 }
 
+/* Solve-order relabel (VSDLSS_RELABEL, default on): renumber a component's
+ * local vertices as [eliminated vertices in record order, core unknowns in
+ * supernodal order].  The forward/backward replays then walk their pivot
+ * vertices sequentially, and the core right-hand side is the contiguous
+ * tail local[count..n) -- the core solve runs on it in place, with no
+ * gather or scatter.  Only the numbering changes: every entry sees the same
+ * operations in the same order, so solutions are bitwise identical.  The
+ * packed/internal order (vsdlss_m3_export_packed_permutation) changes with
+ * it.  Applies to packed reductions of renumbered (BFS) components. */
+int vsdlss_m3_relabel = -1;
+static int relabel_on(void)
+{
+    if(vsdlss_m3_relabel<0){ const char *e=getenv("VSDLSS_RELABEL"); vsdlss_m3_relabel=e?atoi(e):1; }
+    return vsdlss_m3_relabel;
+}
+static vsdlss_status relabel_component(vsdlss_m3_component_factor *cf)
+{
+    vsdlss_reduction *r=cf->reduction;
+    const csi n=cf->n, cnt=r->count, core=r->core_n;
+    if(!cf->gather || r->records || n!=r->n || cnt+core!=n || (core && !cf->core_map)) return VSDLSS_OK;
+    if(n>(csi)0x3fffffff) return VSDLSS_OK;
+    csi *id=(csi*)malloc((size_t)n*sizeof(csi)), *g2=(csi*)vsdlss_big_malloc((size_t)n*sizeof(csi));
+    if(!id||!g2){ free(id); free(g2); return VSDLSS_ERR_OOM; }
+    for(csi v=0;v<n;v++) id[v]=-1;
+    csi pos=0;
+    for(csi q=0;q<r->pk_count;q++){ const vsdlss_pk_seg *g=r->pk+q;
+        for(csi i=0;i<g->count;i++){ csi v=(csi)(g->head[i]&0x3fffffffu); if(v<0||v>=n||id[v]>=0) goto skip; id[v]=pos++; } }
+    if(pos!=cnt) goto skip;
+    for(csi k=0;k<core;k++){ csi v=cf->core_map[k]; if(v<0||v>=n||id[v]>=0) goto skip; id[v]=cnt+k; }
+    for(csi q=0;q<r->pk_count;q++){ vsdlss_pk_seg *g=r->pk+q;
+        for(csi i=0;i<g->count;i++){ uint32_t h=g->head[i]; g->head[i]=(h&~0x3fffffffu)|(uint32_t)id[h&0x3fffffffu]; }
+        for(csi j=0;j<g->nbn;j++) g->nb[j]=(uint32_t)id[g->nb[j]]; }
+    for(csi k=0;k<core;k++){ r->core_vertices[k]=id[r->core_vertices[k]]; cf->core_map[k]=cnt+k; }
+    for(csi v=0;v<n;v++) g2[id[v]]=cf->gather[v];
+    free(cf->gather);
+    cf->gather=g2; cf->core_contig=1;
+    free(id);
+    return VSDLSS_OK;
+skip:
+    free(id); free(g2);
+    return VSDLSS_OK;
+}
+
 /* Phase 2: reduce (consuming the prepared input), order and factor the core. */
 static vsdlss_status factor_component(void *vctx, csi component)
 {
@@ -295,6 +338,10 @@ static vsdlss_status factor_component(void *vctx, csi component)
         TRACE("core symbolic",t0);
         status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
         TRACE("core numeric",t0);
+    }
+    if(status==VSDLSS_OK && !factor->disk_mode && relabel_on()) {
+        status=relabel_component(cf);
+        TRACE("solve-order relabel",t0);
     }
 done:
     free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted);
@@ -530,6 +577,16 @@ static vsdlss_status solve_local(void *vctx, csi c)
             /* In place on the private core buffer.  A non-finite core RHS or
              * intermediate leaves a non-finite entry in the result, so the
              * write-back's scan reports it as vsdlss_sn_solve's scans did. */
+            if(cf->core_contig) {
+                /* Relabelled: the core RHS is local[count..n); solve it in
+                 * place.  A non-finite result is reported by the backward
+                 * replay's scan of the core entries. */
+                LEDGER_MARK(LG_CORE_GATHER,tl);
+                status=vsdlss_sn_solve_inplace(cf->numeric,local+r->count);
+                if(status!=VSDLSS_OK) return status;
+                if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
+                goto core_done;
+            }
             const csi *cm=cf->core_map;
             int ct=vsdlss_parallel_width((double)core*4); (void)ct;
             VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static))
@@ -544,6 +601,7 @@ static vsdlss_status solve_local(void *vctx, csi c)
             LEDGER_MARK(LG_CORE_SCATTER,tl);
         }
     }
+core_done:
     TRACE("solve: core",t0);
     if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
     status=vsdlss_reduce_backward_inplace(r,w->saved,local);

@@ -3,6 +3,10 @@
 最后更新：2026-09-23。
 
 
+## 2026-09-28 增补：求解序重编号、小面板与合并参数
+
+分支 `perf/replay-small-20260928`（原基于第 26 篇分支；合入 main 时未包含 selective inversion），见第 27 篇。默认开启的求解序重编号（`VSDLSS_RELABEL`）去掉核心 gather/scatter，加上 4–6 列回代改回标量小核，4M 单线程求解 −5.4%，逐位一致。新增 `VSDLSS_SN_RELAX`：收紧合并（1,4,16,0.5,0.02,0.01）再 −5%（合计 −10.3%），不逐位一致，默认未改，待目标机确认多线程 factor 时间。
+
 ## 2026-09-27 增补：求解账本与内核
 
 分支 `perf/solve-ledger-kernels-20260927`（基于 `590190b`），见第 25 篇。新增 `VSDLSS_SOLVE_LEDGER` 单步时间账本、`vsdlss_m3_solve_packed_inplace`、默认 KV=2 面板内核（单线程求解 −15%，逐位一致）、opt-in KV=3 松弛回代。实测仅 1 vCPU，最大 4M；多线程与 8M 以上未测。

@@ -99,6 +99,7 @@ typedef struct vsdlss_m3_component_factor {
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
     csi *core_map;               /* local vertex of each (permuted) core unknown */
     vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
+    int core_contig;             /* core_map[k] == reduction->count + k (relabelled) */
     /* Solve workspace allocated with the factor, so repeated solves do not
      * allocate (and fault in) large buffers.  A solve takes it with an
      * atomic flag; a concurrent solve on the same factor falls back to
