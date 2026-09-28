@@ -106,6 +106,15 @@ vsdlss_status vsdlss_m3_solve_packed(const vsdlss_m3_factor *factor,
  * copies.  A non-finite RHS is rejected before x is modified; other
  * failures may leave x partially updated.  Not for disk-mode factors. */
 vsdlss_status vsdlss_m3_solve_packed_inplace(const vsdlss_m3_factor *factor, double *x);
+
+/* Experimental (P1-2): invert, in place, the diagonal blocks of all core
+ * supernode panels with wmin <= width <= wmax, so the triangular solves of
+ * those blocks become independent dot products.  No extra memory; costs
+ * sum(w^3/6) flops once.  Irreversible for this factor: results are no
+ * longer bitwise equal to the triangular solve (backward error of the same
+ * order), solves use the serial panel schedule, and calling it twice
+ * returns VSDLSS_ERR_INVALID.  Not for disk-mode factors. */
+vsdlss_status vsdlss_m3_selinv(vsdlss_m3_factor *factor, long long wmin, long long wmax);
 /* Same order and implementation under the names of the other branch:
  * vsdlss_m3_internal_order(f, perm) equals
  * vsdlss_m3_export_packed_permutation(f, perm, n), and

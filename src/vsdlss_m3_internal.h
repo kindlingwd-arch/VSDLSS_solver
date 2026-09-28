@@ -90,6 +90,10 @@ typedef struct vsdlss_sn_factor {
      * so repeated tree-parallel solves do not rebuild them (NULL: built per
      * solve). */
     struct vsdlss_sn_solve_tree *solve_tree;
+    /* Selective inversion (vsdlss_sn_selinv): panels with width in
+     * [selinv_lo, selinv_hi] hold L_JJ^{-1} (lower, upper part zeroed) in
+     * place of their diagonal block.  selinv_hi == 0: none. */
+    csi selinv_lo, selinv_hi;
 } vsdlss_sn_factor;
 
 typedef struct vsdlss_m3_component_factor {
@@ -221,6 +225,12 @@ vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *, double *x);
 vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *, csi nrhs, double *x, csi ldx);
 vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *, vsdlss **);
+/* Invert the diagonal blocks of panels with lo <= width <= hi in place
+ * (see selinv_lo).  Irreversible; solves then use the inverse kernels, the
+ * tree-parallel schedule is not used, and vsdlss_sn_export_L refuses. */
+vsdlss_status vsdlss_sn_selinv(vsdlss_sn_factor *, csi lo, csi hi);
+vsdlss_status vsdlss_panel_solve_inv(const double *, csi begin, csi width,
+                                     csi ext, const csi *index, double *x, int back);
 void vsdlss_sn_factor_free(vsdlss_sn_factor *);
 
 /* Shared in-memory/disk panel kernels. Layout is column major. */

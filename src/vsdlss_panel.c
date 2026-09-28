@@ -378,3 +378,82 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
         default: return vsdlss_panel_solve_generic(a,begin,width,ext,index,x,back);
     }
 }
+
+/* Panels whose diagonal block holds M = L_JJ^{-1} (vsdlss_sn_selinv).
+ * Forward: x_J = M b_J (column axpys, four fused), then the usual external
+ * update.  Backward: v_J = y_J - L_EJ^T x_E (dot8 as in KV=2), then
+ * x_J = M^T v_J: one independent dot product per column (eight at a time;
+ * the zeroed upper part lets each group read a common row range), so no
+ * serial dependency remains inside the block.  Rounding differs from the
+ * triangular kernels. */
+vsdlss_status vsdlss_panel_solve_inv(const double *a,csi begin,csi width,
+                                     csi ext,const csi *index,double *x,int back)
+{
+    const csi rows=width+ext;
+    const int simd=vsdlss_simd_enabled();
+    double stack_t[VSDLSS_SOLVE_GATHER];
+    double *t=width<=VSDLSS_SOLVE_GATHER?stack_t:(double*)malloc((size_t)width*sizeof(double));
+    vsdlss_status st=VSDLSS_OK;
+    int bad=0;
+    if(!t)return VSDLSS_ERR_OOM;
+    double *xb=x+begin;
+    if(!back){
+        for(csi j=0;j<width;j++){ t[j]=xb[j]; xb[j]=0.0; }
+        csi j=0;
+        if(simd) for(;j+4<=width;j+=4){
+            /* xb[j:] -= M[j:, j..j+3] * (-t): rows above a column are zero */
+            double s4[4]={-t[j],-t[j+1],-t[j+2],-t[j+3]};
+            vsdlss_simd_axpy4_neg(xb+j,a+j*rows+j,rows,s4,width-j);
+        }
+        for(;j<width;j++){ const double *c=a+j*rows; double s=t[j]; for(csi r=j;r<width;r++) xb[r]+=c[r]*s; }
+        for(j=0;j<width;j++) if(!isfinite(xb[j])){ st=VSDLSS_ERR_NONFINITE; goto out; }
+        if(ext){
+            if(simd && width<=128) vsdlss_simd_block_update(a+width,rows,width,xb,index,0,ext,x);
+            else {
+                /* wide: 128-row chunks, four columns per pass (as KV=2) */
+                double v[128];
+                for(csi t0=0;t0<ext;t0+=128){
+                    csi len=ext-t0<128?ext-t0:128, q=0;
+                    for(csi r=0;r<len;r++) v[r]=x[index[t0+r]];
+                    if(simd) for(;q+4<=width;q+=4) vsdlss_simd_axpy4_neg(v,a+q*rows+width+t0,rows,xb+q,len);
+                    for(;q<width;q++){ const double *c=a+q*rows+width+t0; double sq=xb[q];
+                        for(csi r=0;r<len;r++) v[r]-=c[r]*sq; }
+                    for(csi r=0;r<len;r++) x[index[t0+r]]=v[r];
+                }
+            }
+            for(csi r=0;r<ext;r++) bad|=!isfinite(x[index[r]]);
+            if(bad){ st=VSDLSS_ERR_NONFINITE; goto out; }
+        }
+    } else {
+        if(ext){
+            double stack_g[VSDLSS_SOLVE_GATHER];
+            double *xg=ext<=VSDLSS_SOLVE_GATHER?stack_g:(double*)malloc((size_t)ext*sizeof(double));
+            if(!xg){ st=VSDLSS_ERR_OOM; goto out; }
+            for(csi r=0;r<ext;r++) xg[r]=x[index[r]];
+            csi q=0;
+            if(simd){
+                for(;q+8<=width;q+=8) bad|=vsdlss_simd_dot8(a+q*rows+width,rows,xg,ext,xb+q);
+                for(;q+4<=width;q+=4) bad|=vsdlss_simd_dot4(a+q*rows+width,rows,xg,ext,xb+q);
+            }
+            for(;q<width;q++){
+                double v=xb[q]; const double *c=a+q*rows+width;
+                for(csi r=0;r<ext;r++) v-=c[r]*xg[r];
+                xb[q]=v; bad|=!isfinite(v);
+            }
+            if(xg!=stack_g) free(xg);
+            if(bad){ st=VSDLSS_ERR_NONFINITE; goto out; }
+        }
+        for(csi j=0;j<width;j++) t[j]=xb[j];
+        csi j=0;
+        if(simd) for(;j+8<=width;j+=8){
+            double o[8]={0,0,0,0,0,0,0,0};
+            vsdlss_simd_dot8(a+j*rows+j,rows,t+j,width-j,o);
+            for(int k=0;k<8;k++) xb[j+k]=-o[k];
+        }
+        for(;j<width;j++){ const double *c=a+j*rows; double v=0; for(csi r=j;r<width;r++) v+=c[r]*t[r]; xb[j]=v; }
+        for(j=0;j<width;j++) if(!isfinite(xb[j])){ st=VSDLSS_ERR_NONFINITE; goto out; }
+    }
+out:
+    if(t!=stack_t) free(t);
+    return st;
+}

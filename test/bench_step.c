@@ -295,6 +295,18 @@ int main(int argc,char **argv)
     printf("# setup: factor %.3f s order=%d threads=%d core_n=%lld (%.1f%%) panels=%lld max_width=%lld | resident: L values %.1f MB, L row idx %.1f MB, reduction %.1f MB | rss before factor %ld MB, peak %ld MB\n",
         tfac,order,threads,(long long)core,100.0*core/n,(long long)npan,(long long)maxw,lbytes/1e6,ridx/1e6,redb/1e6,rss0,peak_rss_mb());
 
+    /* P1-2: TR_SELINV=lo:hi inverts the diagonal blocks of panels with
+     * lo <= width <= hi in place (setup cost reported). */
+    if((ev=getenv("TR_SELINV"))&&*ev){
+        long long lo=1,hi=1; sscanf(ev,"%lld:%lld",&lo,&hi);
+        double flops=0; long long np=0;
+        for(csi k=0;k<f->count;k++){ const vsdlss_sn_factor *s=f->component[k].numeric; if(!s) continue;
+            for(csi q=0;q<s->count;q++){ csi w=s->column_start[q+1]-s->column_start[q]; if(w>=lo&&w<=hi){ np++; flops+=(double)w*w*w/3.0; } } }
+        tt=now();
+        vsdlss_status ss=vsdlss_m3_selinv(f,lo,hi);
+        printf("# selinv %lld:%lld: %s, %lld panels, %.3f s setup (%.2f GFlop), no extra memory\n",lo,hi,vsdlss_status_string(ss),np,now()-tt,flops/1e9);
+        if(ss!=VSDLSS_OK) return 1;
+    }
     /* ---- packed chain: one-time mapping (part of setup) ---- */
     tt=now();
     csi *pperm=malloc(n*sizeof(csi)), *pinv=malloc(n*sizeof(csi));

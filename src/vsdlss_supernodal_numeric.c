@@ -871,6 +871,19 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
     return bad == 0 ? VSDLSS_OK : (bad & 1) ? VSDLSS_ERR_INVALID : VSDLSS_ERR_NONFINITE;
 }
 
+/* One panel of the serial solve: inverse kernels for selectively inverted
+ * panels, otherwise vsdlss_panel_solve. */
+static inline vsdlss_status sn_panel(const vsdlss_sn_factor *f, csi sn, double *x, int back)
+{
+    csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+    csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
+    const double *a = f->panel + f->panel_offset[sn];
+    const csi *R = ext ? f->row_index + f->row_ptr[sn] : NULL;
+    if (f->selinv_hi && w >= f->selinv_lo && w <= f->selinv_hi)
+        return vsdlss_panel_solve_inv(a, b, w, ext, R, x, back);
+    return vsdlss_panel_solve(a, b, w, ext, R, x, back);
+}
+
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
 {
     if (!f || !x || f->n < 1) return VSDLSS_ERR_INVALID;
@@ -882,7 +895,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
     if (vsdlss_panel_solve_uses_blas()) nt = 1;
 #endif
     const int lg = vsdlss_ledger_level();
-    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) {
+    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr && !f->selinv_hi) {
         double t0 = lg ? vsdlss_ledger_now() : 0;
         vsdlss_status st = solve_tree(f, x, nt);
         /* Tree path: forward and backward are not separated here; the
@@ -901,8 +914,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
                 csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
                 csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
                 uint64_t c0 = vsdlss_ledger_tsc();
-                vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
-                    ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
+                vsdlss_status st = sn_panel(f, sn, x, back);
                 uint64_t c1 = vsdlss_ledger_tsc();
                 if (st != VSDLSS_OK) return st;
                 int k = vsdlss_ledger_bucket(w);
@@ -918,10 +930,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
         double t0 = lg ? vsdlss_ledger_now() : 0;
         for (csi t = 0; t < f->count; t++) {
             csi sn = back ? f->count - 1 - t : t;
-            csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
-            csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
-            vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
-                ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
+            vsdlss_status st = sn_panel(f, sn, x, back);
             if (st != VSDLSS_OK) return st;
         }
         if (lg) vsdlss_ledger.wall[back ? LG_CORE_BWD : LG_CORE_FWD] += vsdlss_ledger_now() - t0;
@@ -957,11 +966,8 @@ vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *f, csi nrhs, double 
             if (!isfinite(x[r * ldx + j])) return VSDLSS_ERR_NONFINITE;
     for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
         csi sn = back ? f->count - 1 - t : t;
-        csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
-        csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
         for (csi r = 0; r < nrhs; ++r) {
-            vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
-                ext ? f->row_index + f->row_ptr[sn] : NULL, x + r * ldx, back);
+            vsdlss_status st = sn_panel(f, sn, x + r * ldx, back);
             if (st != VSDLSS_OK) return st;
         }
     }
@@ -978,7 +984,7 @@ vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *f, vsdlss **out)
     vsdlss *L; csi nz = 0;
     if (!out) return VSDLSS_ERR_INVALID;
     *out = NULL;
-    if (!f || f->n < 1 || f->l_nnz < 1) return VSDLSS_ERR_INVALID;
+    if (!f || f->n < 1 || f->l_nnz < 1 || f->selinv_hi) return VSDLSS_ERR_INVALID;
     L = vsdlss_spalloc(f->n, f->n, f->l_nnz, 1, 0); if (!L) return VSDLSS_ERR_OOM;
     for (csi s = 0; s < f->count; ++s) {
         csi b = f->column_start[s], w = f->column_start[s + 1] - b;
@@ -996,4 +1002,46 @@ vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *f, vsdlss **out)
     }
     L->p[f->n] = nz;
     *out = L; return VSDLSS_OK;
+}
+
+/* In-place inverse of the lower-triangular diagonal block of every panel
+ * with lo <= width <= hi (LAPACK dtrti2 order: columns from the right; the
+ * trailing block is already inverted, so column j becomes
+ * -M(j+1:,j+1:) L(j+1:,j) / L(j,j)).  The unused upper part of the block is
+ * zeroed so the backward kernel can read whole 8-column slabs. */
+vsdlss_status vsdlss_sn_selinv(vsdlss_sn_factor *f, csi lo, csi hi)
+{
+    if (!f || lo < 1 || hi < lo || f->selinv_hi) return VSDLSS_ERR_INVALID;
+    csi maxw = 0;
+    for (csi s = 0; s < f->count; ++s) { csi w = f->column_start[s + 1] - f->column_start[s]; if (w > maxw) maxw = w; }
+    double *t = (double *)malloc((size_t)(maxw + 1) * sizeof(double));
+    if (!t) return VSDLSS_ERR_OOM;
+    for (csi s = 0; s < f->count; ++s) {
+        csi w = f->column_start[s + 1] - f->column_start[s];
+        if (w < lo || w > hi) continue;
+        csi rows = w + f->row_ptr[s + 1] - f->row_ptr[s];
+        double *a = f->panel + f->panel_offset[s];
+        for (csi j = 0; j < w; ++j) {
+            double d = a[j * rows + j];
+            if (!isfinite(d) || d <= 0) { free(t); return VSDLSS_ERR_INVALID; }
+        }
+        for (csi j = w; j-- > 0;) {
+            double *cj = a + j * rows;
+            cj[j] = 1.0 / cj[j];
+            const double ajj = -cj[j];
+            /* t = M(j+1:,j+1:) * L(j+1:,j), rows from the bottom */
+            for (csi r = w; r-- > j + 1;) {
+                double v = 0;
+                for (csi k = j + 1; k <= r; ++k) v += a[k * rows + r] * cj[k];
+                t[r] = v;
+            }
+            for (csi r = j + 1; r < w; ++r) cj[r] = ajj * t[r];
+            for (csi r = 0; r < j; ++r) cj[r] = 0.0;
+        }
+        for (csi j = 0; j < w; ++j) for (csi r = j; r < w; ++r)
+            if (!isfinite(a[j * rows + r])) { free(t); return VSDLSS_ERR_NONFINITE; }
+    }
+    free(t);
+    f->selinv_lo = lo; f->selinv_hi = hi;
+    return VSDLSS_OK;
 }

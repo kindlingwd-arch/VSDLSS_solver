@@ -994,3 +994,17 @@ vsdlss_status vsdlss_m4_reduced_solve(vsdlss_m4_reduced_factor *f,const double *
 { if(!f||!f->disk_mode)return VSDLSS_ERR_INVALID;return vsdlss_m3_solve(f,b,x); }
 void vsdlss_m4_reduced_free(vsdlss_m4_reduced_factor *f)
 { vsdlss_m3_factor_free(f); }
+
+vsdlss_status vsdlss_m3_selinv(vsdlss_m3_factor *factor, long long wmin, long long wmax)
+{
+    if(!factor || factor->disk_mode || wmin<1 || wmax<wmin) return VSDLSS_ERR_INVALID;
+    for(csi c=0;c<factor->count;c++)
+        if(factor->component[c].numeric && factor->component[c].numeric->selinv_hi) return VSDLSS_ERR_INVALID;
+    for(csi c=0;c<factor->count;c++) {
+        vsdlss_sn_factor *s=factor->component[c].numeric;
+        if(!s) continue;
+        vsdlss_status st=vsdlss_sn_selinv(s,(csi)wmin,(csi)wmax);
+        if(st!=VSDLSS_OK) return st;
+    }
+    return VSDLSS_OK;
+}
