@@ -20,12 +20,27 @@ PARFLAGS += -DVSDLSS_BLAS
 LDLIBS += $(BLAS_LIBS)
 endif
 # Optional METIS nested dissection for the M3 core (ordering 6):
+#   make METIS=1
+# builds the bundled METIS 5.1.0 (third_party/metis-5.1.0: 64-bit idx_t,
+# thread-local GKlib random state, -DUSE_GKRAND) into build/metis and lets
+# the VDD/GND orderings run concurrently (METIS_THREADSAFE=1 by default).
+# An external METIS instead:
 #   make METIS=1 METIS_CFLAGS='-I<metis>/include' METIS_LIBS='-L<metis>/lib -lmetis'
-# METIS must be built with 64-bit idx_t.  Stock METIS 5.1 keeps its random
+# It must be built with 64-bit idx_t.  Stock METIS 5.1 keeps its random
 # state in globals, so calls from concurrent components are serialized; set
-# METIS_THREADSAFE=1 for a METIS built with -DUSE_GKRAND and thread-local
-# GKlib random state, which lets VDD/GND orderings run concurrently.
+# METIS_THREADSAFE=1 only for a METIS built with -DUSE_GKRAND and
+# thread-local GKlib random state.
 METIS ?= 0
+METIS_DIR := third_party/metis-5.1.0
+METIS_BUILD := build/metis
+ifeq ($(METIS),1)
+ifeq ($(origin METIS_CFLAGS),undefined)
+METIS_BUNDLED := 1
+METIS_CFLAGS := -I$(METIS_DIR)/include
+METIS_LIBS := $(METIS_BUILD)/libmetis.a
+METIS_THREADSAFE ?= 1
+endif
+endif
 METIS_CFLAGS ?=
 METIS_LIBS ?= -lmetis
 METIS_THREADSAFE ?= 0
@@ -46,6 +61,20 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c \
            src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c
 LIBOBJS := $(LIBSRCS:.c=.o)
+
+ifeq ($(METIS_BUNDLED),1)
+METIS_SRCS := $(wildcard $(METIS_DIR)/GKlib/*.c) $(wildcard $(METIS_DIR)/libmetis/*.c)
+METIS_OBJS := $(patsubst $(METIS_DIR)/%.c,$(METIS_BUILD)/%.o,$(METIS_SRCS))
+METIS_OPT := -O3 -fPIC -DNDEBUG -DNDEBUG2 -D_GNU_SOURCE -DLINUX -DUSE_GKRAND -std=gnu99 \
+             -fno-strict-aliasing -w -I$(METIS_DIR)/include -I$(METIS_DIR)/GKlib -I$(METIS_DIR)/libmetis
+$(METIS_BUILD)/%.o: $(METIS_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(METIS_OPT) -c -o $@ $<
+$(METIS_BUILD)/libmetis.a: $(METIS_OBJS)
+	$(AR) rcs $@ $^
+# Every program compiles src/vsdlss_ordering.c: build the library first.
+src/vsdlss_ordering.c: | $(METIS_BUILD)/libmetis.a
+endif
 
 .PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel bench-parallel bench-m3 bench-sn sanitizers clean
 
@@ -107,6 +136,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
+	rm -rf build/metis
 	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h

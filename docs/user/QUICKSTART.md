@@ -117,3 +117,16 @@ make dist
 静态库不意味着所有运行时静态链接：默认仍需平台的 libm/OpenMP 运行时。这里交付源码发行包和构建方法，不声明跨平台二进制 ABI 稳定，也不擅自增加许可证授权。
 
 发布验收：解压包 → make clean → make smoke → make test；在接收方目标平台重复验证。M5 测试通过只表示适配器/gate 自检通过，不表示原版兼容已验收。
+
+## 6. METIS 排序与大规模求解的推荐构建
+
+仓库自带 METIS 5.1.0（`third_party/metis-5.1.0`，Apache 2.0，64 位 `idx_t`，GKlib 随机数状态改为线程局部，见其中的 `README.vsdlss.md`）。`make METIS=1` 会自动把它编译到 `build/metis/libmetis.a`，并让 VDD/GND 两个网的排序并发执行；也可以用 `METIS_CFLAGS`/`METIS_LIBS` 指向外部 METIS（必须是 64 位 `idx_t`）。
+
+```sh
+make -j8 METIS=1 test
+make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt' test   # 可选：MKL 用于分解中的宽超节点
+```
+
+C 接口用 `vsdlss_factorize_m3(A, 6, &f)` 选择 METIS（命令行 `-p` 只支持 0–5）。自己的程序链接 `libvsdlss.a` 时，同时链接 `build/metis/libmetis.a`，编译选项加 `-fopenmp -DVSDLSS_METIS -DVSDLSS_METIS_THREADSAFE`。
+
+运行时：带 BLAS 构建时设 `VSDLSS_BLAS_SOLVE_MIN=0`（否则求解改为串行）和单线程 BLAS（MKL：`MKL_THREADING_LAYER=SEQUENTIAL`）；多路服务器建议 `OMP_PROC_BIND=spread OMP_PLACES=cores`。
