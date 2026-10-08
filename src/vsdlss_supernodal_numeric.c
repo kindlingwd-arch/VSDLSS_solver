@@ -79,6 +79,16 @@ static void *copy_array(const void *p, csi n, size_t z)
     return q;
 }
 
+/* 32-bit copy of n entries, all known to be in [-1, INT32_MAX]. */
+static vsdlss_sni *copy_sni(const csi *p, csi n)
+{
+    vsdlss_sni *q;
+    if (!bytes_ok(n, sizeof(vsdlss_sni))) return NULL;
+    q = malloc((size_t)(n ? n : 1) * sizeof(vsdlss_sni));
+    if (q) for (csi i = 0; i < n; ++i) q[i] = (vsdlss_sni)p[i];
+    return q;
+}
+
 static void solve_tree_free(struct vsdlss_sn_solve_tree *st);
 
 void vsdlss_sn_factor_free(vsdlss_sn_factor *f)
@@ -131,16 +141,20 @@ static double *panel_alloc(csi count, void **block)
     *block = raw; return p;
 }
 
+/* Per-thread workspace.  The target panel is assembled, updated and
+ * factored in `full` (column-major, leading dimension = its row count,
+ * as the dense kernels expect), then packed into the factor.  Target rows
+ * are found by merging sorted row lists (target_row), so no n-length map
+ * per thread is needed. */
 typedef struct {
-    csi *relmap;    /* n: local row of a global row in the current target */
-    csi *stamp;     /* n: target that relmap currently describes */
-    csi *rowmap;    /* max_rows */
-    double *tile;   /* SCATTER_MC * SCATTER_NC */
+    vsdlss_sni *rowmap; /* max_rows: target-local rows of the current source block */
+    double *tile;       /* SCATTER_MC * SCATTER_NC */
+    double *full;       /* full_cap: the current target panel, unpacked */
+    size_t full_cap;
 } workspace;
 
 typedef struct {
-    vsdlss_sn_factor *f;
-    const vsdlss_sn_symbolic *s;
+    vsdlss_sn_factor *f;    /* layout and source blocks copied from the symbolic analysis */
     const vsdlss *lower;    /* transpose of A: column j holds rows i >= j */
     csi blas_min;           /* 0: built-in kernels only */
 } context;
@@ -148,20 +162,38 @@ typedef struct {
 static void workspace_free(workspace *w)
 {
     if (!w) return;
-    free(w->relmap); free(w->stamp); free(w->rowmap); free(w->tile);
+    free(w->rowmap); free(w->tile); free(w->full);
     memset(w, 0, sizeof(*w));
 }
 
-static int workspace_init(workspace *w, csi n, csi max_rows)
+static int workspace_init(workspace *w, csi max_rows)
 {
     memset(w, 0, sizeof(*w));
-    w->relmap = (csi *)malloc((size_t)n * sizeof(csi));
-    w->stamp = (csi *)malloc((size_t)n * sizeof(csi));
-    w->rowmap = (csi *)malloc((size_t)(max_rows ? max_rows : 1) * sizeof(csi));
+    w->rowmap = (vsdlss_sni *)malloc((size_t)(max_rows ? max_rows : 1) * sizeof(vsdlss_sni));
     w->tile = (double *)malloc(SCATTER_MC * SCATTER_NC * sizeof(double));
-    if (!w->relmap || !w->stamp || !w->rowmap || !w->tile) { workspace_free(w); return 0; }
-    for (csi i = 0; i < n; ++i) w->stamp[i] = -1;
+    if (!w->rowmap || !w->tile) { workspace_free(w); return 0; }
     return 1;
+}
+
+/* Local row of global row i in the target with columns [bd, bd+wd) and
+ * external rows Rd[0..ext) (ascending): i - bd for its own columns, wd + p
+ * for i == Rd[p], -1 when i is not a row of the target.  Callers look rows
+ * up in ascending order, so the search in Rd resumes at *pos. */
+static csi target_row(csi i, csi bd, csi wd, const vsdlss_sni *Rd, csi ext, csi *pos)
+{
+    if (i < bd) return -1;
+    if (i < bd + wd) return i - bd;
+    csi p = *pos;
+    if (p < ext && Rd[p] < i) {
+        if (p + 1 < ext && Rd[p + 1] >= i) ++p;          /* next row: the usual case */
+        else {
+            csi lo = p + 1, hi = ext;
+            while (lo < hi) { csi mid = lo + (hi - lo) / 2; if (Rd[mid] < i) lo = mid + 1; else hi = mid; }
+            p = lo;
+        }
+    }
+    *pos = p;
+    return p < ext && Rd[p] == i ? wd + p : -1;
 }
 
 /* Rows [row_lo,row_hi) (relative to `first`) of the update of target d by
@@ -171,13 +203,13 @@ static void apply_rows(const context *c, workspace *w, csi sn, csi first,
 {
     const vsdlss_sn_factor *f = c->f;
     csi ws = f->column_start[sn + 1] - f->column_start[sn];
-    csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
+    csi rs = f->row_ptr[sn + 1] - f->row_ptr[sn];      /* leading dimension of the packed external rows */
     csi kk = end - first;
-    const double *src = f->panel + f->panel_offset[sn] + ws + first;
+    const double *src = f->panel + f->panel_offset[sn] + ws * (ws + 1) / 2 + first;
     csi bd = f->column_start[d];
     csi rd = f->column_start[d + 1] - bd + f->row_ptr[d + 1] - f->row_ptr[d];
-    double *dst = f->panel + f->panel_offset[d];
-    const csi *R = f->row_index + f->row_ptr[sn] + first;
+    double *dst = w->full;                             /* target d, unpacked */
+    const vsdlss_sni *R = f->row_index + f->row_ptr[sn] + first;
 #ifdef VSDLSS_BLAS
     const int blas = c->blas_min && ws >= c->blas_min;
 #endif
@@ -226,40 +258,48 @@ static void apply_rows(const context *c, workspace *w, csi sn, csi first,
 
 /* Assemble, update and factor target d.  `inner` allows the team to be
  * used inside this panel (phase 2 only). */
-static vsdlss_status process_panel(const context *c, workspace *w, csi d, int inner)
+static vsdlss_status process_panel_full(const context *c, workspace *w, csi d, int inner)
 {
     vsdlss_sn_factor *f = c->f;
-    const vsdlss_sn_symbolic *s = c->s;
     csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
     csi ext = f->row_ptr[d + 1] - f->row_ptr[d], rd = wd + ext;
-    const csi *Rd = f->row_index + f->row_ptr[d];
-    double *panel = f->panel + f->panel_offset[d];
+    const vsdlss_sni *Rd = f->row_index + f->row_ptr[d];
     if (wd < 1 || ext < 0) return VSDLSS_ERR_INVALID;
-    for (csi i = 0; i < wd; ++i) { w->relmap[bd + i] = i; w->stamp[bd + i] = d; }
-    for (csi i = 0; i < ext; ++i) { w->relmap[Rd[i]] = wd + i; w->stamp[Rd[i]] = d; }
+    const size_t need = (size_t)rd * (size_t)wd;
+    if (need > w->full_cap) {
+        free(w->full);
+        w->full = (double *)malloc(need * sizeof(double));
+        w->full_cap = w->full ? need : 0;
+        if (!w->full) return VSDLSS_ERR_OOM;
+    }
+    double *panel = w->full;
+    memset(panel, 0, need * sizeof(double));
 
     /* Assemble A(:, J_d) (lower part) into the panel. */
     for (csi j = 0; j < wd; ++j) {
         const vsdlss *L = c->lower;
         double *col = panel + j * rd;
+        csi pos = 0;
         for (csi p = L->p[bd + j]; p < L->p[bd + j + 1]; ++p) {
-            csi i = L->i[p];
-            if (w->stamp[i] != d || w->relmap[i] < j) return VSDLSS_ERR_INVALID;
-            col[w->relmap[i]] += L->x[p];
-            if (!isfinite(col[w->relmap[i]])) return VSDLSS_ERR_NONFINITE;
+            csi i = target_row(L->i[p], bd, wd, Rd, ext, &pos);
+            if (i < j) return VSDLSS_ERR_INVALID;          /* also i == -1: not a row of d */
+            col[i] += L->x[p];
+            if (!isfinite(col[i])) return VSDLSS_ERR_NONFINITE;
         }
     }
 
     /* Subtract the source blocks in increasing source order. */
-    for (csi b = s->blk_ptr[d]; b < s->blk_ptr[d + 1]; ++b) {
-        csi sn = s->blk_src[b], first = s->blk_first[b], end = s->blk_end[b];
+    for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
+        csi sn = f->blk_src[b], first = f->blk_first[b], end = f->blk_end[b];
         csi m = f->row_ptr[sn + 1] - f->row_ptr[sn] - first, kk = end - first;
-        const csi *R = f->row_index + f->row_ptr[sn] + first;
+        const vsdlss_sni *R = f->row_index + f->row_ptr[sn] + first;
         csi ws = f->column_start[sn + 1] - f->column_start[sn];
         if (sn >= d || kk < 1 || m < kk) return VSDLSS_ERR_INVALID;
+        csi pos = 0;
         for (csi r = 0; r < m; ++r) {
-            if (w->stamp[R[r]] != d) return VSDLSS_ERR_INVALID;
-            w->rowmap[r] = w->relmap[R[r]];
+            csi i = target_row(R[r], bd, wd, Rd, ext, &pos);
+            if (i < 0) return VSDLSS_ERR_INVALID;
+            w->rowmap[r] = (vsdlss_sni)i;
         }
         if (R[kk - 1] >= bd + wd) return VSDLSS_ERR_INVALID;
         int contiguous = w->rowmap[m - 1] - w->rowmap[0] == m - 1;
@@ -320,6 +360,23 @@ static vsdlss_status process_panel(const context *c, workspace *w, csi d, int in
     return vsdlss_panel_factor(panel, rd, wd);
 }
 
+/* Target d in the workspace's full panel, then packed into the factor. */
+static vsdlss_status process_panel(const context *c, workspace *w, csi d, int inner)
+{
+    vsdlss_status st = process_panel_full(c, w, d, inner);
+    if (st != VSDLSS_OK) return st;
+    vsdlss_sn_factor *f = c->f;
+    const csi wd = f->column_start[d + 1] - f->column_start[d];
+    const csi ext = f->row_ptr[d + 1] - f->row_ptr[d], rd = wd + ext;
+    const double *full = w->full;
+    double *p = f->panel + f->panel_offset[d], *rect = p + wd * (wd + 1) / 2;
+    for (csi j = 0; j < wd; ++j) {
+        memcpy(p + VSDLSS_SN_DCOL(j, wd), full + j * rd + j, (size_t)(wd - j) * sizeof(double));
+        if (ext) memcpy(rect + j * ext, full + j * rd + wd, (size_t)ext * sizeof(double));
+    }
+    return VSDLSS_OK;
+}
+
 /* Supernodal-tree postorder with subtree work, used to split the tree. */
 typedef struct {
     csi *order;      /* count: panels in postorder */
@@ -330,7 +387,10 @@ typedef struct {
 static void tree_free(tree_info *t)
 { free(t->order); free(t->first); free(t->work); }
 
-static int tree_build(const vsdlss_sn_factor *f, const csi *sn_parent, int solve, tree_info *t)
+/* The tree comes from the symbolic layout (64-bit parents) during the
+ * factorization and from the factor (32-bit) for the solves. */
+#define PARENT(d) (p64 ? p64[d] : (csi)p32[d])
+static int tree_build(const vsdlss_sn_factor *f, const csi *p64, const vsdlss_sni *p32, int solve, tree_info *t)
 {
     csi count = f->count, k = 0;
     csi *head = malloc((size_t)count * sizeof(csi)), *next = malloc((size_t)count * sizeof(csi));
@@ -349,9 +409,9 @@ static int tree_build(const vsdlss_sn_factor *f, const csi *sn_parent, int solve
         head[d] = -1;
     }
     for (csi d = count - 1; d >= 0; --d)
-        if (sn_parent[d] >= 0) { next[d] = head[sn_parent[d]]; head[sn_parent[d]] = d; }
+        if (PARENT(d) >= 0) { next[d] = head[PARENT(d)]; head[PARENT(d)] = d; }
     for (csi r = 0; r < count; ++r) {
-        if (sn_parent[r] >= 0) continue;
+        if (PARENT(r) >= 0) continue;
         csi top = 0; stack[0] = r; pos[r] = -1;
         while (top >= 0) {
             csi v = stack[top];
@@ -361,13 +421,14 @@ static int tree_build(const vsdlss_sn_factor *f, const csi *sn_parent, int solve
                 stack[++top] = c; pos[c] = -1;
             } else {
                 t->first[v] = pos[v]; t->order[k++] = v; --top;
-                if (sn_parent[v] >= 0) t->work[sn_parent[v]] += t->work[v];
+                if (PARENT(v) >= 0) t->work[PARENT(v)] += t->work[v];
             }
         }
     }
     free(head); free(next); free(stack); free(pos);
     return k == count;
 }
+#undef PARENT
 
 /* ---- Cached solve tree --------------------------------------------------
  * The solve postorder depends only on the factor; the subtree split depends
@@ -403,7 +464,7 @@ static struct vsdlss_sn_solve_tree *solve_tree_new(const vsdlss_sn_factor *f)
     struct vsdlss_sn_solve_tree *st = malloc(sizeof(*st));
     if (!st) return NULL;
     for (int i = 0; i < SN_SPLIT_SLOTS; ++i) atomic_init(&st->split[i], NULL);
-    if (!tree_build(f, f->sn_parent, 1, &st->t)) { free(st); return NULL; }
+    if (!tree_build(f, NULL, f->sn_parent, 1, &st->t)) { free(st); return NULL; }
     return st;
 }
 
@@ -428,27 +489,31 @@ static sn_split *split_build(const vsdlss_sn_factor *f, const tree_info *t, int 
             for (csi q = t->first[d]; q <= k; ++q) s->in_sub[t->order[q]] = 1;
         }
     }
+    /* Splits are cached per thread count: keep only the nsub roots. */
+    csi *sub = realloc(s->sub, (size_t)(s->nsub ? s->nsub : 1) * sizeof(csi));
+    csi *sub_end = realloc(s->sub_end, (size_t)(s->nsub ? s->nsub : 1) * sizeof(csi));
+    if (sub) s->sub = sub;
+    if (sub_end) s->sub_end = sub_end;
     return s;
 }
 
 static vsdlss_status factor_tree(const context *c, workspace *ws, int nt)
 {
     vsdlss_sn_factor *f = c->f;
-    const vsdlss_sn_symbolic *s = c->s;
     csi count = f->count, nsub = 0;
     tree_info t;
     csi *sub = NULL; char *in_sub = NULL;
     vsdlss_status st = VSDLSS_OK, *res = NULL;
-    if (!tree_build(f, s->sn_parent, 0, &t)) return VSDLSS_ERR_OOM;
+    if (!tree_build(f, NULL, f->sn_parent, 0, &t)) return VSDLSS_ERR_OOM;
     sub = malloc((size_t)count * sizeof(csi));
     in_sub = calloc((size_t)count, 1);
     if (!sub || !in_sub) { st = VSDLSS_ERR_OOM; goto done; }
     /* Subtree roots: maximal subtrees with at most 1/(4 nt) of the work. */
     double total = 0;
-    for (csi d = 0; d < count; ++d) if (s->sn_parent[d] < 0) total += t.work[d];
+    for (csi d = 0; d < count; ++d) if (f->sn_parent[d] < 0) total += t.work[d];
     double cap = total / (4.0 * nt);
     for (csi k = count - 1; k >= 0; --k) {
-        csi d = t.order[k], p = s->sn_parent[d];
+        csi d = t.order[k], p = f->sn_parent[d];
         if (in_sub[d]) continue;
         if (t.work[d] <= cap && (p < 0 || t.work[p] > cap)) {
             sub[nsub++] = d;
@@ -527,8 +592,12 @@ static vsdlss_status check_symbolic(const vsdlss *A, const vsdlss_sn_symbolic *s
     return VSDLSS_OK;
 }
 
-vsdlss_status vsdlss_sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
-                                  vsdlss_sn_factor **out)
+/* A_own / s_own (optional): A and s are the caller's *A_own / *s_own, freed
+ * once the factor has copied what it needs, before L is allocated (peak
+ * memory); set to NULL on return. */
+static vsdlss_status sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
+                                  vsdlss_sn_factor **out, vsdlss **A_own,
+                                  vsdlss_sn_symbolic **s_own)
 {
     vsdlss_sn_factor *f = NULL; vsdlss *lower = NULL;
     workspace *ws = NULL; int nws = 0, nt;
@@ -540,37 +609,54 @@ vsdlss_status vsdlss_sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
     st = vsdlss_validate_upper_csc(A); if (st != VSDLSS_OK) return st;
     if (!s) return VSDLSS_ERR_INVALID;
     st = check_symbolic(A, s); if (st != VSDLSS_OK) return st;
+    /* Row and supernode indices are stored in 32 bits. */
+    if (s->n > INT32_MAX) return VSDLSS_ERR_UNSUPPORTED;
     if (!bytes_ok(s->n + 1, sizeof(csi)) || !bytes_ok(s->count + 1, sizeof(csi)) ||
-        !bytes_ok(s->panel_offset[s->count], sizeof(double)) ||
+        !bytes_ok(s->l_nnz, sizeof(double)) ||
         !bytes_ok(s->row_ptr[s->count], sizeof(csi))) return VSDLSS_ERR_OOM;
     f = calloc(1, sizeof(*f)); if (!f) return VSDLSS_ERR_OOM;
     f->n = s->n; f->count = s->count; f->l_nnz = s->l_nnz;
     st = VSDLSS_ERR_OOM;
-    f->column_start = copy_array(s->column_start, s->count + 1, sizeof(csi));
+    f->column_start = copy_sni(s->column_start, s->count + 1);
     f->row_ptr = copy_array(s->row_ptr, s->count + 1, sizeof(csi));
-    f->row_index = copy_array(s->row_index, s->row_ptr[s->count], sizeof(csi));
-    f->panel_offset = copy_array(s->panel_offset, s->count + 1, sizeof(csi));
-    f->sn_parent = copy_array(s->sn_parent, s->count, sizeof(csi));
+    f->row_index = copy_sni(s->row_index, s->row_ptr[s->count]);
+    f->panel_offset = malloc((size_t)(s->count + 1) * sizeof(csi));
+    f->sn_parent = copy_sni(s->sn_parent, s->count);
     f->blk_ptr = copy_array(s->blk_ptr, s->count + 1, sizeof(csi));
-    f->blk_src = copy_array(s->blk_src, s->blk_ptr[s->count], sizeof(csi));
-    f->blk_first = copy_array(s->blk_first, s->blk_ptr[s->count], sizeof(csi));
-    f->blk_end = copy_array(s->blk_end, s->blk_ptr[s->count], sizeof(csi));
-    f->panel = panel_alloc(s->panel_offset[s->count], &f->panel_block);
+    f->blk_src = copy_sni(s->blk_src, s->blk_ptr[s->count]);
+    f->blk_first = copy_sni(s->blk_first, s->blk_ptr[s->count]);
+    f->blk_end = copy_sni(s->blk_end, s->blk_ptr[s->count]);
+    if (f->panel_offset) {
+        /* Packed panels: the lower trapezoid only (see vsdlss_sn_factor). */
+        f->panel_offset[0] = 0;
+        for (csi d = 0; d < s->count; ++d) {
+            csi w = s->column_start[d + 1] - s->column_start[d], e = s->row_ptr[d + 1] - s->row_ptr[d];
+            f->panel_offset[d + 1] = f->panel_offset[d] + w * (w + 1) / 2 + w * e;
+        }
+        if (f->panel_offset[s->count] != s->l_nnz) { st = VSDLSS_ERR_INVALID; goto fail; }
+    }
     lower = vsdlss_transpose(A, 1);
     if (!f->column_start || !f->row_ptr || !f->row_index || !f->panel_offset ||
-        !f->panel || !lower || !f->sn_parent || !f->blk_ptr || !f->blk_src ||
+        !lower || !f->sn_parent || !f->blk_ptr || !f->blk_src ||
         !f->blk_first || !f->blk_end) goto fail;
+    const csi max_rows = s->max_rows;
+    if (s_own) { vsdlss_sn_symbolic_free(*s_own); *s_own = NULL; }
+    if (A_own) { vsdlss_spfree(*A_own); *A_own = NULL; }
+    if (s_own || A_own) vsdlss_release_free_memory(2);   /* hand the inputs back before L */
+    s = NULL; A = NULL;
+    f->panel = panel_alloc(f->panel_offset[f->count], &f->panel_block);
+    if (!f->panel) goto fail;
 
     nt = vsdlss_parallel_width((double)f->n * 256);
     if (nt > 1 && f->count < 2) nt = 1;
     nws = nt;
     ws = calloc((size_t)nws, sizeof(*ws));
     if (!ws) goto fail;
-    for (int i = 0; i < nws; ++i) if (!workspace_init(ws + i, f->n, s->max_rows)) goto fail;
+    for (int i = 0; i < nws; ++i) if (!workspace_init(ws + i, max_rows)) goto fail;
     {
-        context c = { f, s, lower, 0 };
+        context c = { f, lower, 0 };
 #ifdef VSDLSS_BLAS
-        if (s->max_rows < INT_MAX) c.blas_min = blas_min_width();
+        if (max_rows < INT_MAX) c.blas_min = blas_min_width();
 #endif
         if (nt > 1) st = factor_tree(&c, ws, nt);
         else {
@@ -590,6 +676,19 @@ fail:
     return st;
 }
 
+vsdlss_status vsdlss_sn_factorize(const vsdlss *A, const vsdlss_sn_symbolic *s,
+                                  vsdlss_sn_factor **out)
+{ return sn_factorize(A, s, out, NULL, NULL); }
+
+vsdlss_status vsdlss_sn_factorize_consume(vsdlss **A, vsdlss_sn_symbolic **s,
+                                          vsdlss_sn_factor **out)
+{
+    vsdlss_status st = sn_factorize(A ? *A : NULL, s ? *s : NULL, out, A, s);
+    if (A) { vsdlss_spfree(*A); *A = NULL; }
+    if (s) { vsdlss_sn_symbolic_free(*s); *s = NULL; }
+    return st;
+}
+
 /* Forward step of target d in pull form: subtract every source block that
  * lands in J_d (sources ascending, columns j ascending per entry), then
  * solve the diagonal block.  For each entry this is exactly the operation
@@ -606,14 +705,13 @@ fail:
 static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
 {
     csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
-    csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
     const double *a = f->panel + f->panel_offset[d];
     const int simd = vsdlss_simd_enabled();
     for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
         csi sn = f->blk_src[b], bs = f->column_start[sn], ws = f->column_start[sn + 1] - bs;
-        csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
-        const double *as = f->panel + f->panel_offset[sn] + ws;
-        const csi *R = f->row_index + f->row_ptr[sn];
+        csi rs = f->row_ptr[sn + 1] - f->row_ptr[sn];
+        const double *as = f->panel + f->panel_offset[sn] + ws * (ws + 1) / 2;
+        const vsdlss_sni *R = f->row_index + f->row_ptr[sn];
         const csi r0 = f->blk_first[b], r1 = f->blk_end[b];
         if (simd) { vsdlss_simd_block_update(as, rs, ws, x + bs, R, r0, r1, x); continue; }
         for (csi j = 0; j < ws; ++j) {
@@ -622,11 +720,12 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
         }
     }
     for (csi j = 0; j < wd; ++j) {
-        double dj = a[j * rd + j];
+        const double *aj = a + VSDLSS_SN_DCOL(j, wd);
+        double dj = aj[0];
         if (!isfinite(dj) || dj <= 0) return 1;
         x[bd + j] /= dj;
-        if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, a + j * rd + j + 1, x[bd + j], wd - j - 1);
-        else for (csi r = j + 1; r < wd; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
+        if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, aj + 1, x[bd + j], wd - j - 1);
+        else for (csi r = j + 1; r < wd; ++r) x[bd + r] -= aj[r - j] * x[bd + j];
     }
     return 0;
 }
@@ -646,7 +745,7 @@ static double forward_pull_work(const vsdlss_sn_factor *f, csi d)
 }
 
 /* First position p in [lo, hi) with R[p] >= key (R ascending). */
-static csi lower_bound_csi(const csi *R, csi lo, csi hi, csi key)
+static csi lower_bound_csi(const vsdlss_sni *R, csi lo, csi hi, csi key)
 {
     while (lo < hi) { csi mid = lo + (hi - lo) / 2; if (R[mid] < key) lo = mid + 1; else hi = mid; }
     return lo;
@@ -682,16 +781,15 @@ static double fwd_top_work(void)
 static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int tid, int T, int *bad)
 {
     const csi bd = f->column_start[d], wd = f->column_start[d + 1] - bd;
-    const csi rd = wd + f->row_ptr[d + 1] - f->row_ptr[d];
     const double *a = f->panel + f->panel_offset[d];
     const int simd = vsdlss_simd_enabled();
     {
         const csi lo = bd + wd * tid / T, hi = bd + wd * (tid + 1) / T;
         for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
             csi sn = f->blk_src[b], bs = f->column_start[sn], ws = f->column_start[sn + 1] - bs;
-            csi rs = ws + f->row_ptr[sn + 1] - f->row_ptr[sn];
-            const double *as = f->panel + f->panel_offset[sn] + ws;
-            const csi *R = f->row_index + f->row_ptr[sn];
+            csi rs = f->row_ptr[sn + 1] - f->row_ptr[sn];
+            const double *as = f->panel + f->panel_offset[sn] + ws * (ws + 1) / 2;
+            const vsdlss_sni *R = f->row_index + f->row_ptr[sn];
             const csi s = lower_bound_csi(R, f->blk_first[b], f->blk_end[b], lo);
             const csi e = lower_bound_csi(R, s, f->blk_end[b], hi);
             if (simd) { if (s < e) vsdlss_simd_block_update(as, rs, ws, x + bs, R, s, e, x); continue; }
@@ -705,17 +803,18 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
             const csi je = jb + FWD_TOP_BLK < wd ? jb + FWD_TOP_BLK : wd;
             VSDLSS_OMP(omp single)
             for (csi j = jb; j < je; ++j) {
-                double dj = a[j * rd + j];
+                const double *aj = a + VSDLSS_SN_DCOL(j, wd);
+                double dj = aj[0];
                 if (!isfinite(dj) || dj <= 0) *bad = 1;
                 x[bd + j] /= dj;
-                if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, a + j * rd + j + 1, x[bd + j], je - j - 1);
-                else for (csi r = j + 1; r < je; ++r) x[bd + r] -= a[j * rd + r] * x[bd + j];
+                if (simd) vsdlss_simd_axpy_neg(x + bd + j + 1, aj + 1, x[bd + j], je - j - 1);
+                else for (csi r = j + 1; r < je; ++r) x[bd + r] -= aj[r - j] * x[bd + j];
             }
             const csi r0 = je + (wd - je) * tid / T, r1 = je + (wd - je) * (tid + 1) / T;
-            if (simd) vsdlss_simd_block_update_contig(a, rd, jb, je, x + bd, r0, r1, x + bd);
+            if (simd) vsdlss_simd_tri_update_packed(a, wd, jb, je, x + bd, r0, r1, x + bd);
             else for (csi r = r0; r < r1; ++r) {
                 double v = x[bd + r];
-                for (csi j = jb; j < je; ++j) v -= a[j * rd + r] * x[bd + j];
+                for (csi j = jb; j < je; ++j) v -= a[VSDLSS_SN_DCOL(j, wd) + r - j] * x[bd + j];
                 x[bd + r] = v;
             }
             VSDLSS_OMP(omp barrier)
@@ -749,7 +848,7 @@ static int backward_panel(const vsdlss_sn_factor *f, csi sn, double *x)
 {
     csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
     csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
-    vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+    vsdlss_status st = vsdlss_sn_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
         ext ? f->row_index + f->row_ptr[sn] : NULL, x, 1);
     return st == VSDLSS_OK ? 0 : st == VSDLSS_ERR_NONFINITE ? 2 : 1;
 }
@@ -765,7 +864,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
     struct vsdlss_sn_solve_tree *cache = f->solve_tree;
     if (cache) t = &cache->t;
     else {
-        if (!tree_build(f, f->sn_parent, 1, &local_t)) return VSDLSS_ERR_OOM;
+        if (!tree_build(f, NULL, f->sn_parent, 1, &local_t)) return VSDLSS_ERR_OOM;
         t = &local_t;
     }
     if (cache && nt < SN_SPLIT_SLOTS) sp = atomic_load(&cache->split[nt]);
@@ -901,7 +1000,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
                 csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
                 csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
                 uint64_t c0 = vsdlss_ledger_tsc();
-                vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+                vsdlss_status st = vsdlss_sn_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
                     ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
                 uint64_t c1 = vsdlss_ledger_tsc();
                 if (st != VSDLSS_OK) return st;
@@ -920,7 +1019,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
             csi sn = back ? f->count - 1 - t : t;
             csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
             csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
-            vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+            vsdlss_status st = vsdlss_sn_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
                 ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
             if (st != VSDLSS_OK) return st;
         }
@@ -960,7 +1059,7 @@ vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *f, csi nrhs, double 
         csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
         csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
         for (csi r = 0; r < nrhs; ++r) {
-            vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+            vsdlss_status st = vsdlss_sn_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
                 ext ? f->row_index + f->row_ptr[sn] : NULL, x + r * ldx, back);
             if (st != VSDLSS_OK) return st;
         }
@@ -983,14 +1082,14 @@ vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *f, vsdlss **out)
     for (csi s = 0; s < f->count; ++s) {
         csi b = f->column_start[s], w = f->column_start[s + 1] - b;
         csi ext = f->row_ptr[s + 1] - f->row_ptr[s], rows = w + ext;
-        const csi *R = f->row_index + f->row_ptr[s];
-        const double *a = f->panel + f->panel_offset[s];
+        const vsdlss_sni *R = f->row_index + f->row_ptr[s];
+        const double *a = f->panel + f->panel_offset[s], *rect = a + w * (w + 1) / 2;
         for (csi j = 0; j < w; ++j) {
             L->p[b + j] = nz;
             for (csi i = j; i < rows; ++i) {
                 if (nz >= f->l_nnz) { vsdlss_spfree(L); return VSDLSS_ERR_INVALID; }
                 L->i[nz] = i < w ? b + i : R[i - w];
-                L->x[nz++] = a[j * rows + i];
+                L->x[nz++] = i < w ? a[VSDLSS_SN_DCOL(j, w) + i - j] : rect[j * ext + i - w];
             }
         }
     }

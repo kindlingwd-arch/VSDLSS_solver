@@ -80,7 +80,7 @@ static int one_matrix(vsdlss *A)
         if(vsdlss_parallel_enabled()){
             CHECK(vsdlss_set_num_threads(4)==VSDLSS_OK);
             CHECK(vsdlss_sn_factorize(N,rs,&rf4)==VSDLSS_OK);
-            CHECK(memcmp(rf->panel,rf4->panel,(size_t)rs->panel_offset[rs->count]*sizeof(double))==0);
+            CHECK(memcmp(rf->panel,rf4->panel,(size_t)rf->panel_offset[rf->count]*sizeof(double))==0);
             CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
         }
         CHECK(vsdlss_sn_export_L(sf,&SL)==VSDLSS_OK&&vsdlss_sn_export_L(rf,&RL)==VSDLSS_OK);
@@ -162,7 +162,7 @@ static int large_powergrid(void)
             if(nt>1&&!vsdlss_parallel_enabled())break;
             CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
             CHECK(vsdlss_factorize_m3(A,order,&f)==VSDLSS_OK);
-            CHECK(f->count==2&&f->component[0].gather!=NULL);
+            CHECK(f->count==2&&f->component[0].renumbered);
             double *x=nt==1?x1:xt;
             for(csi r=0;r<nrhs;r++)CHECK(vsdlss_m3_solve(f,b+r*n,x+r*n)==VSDLSS_OK);
             for(csi r=0;r<nrhs;r++)CHECK(vsdlss_backward_error(A,x+r*n,b+r*n,&eta)==VSDLSS_OK&&eta<1e-13);

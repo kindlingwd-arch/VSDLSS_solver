@@ -18,7 +18,7 @@ int main(void)
     if(!vsdlss_simd_enabled()){puts("test_simd: AVX2 unavailable or VSDLSS_SIMD=0, skipped");return 0;}
     enum{N=4096};
     double *x=malloc(N*8),*y=malloc(N*8),*a=malloc(N*64*8),*xs=malloc(64*8),*v=malloc(8*8),*w=malloc(8*8);
-    csi *R=malloc(N*sizeof(csi));
+    int32_t *R=malloc(N*sizeof(int32_t));
     CHECK(x&&y&&a&&xs&&v&&w&&R);
     for(int trial=0;trial<2000;trial++){
         csi ws=1+(csi)(rnd()%40), n=(csi)(rnd()%70), rs=n+ws+(csi)(rnd()%5);
@@ -26,18 +26,23 @@ int main(void)
         for(csi j=0;j<ws;j++)xs[j]=uni()*3;
         /* rows: ascending, runs of consecutive indices mixed with gaps */
         csi at=(csi)(rnd()%8);
-        for(csi r=0;r<n;r++){R[r]=at; at+=(rnd()%3==0)?1+(csi)(rnd()%9):1;}
+        for(csi r=0;r<n;r++){R[r]=(int32_t)at; at+=(rnd()%3==0)?1+(csi)(rnd()%9):1;}
         csi r0=n?(csi)(rnd()%(n+1)):0, r1=r0+(n>r0?(csi)(rnd()%(n-r0+1)):0);
         for(csi i=0;i<N;i++)x[i]=y[i]=uni();
         /* block update */
         vsdlss_simd_block_update(a,rs,ws,xs,R,r0,r1,x);
         for(csi j=0;j<ws;j++){const double *col=a+j*rs;for(csi r=r0;r<r1;r++)y[R[r]]-=col[r]*xs[j];}
         CHECK(memcmp(x,y,N*8)==0);
-        /* contiguous targets, columns [j0,j1) */
-        csi j0=(csi)(rnd()%ws), j1=j0+(csi)(rnd()%(ws-j0+1));
-        vsdlss_simd_block_update_contig(a,rs,j0,j1,xs,r0,r1,x+5);
-        for(csi r=r0;r<r1;r++){double t=y[5+r];for(csi j=j0;j<j1;j++)t-=a[j*rs+r]*xs[j];y[5+r]=t;}
-        CHECK(memcmp(x,y,N*8)==0);
+        /* packed triangle of order tw, columns [j0,j1), rows [q0,q1) >= j1 */
+        {
+            csi tw=1+(csi)(rnd()%60), j0=(csi)(rnd()%tw), j1=j0+(csi)(rnd()%(tw-j0+1));
+            csi q0=j1+(csi)(rnd()%(tw-j1+1)), q1=q0+(csi)(rnd()%(tw-q0+1));
+            for(csi i=0;i<tw*(tw+1)/2;i++)a[i]=uni();
+            for(csi j=0;j<64;j++)xs[j]=uni()*3;
+            vsdlss_simd_tri_update_packed(a,tw,j0,j1,xs,q0,q1,x+5);
+            for(csi r=q0;r<q1;r++){double t=y[5+r];for(csi j=j0;j<j1;j++)t-=a[j*tw-j*(j-1)/2+r-j]*xs[j];y[5+r]=t;}
+            CHECK(memcmp(x,y,N*8)==0);
+        }
         /* axpy */
         double sc=uni();
         vsdlss_simd_axpy_neg(x+3,a+1,sc,n);

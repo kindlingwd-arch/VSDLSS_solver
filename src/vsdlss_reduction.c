@@ -172,8 +172,7 @@ static int valid_reduction_shape(const vsdlss_reduction *r)
 {
     return r && r->n>=0 && r->count>=0 && r->core_n>=0 &&
            r->count<=r->n && r->core_n==r->n-r->count &&
-           (!r->count || r->records || (r->pk && r->pk_count>0)) &&
-           (!r->core_n || r->core_vertices);
+           (!r->count || r->records || (r->pk && r->pk_count>0));
 }
 
 #define PK_VMASK 0x3fffffffu
@@ -225,7 +224,7 @@ vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *r, const double *b,
     double *work=NULL, *next_core=NULL, *next_saved=NULL;
     csi k,j; vsdlss_status status=VSDLSS_OK;
     if(!valid_reduction_shape(r) || (!b && r->n) || (!core_rhs && r->core_n) ||
-       (!saved && r->count)) return VSDLSS_ERR_INVALID;
+       (!saved && r->count) || (r->core_n && !r->core_vertices)) return VSDLSS_ERR_INVALID;
     if(!checked_count(r->n,sizeof(*work)) ||
        !checked_count(r->core_n,sizeof(*next_core)) ||
        !checked_count(r->count,sizeof(*next_saved))) return VSDLSS_ERR_OOM;
@@ -274,7 +273,7 @@ vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *r,
     double *next_x=NULL, *saved_copy=NULL, *core_copy=NULL;
     csi k,j; vsdlss_status status=VSDLSS_OK;
     if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count) ||
-       (!core_solution && r->core_n)) return VSDLSS_ERR_INVALID;
+       (!core_solution && r->core_n) || (r->core_n && !r->core_vertices)) return VSDLSS_ERR_INVALID;
     if(!checked_count(r->n,sizeof(*next_x)) ||
        !checked_count(r->count,sizeof(*saved_copy)) ||
        !checked_count(r->core_n,sizeof(*core_copy))) return VSDLSS_ERR_OOM;
@@ -452,13 +451,15 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
 }
 
 /* x holds the core solution at x[core_vertices[k]]; the eliminated entries
- * are recovered in reverse order with the arithmetic of reduce_recover. */
+ * are recovered in reverse order with the arithmetic of reduce_recover.
+ * The core values are checked for finiteness here unless core_vertices was
+ * dropped (M3 in memory: its core write-back already checks them). */
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const double *saved,
                                              double *x)
 {
     csi k, stop=0; int bad=0, nt;
     if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count && r->records)) return VSDLSS_ERR_INVALID;
-    for(k=0;k<r->core_n;k++) {
+    if(r->core_vertices) for(k=0;k<r->core_n;k++) {
         csi vertex=r->core_vertices[k];
         if(vertex<0 || vertex>=r->n) return VSDLSS_ERR_INVALID;
         if(!isfinite(x[vertex])) return VSDLSS_ERR_NONFINITE;

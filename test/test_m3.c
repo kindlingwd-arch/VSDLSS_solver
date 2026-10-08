@@ -773,7 +773,7 @@ static int test_m3_reorder_paths_and_allocation_failures(void)
     vsdlss_reduce_block=64; vsdlss_reorder_min=64;
     base=m3_alloc_live();
     m3_alloc_reset();CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);calls=m3_alloc_calls();
-    CHECK(f->component[0].gather!=NULL && f->component[0].reduction->count>n/2);
+    CHECK(f->component[0].renumbered && f->component[0].reduction->count>n/2);
     CHECK(vsdlss_m3_solve(f,rhs,want)==VSDLSS_OK);
     CHECK(vsdlss_backward_error(A,want,rhs,&eta)==VSDLSS_OK&&eta<1e-13);
     vsdlss_m3_factor_free(f);f=NULL;CHECK(m3_alloc_live()==base);
