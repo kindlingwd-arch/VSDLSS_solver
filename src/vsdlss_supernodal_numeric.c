@@ -440,6 +440,12 @@ typedef struct {
     csi *sub;        /* nsub subtree roots */
     csi *sub_end;    /* postorder position of each root */
     char *in_sub;    /* count: panel belongs to a split subtree */
+    /* Push-form forward in the subtrees (see forward_push): the panels of
+     * subtree i are mem[moff[i] .. moff[i+1]) in ascending index, and the
+     * first ein[m] external rows of panel mem[m] lie inside its subtree.
+     * NULL when the factor does not satisfy the preconditions (pull form). */
+    csi *moff;
+    vsdlss_sni *mem, *ein;
 } sn_split;
 
 /* Forward tree-top plan for one thread count (VSDLSS_FWD_TOP_PLAN=0
@@ -467,7 +473,7 @@ struct vsdlss_sn_solve_tree {
 };
 
 static void split_free(sn_split *s)
-{ if (s) { free(s->sub); free(s->sub_end); free(s->in_sub); free(s); } }
+{ if (s) { free(s->sub); free(s->sub_end); free(s->in_sub); free(s->moff); free(s->mem); free(s->ein); free(s); } }
 
 static void top_plan_free(top_plan *p)
 { if (p) { free(p->bigk); free(p->roff); free(p->rg); free(p); } }
@@ -490,6 +496,61 @@ static struct vsdlss_sn_solve_tree *solve_tree_new(const vsdlss_sn_factor *f)
     for (int i = 0; i < SN_SPLIT_SLOTS; ++i) { atomic_init(&st->split[i], NULL); atomic_init(&st->plan[i], NULL); }
     if (!tree_build(f, NULL, f->sn_parent, 1, &st->t)) { free(st); return NULL; }
     return st;
+}
+
+static int cmp_sni(const void *a, const void *b)
+{ vsdlss_sni x = *(const vsdlss_sni *)a, y = *(const vsdlss_sni *)b; return (x > y) - (x < y); }
+
+/* Push-form data for the subtrees of s (see sn_split and forward_push).
+ * A subtree's columns end at its root's last column, and a panel's external
+ * rows ascend, so the rows inside the subtree are a prefix of each member's
+ * row list.  The block lists are checked against that: every source block
+ * of an in-subtree target comes from the same subtree and lies in the
+ * source's prefix, and those blocks cover the prefix exactly.  Otherwise
+ * the split keeps the pull form.  Built once per split (thread count). */
+static void split_push_build(const vsdlss_sn_factor *f, const tree_info *t, sn_split *s)
+{
+    const csi count = f->count, nsub = s->nsub;
+    csi total = 0, m = 0;
+    for (csi i = 0; i < nsub; ++i) total += s->sub_end[i] - t->first[s->sub[i]] + 1;
+    csi *moff = malloc((size_t)(nsub + 1) * sizeof(csi));
+    vsdlss_sni *mem = malloc((size_t)(total ? total : 1) * sizeof(vsdlss_sni));
+    vsdlss_sni *ein = malloc((size_t)(total ? total : 1) * sizeof(vsdlss_sni));
+    vsdlss_sni *sid = malloc((size_t)count * sizeof(vsdlss_sni));   /* subtree of a panel, -1: top */
+    csi *pe = malloc((size_t)count * sizeof(csi)), *cov = calloc((size_t)count, sizeof(csi));
+    if (!moff || !mem || !ein || !sid || !pe || !cov) goto fail;
+    for (csi d = 0; d < count; ++d) sid[d] = -1;
+    for (csi i = 0; i < nsub; ++i) {
+        const csi root = s->sub[i], end_col = f->column_start[root + 1];
+        moff[i] = m;
+        for (csi k = t->first[root]; k <= s->sub_end[i]; ++k) {
+            const csi d = t->order[k];
+            const vsdlss_sni *R = f->row_index + f->row_ptr[d];
+            csi lo = 0, hi = f->row_ptr[d + 1] - f->row_ptr[d];
+            while (lo < hi) { csi mid = lo + (hi - lo) / 2; if (R[mid] < end_col) lo = mid + 1; else hi = mid; }
+            mem[m++] = (vsdlss_sni)d; sid[d] = (vsdlss_sni)i; pe[d] = lo;
+        }
+        qsort(mem + moff[i], (size_t)(m - moff[i]), sizeof(vsdlss_sni), cmp_sni);
+    }
+    moff[nsub] = m;
+    for (csi q = 0; q < m; ++q) {
+        const csi d = mem[q];
+        for (csi b = f->blk_ptr[d]; b < f->blk_ptr[d + 1]; ++b) {
+            const csi sn = f->blk_src[b];
+            if (sid[sn] != sid[d] || f->blk_end[b] > pe[sn]) goto fail;
+            cov[sn] += f->blk_end[b] - f->blk_first[b];
+        }
+    }
+    for (csi q = 0; q < m; ++q) {
+        const csi d = mem[q];
+        if (cov[d] != pe[d]) goto fail;
+        ein[q] = (vsdlss_sni)pe[d];
+    }
+    s->moff = moff; s->mem = mem; s->ein = ein;
+    free(sid); free(pe); free(cov);
+    return;
+fail:
+    free(moff); free(mem); free(ein); free(sid); free(pe); free(cov);
 }
 
 /* Maximal subtrees with at most 1/(4 nt) of the solve work. */
@@ -518,6 +579,7 @@ static sn_split *split_build(const vsdlss_sn_factor *f, const tree_info *t, int 
     csi *sub_end = realloc(s->sub_end, (size_t)(s->nsub ? s->nsub : 1) * sizeof(csi));
     if (sub) s->sub = sub;
     if (sub_end) s->sub_end = sub_end;
+    split_push_build(f, t, s);   /* optional: pull form without it */
     return s;
 }
 
@@ -754,6 +816,50 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
     return 0;
 }
 
+/* Forward step of panel s in push form, inside a split subtree: solve the
+ * diagonal block (exactly as forward_pull does), then subtract its columns
+ * from the first ein external rows, the ones inside the subtree.  Rows past
+ * ein belong to tree-top targets, which pull them later as before.  Panels
+ * of a subtree are pushed in ascending index, so each in-subtree entry gets
+ * its sources' subtractions in ascending source order with the same
+ * per-entry operations as forward_pull's block update: the same bits as the
+ * pull form and the serial solve.  One update over the source's whole
+ * prefix replaces one per target block (power-grid blocks average about
+ * four rows), and the source panel is read once, front to back. */
+static int forward_push(const vsdlss_sn_factor *f, csi s, csi ein, double *x)
+{
+    const csi bs = f->column_start[s], ws = f->column_start[s + 1] - bs;
+    const double *a = f->panel + f->panel_offset[s];
+    const int simd = vsdlss_simd_enabled();
+    for (csi j = 0; j < ws; ++j) {
+        const double *aj = a + VSDLSS_SN_DCOL(j, ws);
+        double dj = aj[0];
+        if (!isfinite(dj) || dj <= 0) return 1;
+        x[bs + j] /= dj;
+        if (simd) vsdlss_simd_axpy_neg(x + bs + j + 1, aj + 1, x[bs + j], ws - j - 1);
+        else for (csi r = j + 1; r < ws; ++r) x[bs + r] -= aj[r - j] * x[bs + j];
+    }
+    if (ein > 0) {
+        const csi rs = f->row_ptr[s + 1] - f->row_ptr[s];
+        const double *as = a + ws * (ws + 1) / 2;
+        const vsdlss_sni *R = f->row_index + f->row_ptr[s];
+        if (simd) vsdlss_simd_block_update(as, rs, ws, x + bs, R, 0, ein, x);
+        else for (csi j = 0; j < ws; ++j) {
+            const double xj = x[bs + j], *col = as + j * rs;
+            for (csi r = 0; r < ein; ++r) x[R[r]] -= col[r] * xj;
+        }
+    }
+    return 0;
+}
+
+/* VSDLSS_FWD_SUB_PUSH=0: pull form in the subtrees too (A/B; same bits). */
+static int sub_push_on(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("VSDLSS_FWD_SUB_PUSH"); v = !(e && e[0] == '0'); }
+    return v;
+}
+
 /* Work of forward_pull(d) in multiply-adds (source-block updates plus the
  * diagonal triangle), used to decide whether a tree-top target is worth a
  * thread team. */
@@ -971,9 +1077,16 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt)
     if (prof < 0) { const char *e = getenv("VSDLSS_SOLVE_PROFILE"); prof = e && *e && *e != '0'; }
     double tp[5] = {0}; if (prof) tp[0] = omp_get_wtime();
 #endif
-    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
-    for (csi i = 0; i < nsub; ++i)
-        for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
+    if (sp->moff && sub_push_on()) {
+        const csi *moff = sp->moff; const vsdlss_sni *mem = sp->mem, *ein = sp->ein;
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
+        for (csi i = 0; i < nsub; ++i)
+            for (csi q = moff[i]; !bad && q < moff[i + 1]; ++q) bad |= forward_push(f, mem[q], ein[q], x);
+    } else {
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
+        for (csi i = 0; i < nsub; ++i)
+            for (csi k = t->first[sub[i]]; !bad && k <= sub_end[i]; ++k) bad |= forward_pull(f, t->order[k], x);
+    }
 #ifdef _OPENMP
     if (prof) tp[1] = omp_get_wtime();
 #endif
