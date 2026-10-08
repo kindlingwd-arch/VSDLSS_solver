@@ -101,6 +101,11 @@ vsdlss_status vsdlss_m3_export_packed_permutation(const vsdlss_m3_factor *factor
                                                    csi *packed_to_global, csi length);
 vsdlss_status vsdlss_m3_solve_packed(const vsdlss_m3_factor *factor,
                                     const double *rhs, double *solution);
+/* In-place variant of vsdlss_m3_solve_packed: x (packed order) holds the
+ * RHS on entry and the solution on success, without the input/output
+ * copies.  A non-finite RHS is rejected before x is modified; other
+ * failures may leave x partially updated.  Not for disk-mode factors. */
+vsdlss_status vsdlss_m3_solve_packed_inplace(const vsdlss_m3_factor *factor, double *x);
 /* Same order and implementation under the names of the other branch:
  * vsdlss_m3_internal_order(f, perm) equals
  * vsdlss_m3_export_packed_permutation(f, perm, n), and

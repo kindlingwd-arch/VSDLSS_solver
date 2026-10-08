@@ -23,4 +23,9 @@ void vsdlss_simd_axpy_neg(double *y, const double *c, double s, csi n);
  * Returns 1 when a result is not finite. */
 int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *v);
 
+/* Eight backward dot products (two interleaved dot4 chains; same bits). */
+int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v);
+/* Four consecutive axpy_neg over columns c + k*ld with scalars s[k] (same bits). */
+void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, csi n);
+
 #endif

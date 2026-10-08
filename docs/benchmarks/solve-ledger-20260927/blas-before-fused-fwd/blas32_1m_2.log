@@ -1,0 +1,8 @@
+# n=1000000 branches=1250000 coupling_caps=249976 gratio=1 shuffle=1 gen=0.4s rss=132 MB
+# setup: factor 1.127 s order=5 threads=1 core_n=261480 (26.1%) panels=77630 max_width=756 | resident: L values 134.0 MB, L row idx 8.3 MB, reduction 28.3 MB | rss before factor 132 MB, peak 338 MB
+# packed chain one-time mapping: 0.086 s (sources 299447, coupling caps 249976, branches 1250000)
+# per-warm-solve allocations: 0.00 calls, 0 bytes (all flows; needs COUNT_ALLOC build)
+# steps=31 (step 0 = cold, excluded from medians) bitwise G==N==P (v and EM) 1 worst berr 0.0e+00 peak_rss 419 MB
+STEP I packed chain in-place      rhs 0.0051 (p95 0.0061) solve 0.0455 (p95 0.0501) convert 0.0000 (p95 0.0000) em 0.0046 (p95 0.0050) | step med 0.0552 p95 0.0609 | cold step 0.0728
+LEDGER I (wall-clock, exclusive, mean ms over 30 warm solves): setup 0.002 gather 0.801 red_fwd 4.179 core_gather 0.579 core_fwd 16.472 core_bwd 18.997 core_scatter 0.806 red_bwd 4.658 writeback 0.001 other 0.009 TOTAL 46.505
+# final solution hash (caller order) c79cf8cc3b448eab

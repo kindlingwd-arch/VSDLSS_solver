@@ -1,5 +1,6 @@
 #include "vsdlss_m3_internal.h"
 #include "vsdlss_parallel.h"
+#include "vsdlss_ledger.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -417,6 +418,7 @@ typedef struct {
     const vsdlss_m3_factor *f; const double *rhs; double *out; solve_ws *ws;
     int internal; double **loc;
     int pregathered;            /* local buffers already filled (two-pass gather) */
+    int inplace;                /* internal order, solve directly in out (== rhs) */
 } solve_ctx;
 
 static const csi *component_map(const vsdlss_m3_factor *f, csi c)
@@ -494,11 +496,15 @@ static vsdlss_status solve_local(void *vctx, csi c)
     const vsdlss_reduction *r=cf->reduction;
     const csi core=r->core_n, cn=cf->n;
     solve_ws *w=x->ws+c;
-    double *local=w->local, *core_b=w->core;
+    double *local=x->inplace?x->out+x->f->components->offset[c]:w->local, *core_b=w->core;
     vsdlss_status status; int bad=0;
     int gt=vsdlss_parallel_width((double)cn*4); (void)gt;
-    double t0=trace_now();
-    if(x->internal) {
+    double t0=trace_now(), tl=vsdlss_ledger_level()?vsdlss_ledger_now():0;
+    if(x->inplace) {
+        /* No copy: only the finite scan of the caller's vector. */
+        VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
+        for(csi i=0;i<cn;i++) bad|=!isfinite(local[i]);
+    } else if(x->internal) {
         const double *src=x->rhs+x->f->components->offset[c];
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
         for(csi i=0;i<cn;i++) { double v=src[i]; local[i]=v; bad|=!isfinite(v); }
@@ -509,9 +515,11 @@ static vsdlss_status solve_local(void *vctx, csi c)
     }
     if(bad) return VSDLSS_ERR_NONFINITE;
     TRACE("solve: gather",t0);
+    LEDGER_MARK(LG_PERM_GATHER,tl);
     status=vsdlss_reduce_forward_inplace(r,local,w->saved);   /* NULL when packed */
     if(status!=VSDLSS_OK) return status;
     TRACE("solve: reduce forward",t0);
+    LEDGER_MARK(LG_RED_FWD,tl);
     if(core) {
         if(cf->disk) {
             for(csi k=0;k<core;k++) core_b[k]=local[r->core_vertices[k]];
@@ -526,16 +534,21 @@ static vsdlss_status solve_local(void *vctx, csi c)
             int ct=vsdlss_parallel_width((double)core*4); (void)ct;
             VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static))
             for(csi k=0;k<core;k++) core_b[k]=local[cm[k]];
-            status=vsdlss_sn_solve_inplace(cf->numeric,core_b);
+            LEDGER_MARK(LG_CORE_GATHER,tl);
+            status=vsdlss_sn_solve_inplace(cf->numeric,core_b);   /* marks LG_CORE_FWD/BWD */
             if(status!=VSDLSS_OK) return status;
+            if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
             VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static) reduction(|:bad))
             for(csi k=0;k<core;k++) { double v=core_b[k]; local[cm[k]]=v; bad|=!isfinite(v); }
             if(bad) return VSDLSS_ERR_NONFINITE;
+            LEDGER_MARK(LG_CORE_SCATTER,tl);
         }
     }
     TRACE("solve: core",t0);
+    if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
     status=vsdlss_reduce_backward_inplace(r,w->saved,local);
     TRACE("solve: reduce backward",t0);
+    LEDGER_MARK(LG_RED_BWD,tl);
     return status;
 }
 
@@ -795,9 +808,11 @@ static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *p
 static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
                                   const double *rhs, double *solution, int internal)
 {
+    const int inplace=internal==2;
     vsdlss_status status=VSDLSS_OK, *results=NULL; solve_ws *ws=NULL; double **loc=NULL;
     const vsdlss_perm_plan *pl=NULL; double *pbuf=NULL; csi *pq=NULL;
     csi c, taken=0;
+    const int lg=vsdlss_ledger_level(); const double lstart=lg?vsdlss_ledger_now():0; double tl=lstart;
     if(!factor || !factor->components || !factor->component || !rhs || !solution)
         return VSDLSS_ERR_INVALID;
     if(!count_fits(factor->count,sizeof(solve_ws))) return VSDLSS_ERR_OOM;
@@ -811,7 +826,7 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         if(status!=VSDLSS_OK) goto done;
         if(loc) loc[taken]=ws[taken].local;
     }
-    solve_ctx ctx={factor,rhs,solution,ws,internal,loc,0};
+    solve_ctx ctx={factor,rhs,solution,ws,internal,loc,0,inplace};
     if(inverse && !factor->disk_mode && factor->n>=PERM_MIN && perm2_on()) {
         /* Two-pass gather here, two-pass write-back below (plan, scratch
          * vector and queues permitting; otherwise the direct loops). */
@@ -821,30 +836,54 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         if(pl && pq) pbuf=pbuf_acquire(factor);
         if(pbuf) {
             double tg=trace_now();
+            LEDGER_MARK(LG_SETUP,tl);
             int bad=perm2_gather(factor,pl,rhs,pbuf,loc,pq);
             TRACE("solve: two-pass gather",tg);
+            LEDGER_MARK(LG_PERM_GATHER,tl);
             if(bad) { status=VSDLSS_ERR_NONFINITE; goto done; }
             ctx.pregathered=1;
         }
     }
+    LEDGER_MARK(LG_SETUP,tl);
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
+    if(lg) tl=vsdlss_ledger_now();
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
     double t0=trace_now();
-    if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq);
+    if(inplace) ;                               /* solution already in place */
+    else if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq);
     else if(inverse) write_back_inverse(&ctx);
     else run_components(factor,factor->disk_mode,scatter_local,&ctx,results);
     TRACE("solve: scatter",t0);
+    LEDGER_MARK(LG_WRITEBACK,tl);
 done:
     if(pbuf) pbuf_release(factor);
     free(pq);
     if(ws) for(c=0;c<taken;c++) ws_release(factor,c,ws+c);
     free(ws); free(results); free(loc);
+    if(lg) {
+        double tot=vsdlss_ledger_now()-lstart, known=0;
+        for(int k=0;k<LG_OTHER;k++) known+=vsdlss_ledger.wall[k];
+        vsdlss_ledger.wall[LG_TOTAL]+=tot;
+        /* LG_OTHER as the running remainder, so the phases always add up. */
+        vsdlss_ledger.wall[LG_OTHER]=vsdlss_ledger.wall[LG_TOTAL]-known;
+        vsdlss_ledger.solves++;
+    }
     return status;
 }
 
 vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,
                               const double *rhs, double *solution)
 { return solve_common(factor,rhs,solution,0); }
+
+/* Packed order, in place: x holds the RHS on entry and the solution on
+ * success.  A non-finite RHS is reported before x is modified; any later
+ * failure (not expected for a valid factor) may leave x partially updated,
+ * unlike vsdlss_m3_solve_packed.  Saves the copy in and the copy out. */
+vsdlss_status vsdlss_m3_solve_packed_inplace(const vsdlss_m3_factor *factor, double *x)
+{
+    if(!factor || factor->disk_mode) return VSDLSS_ERR_INVALID;
+    return solve_common(factor,x,x,2);
+}
 
 vsdlss_status vsdlss_m3_solve_internal(const vsdlss_m3_factor *factor,
                                        const double *rhs, double *solution)

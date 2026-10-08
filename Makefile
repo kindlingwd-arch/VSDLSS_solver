@@ -44,7 +44,7 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
            src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c \
-           src/vsdlss_dense.c src/vsdlss_simd.c
+           src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
 .PHONY: all test test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-m5 test-amd test-kernels test-parallel bench-parallel bench-m3 bench-sn sanitizers clean
@@ -101,9 +101,9 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal
+	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal test-solve-kv
 
-src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h
+src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h src/vsdlss_ledger.h src/vsdlss_simd.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
@@ -267,3 +267,16 @@ test-simd: test_simd
 	./test_simd
 
 test: test-simd
+
+test_solve_kv: test/test_solve_kv.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h src/vsdlss_simd.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_solve_kv.c $(LIBSRCS) $(LDLIBS)
+test-solve-kv: test_solve_kv
+	./test_solve_kv
+test: test-solve-kv
+
+# Per-step transient ledger (VSDLSS_SOLVE_LEDGER=1|2; TR_MODES=GNPIK); see
+# docs/reconstruction/25-solve-ledger-kernels-20260927.md.
+bench_step: test/bench_step.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h src/vsdlss_ledger.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_step.c $(LIBSRCS) $(LDLIBS)
+bench_panel_kv: test/bench_panel_kv.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_panel_kv.c $(LIBSRCS) $(LDLIBS)

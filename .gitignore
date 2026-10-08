@@ -43,3 +43,10 @@
 /bench_dense
 /bench_cholmod
 /bench_pardiso
+
+/bench_step
+/bench_step_blas
+/bench_panel_kv
+/test_solve_kv
+/bench_transient
+/tskv_asan

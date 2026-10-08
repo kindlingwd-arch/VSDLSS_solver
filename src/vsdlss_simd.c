@@ -136,6 +136,65 @@ SIMD_FN int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, 
     return _mm256_movemask_pd(_mm256_cmp_pd(z, z, _CMP_UNORD_Q)) != 0;
 }
 
+/* Eight backward dot products, columns c0 + k*ld (k = 0..7): two dot4
+ * accumulators interleaved.  Each lane still holds one column's chain in
+ * ascending r, so results equal dot4 on each half bit for bit; the second
+ * independent chain hides the subtraction latency that bounds dot4. */
+SIMD_FN int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
+{
+    const double *c1 = c0 + ld, *c2 = c1 + ld, *c3 = c2 + ld;
+    const double *c4 = c3 + ld, *c5 = c4 + ld, *c6 = c5 + ld, *c7 = c6 + ld;
+    __m256d acc = _mm256_loadu_pd(v), acd = _mm256_loadu_pd(v + 4);
+    csi r = 0;
+    for (; r + 4 <= n; r += 4) {
+        __m256d q0, q1, q2, q3, p0, p1, p2, p3;
+        TRANSPOSE4(_mm256_loadu_pd(c0 + r), _mm256_loadu_pd(c1 + r), _mm256_loadu_pd(c2 + r),
+                   _mm256_loadu_pd(c3 + r), q0, q1, q2, q3);
+        TRANSPOSE4(_mm256_loadu_pd(c4 + r), _mm256_loadu_pd(c5 + r), _mm256_loadu_pd(c6 + r),
+                   _mm256_loadu_pd(c7 + r), p0, p1, p2, p3);
+        const __m256d x0 = _mm256_set1_pd(xg[r]), x1 = _mm256_set1_pd(xg[r + 1]);
+        const __m256d x2 = _mm256_set1_pd(xg[r + 2]), x3 = _mm256_set1_pd(xg[r + 3]);
+        acc = SUBMUL(acc, q0, x0); acd = SUBMUL(acd, p0, x0);
+        acc = SUBMUL(acc, q1, x1); acd = SUBMUL(acd, p1, x1);
+        acc = SUBMUL(acc, q2, x2); acd = SUBMUL(acd, p2, x2);
+        acc = SUBMUL(acc, q3, x3); acd = SUBMUL(acd, p3, x3);
+    }
+    for (; r < n; ++r) {
+        const __m256d xr = _mm256_set1_pd(xg[r]);
+        acc = SUBMUL(acc, _mm256_set_pd(c3[r], c2[r], c1[r], c0[r]), xr);
+        acd = SUBMUL(acd, _mm256_set_pd(c7[r], c6[r], c5[r], c4[r]), xr);
+    }
+    _mm256_storeu_pd(v, acc); _mm256_storeu_pd(v + 4, acd);
+    __m256d z = _mm256_sub_pd(acc, acc), y = _mm256_sub_pd(acd, acd);
+    return (_mm256_movemask_pd(_mm256_cmp_pd(z, z, _CMP_UNORD_Q)) |
+            _mm256_movemask_pd(_mm256_cmp_pd(y, y, _CMP_UNORD_Q))) != 0;
+}
+
+/* y[i] = (((y[i] - c[i]*s[0]) - c[ld+i]*s[1]) - c[2ld+i]*s[2]) - c[3ld+i]*s[3]:
+ * four axpy_neg calls in one pass over y (same operations per entry, in the
+ * same order, so the same bits); y is loaded and stored once per four
+ * columns instead of once per column. */
+SIMD_FN void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, csi n)
+{
+    const double *c1 = c + ld, *c2 = c1 + ld, *c3 = c2 + ld;
+    const __m256d s0 = _mm256_set1_pd(s[0]), s1 = _mm256_set1_pd(s[1]);
+    const __m256d s2 = _mm256_set1_pd(s[2]), s3 = _mm256_set1_pd(s[3]);
+    csi i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256d a = _mm256_loadu_pd(y + i), b = _mm256_loadu_pd(y + i + 4);
+        a = SUBMUL(a, _mm256_loadu_pd(c + i), s0);  b = SUBMUL(b, _mm256_loadu_pd(c + i + 4), s0);
+        a = SUBMUL(a, _mm256_loadu_pd(c1 + i), s1); b = SUBMUL(b, _mm256_loadu_pd(c1 + i + 4), s1);
+        a = SUBMUL(a, _mm256_loadu_pd(c2 + i), s2); b = SUBMUL(b, _mm256_loadu_pd(c2 + i + 4), s2);
+        a = SUBMUL(a, _mm256_loadu_pd(c3 + i), s3); b = SUBMUL(b, _mm256_loadu_pd(c3 + i + 4), s3);
+        _mm256_storeu_pd(y + i, a); _mm256_storeu_pd(y + i + 4, b);
+    }
+    for (; i < n; ++i) {
+        double v = y[i], u;
+        u = c[i] * s[0]; v -= u; u = c1[i] * s[1]; v -= u; u = c2[i] * s[2]; v -= u; u = c3[i] * s[3]; v -= u;
+        y[i] = v;
+    }
+}
+
 #else   /* no x86 GCC-compatible compiler: scalar paths only */
 int vsdlss_simd_enabled(void) { return 0; }
 void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
@@ -147,5 +206,9 @@ void vsdlss_simd_block_update_contig(const double *a, csi ld, csi j0, csi j1, co
 void vsdlss_simd_axpy_neg(double *y, const double *c, double s, csi n)
 { (void)y; (void)c; (void)s; (void)n; abort(); }
 int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *v)
+{ (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
+void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, csi n)
+{ (void)y; (void)c; (void)ld; (void)s; (void)n; abort(); }
+int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
 #endif

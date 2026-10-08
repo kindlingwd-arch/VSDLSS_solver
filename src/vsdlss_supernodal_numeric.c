@@ -3,6 +3,7 @@
 #include "vsdlss_dense.h"
 #include "vsdlss_parallel.h"
 #include "vsdlss_simd.h"
+#include "vsdlss_ledger.h"
 
 #include <limits.h>
 #include <stdint.h>
@@ -880,14 +881,50 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
      * count takes the serial path (results then match for all counts). */
     if (vsdlss_panel_solve_uses_blas()) nt = 1;
 #endif
-    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) return solve_tree(f, x, nt);
-    for (int back = 0; back < 2; back++) for (csi t = 0; t < f->count; t++) {
-        csi sn = back ? f->count - 1 - t : t;
-        csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
-        csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
-        vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
-            ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
-        if (st != VSDLSS_OK) return st;
+    const int lg = vsdlss_ledger_level();
+    if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) {
+        double t0 = lg ? vsdlss_ledger_now() : 0;
+        vsdlss_status st = solve_tree(f, x, nt);
+        /* Tree path: forward and backward are not separated here; the
+         * whole core is booked as forward+backward halves by solve_tree's
+         * own profile when VSDLSS_SOLVE_PROFILE is set. */
+        if (lg) vsdlss_ledger.wall[LG_CORE_FWD] += vsdlss_ledger_now() - t0;
+        return st;
+    }
+    if (lg >= 2) {
+        /* Per-panel TSC timing by width bucket (thread-cumulative). */
+        const double tick = vsdlss_ledger_tsc_sec();
+        for (int back = 0; back < 2; back++) {
+            double t0 = vsdlss_ledger_now();
+            for (csi t = 0; t < f->count; t++) {
+                csi sn = back ? f->count - 1 - t : t;
+                csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+                csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
+                uint64_t c0 = vsdlss_ledger_tsc();
+                vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+                    ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
+                uint64_t c1 = vsdlss_ledger_tsc();
+                if (st != VSDLSS_OK) return st;
+                int k = vsdlss_ledger_bucket(w);
+                vsdlss_ledger.bucket_s[back][k] += (double)(c1 - c0) * tick;
+                vsdlss_ledger.bucket_n[back][k]++;
+                vsdlss_ledger.bucket_bytes[back][k] += 8.0 * ((double)w * (w + 1) / 2 + (double)w * ext) + 8.0 * ext;
+            }
+            vsdlss_ledger.wall[back ? LG_CORE_BWD : LG_CORE_FWD] += vsdlss_ledger_now() - t0;
+        }
+        return VSDLSS_OK;
+    }
+    for (int back = 0; back < 2; back++) {
+        double t0 = lg ? vsdlss_ledger_now() : 0;
+        for (csi t = 0; t < f->count; t++) {
+            csi sn = back ? f->count - 1 - t : t;
+            csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+            csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn];
+            vsdlss_status st = vsdlss_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
+                ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
+            if (st != VSDLSS_OK) return st;
+        }
+        if (lg) vsdlss_ledger.wall[back ? LG_CORE_BWD : LG_CORE_FWD] += vsdlss_ledger_now() - t0;
     }
     return VSDLSS_OK;
 }
