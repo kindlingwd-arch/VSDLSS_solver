@@ -369,7 +369,11 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
     /* Backward, width >= 4: four-column SIMD dot products (same arithmetic
        as the generated scalar kernels), without the generic kernel's
        OpenMP region, whose entry cost would dominate narrow panels. */
-    if(back && width>=4 && vsdlss_simd_enabled())
+    /* KV>=2: widths 4-6 keep the generated scalar kernels in both
+     * directions (same arithmetic; 1.2-1.7x faster than the four-column
+     * SIMD path, whose gather and transposes do not pay off at <= 6
+     * columns). */
+    if(back && width>=(solve_kv()>=2?7:4) && vsdlss_simd_enabled())
         return simd_back_narrow(a,begin,width,ext,index,x);
     switch(width) {
 #define CASE(N) case N: return solve_##N(a,begin,ext,index,x,back)
