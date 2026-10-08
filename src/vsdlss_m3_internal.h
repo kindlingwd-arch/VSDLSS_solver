@@ -273,6 +273,8 @@ int vsdlss_panel_solve_uses_blas(void);
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
 /* The same solves for one packed panel of a vsdlss_sn_factor (same
  * operations and results as the full-layout kernels on the same values). */
+/* 1 unless VSDLSS_SOLVE_UPD16=0: 16-row forward block updates (vsdlss_panel.c). */
+int vsdlss_solve_upd16(void);
 vsdlss_status vsdlss_sn_panel_solve(const double *, csi begin, csi width,
                                     csi ext, const vsdlss_sni *index, double *, int back);
 vsdlss_status vsdlss_sn_panel_solve_generic(const double *,csi,csi,csi,const vsdlss_sni *,double *,int);

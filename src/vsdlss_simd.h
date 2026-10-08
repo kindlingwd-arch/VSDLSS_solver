@@ -10,9 +10,15 @@ int vsdlss_simd_enabled(void);
 
 /* Source-block update of the forward solve, rows R[r0..r1) (ascending):
  *   for j in [0, ws): for r: x[R[r]] -= as[j*rs + r] * xs[j]
- * with each x[R[r]] updated in ascending j. */
+ * with each x[R[r]] updated in ascending j.  The rows must not include an
+ * entry of xs (in a factor they lie below the source's columns): rows are
+ * updated several at a time, all reading xs before any is stored. */
 void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
                               const int32_t *R, csi r0, csi r1, double *x);
+/* The same operations and bits; 16 destinations in registers and the last
+ * 1..3 rows as interleaved chains (the tree solve's small blocks). */
+void vsdlss_simd_block_update16(const double *as, csi rs, csi ws, const double *xs,
+                                const int32_t *R, csi r0, csi r1, double *x);
 /* The same with 64-bit row indices (full-layout panels). */
 void vsdlss_simd_block_update64(const double *as, csi rs, csi ws, const double *xs,
                                 const csi *R, csi r0, csi r1, double *x);

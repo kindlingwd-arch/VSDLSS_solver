@@ -28,7 +28,8 @@ int main(void){
   static double full[MW*(MW+ME)],packed[MW*(MW+ME)],px[NX],py[NX],po[NX];
   static csi fidx[ME]; static vsdlss_sni pidx[ME];
   const csi widths[]={1,2,3,4,5,6,7,8,9,13,40}, exts[]={0,1,3,17,64,130,1100};
-  for(csi r=0;r<ME;r++){fidx[r]=MW+2*r;pidx[r]=(vsdlss_sni)fidx[r];}
+  /* external rows lie below the panel columns [5, 5+w), as in a factor */
+  for(csi r=0;r<ME;r++){fidx[r]=5+MW+2*r;pidx[r]=(vsdlss_sni)fidx[r];}
   for(int i=0;i<NX;i++)po[i]=sin(0.7*i+0.1);
   for(size_t wi=0;wi<sizeof widths/sizeof *widths;wi++)for(size_t ei=0;ei<sizeof exts/sizeof *exts;ei++)
   for(int back=0;back<2;back++)for(int fault=0;fault<4;fault++)for(int gen=0;gen<2;gen++){

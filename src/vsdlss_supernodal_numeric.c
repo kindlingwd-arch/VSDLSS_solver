@@ -775,6 +775,15 @@ vsdlss_status vsdlss_sn_factorize_consume(vsdlss **A, vsdlss_sn_symbolic **s,
     return st;
 }
 
+/* Block update of the tree schedule's pull and push steps (see
+ * vsdlss_solve_upd16; same bits either way). */
+static inline void tree_block_update(const double *as, csi rs, csi ws, const double *xs,
+                                     const vsdlss_sni *R, csi r0, csi r1, double *x)
+{
+    if (vsdlss_solve_upd16()) vsdlss_simd_block_update16(as, rs, ws, xs, R, r0, r1, x);
+    else vsdlss_simd_block_update(as, rs, ws, xs, R, r0, r1, x);
+}
+
 /* Forward step of target d in pull form: subtract every source block that
  * lands in J_d (sources ascending, columns j ascending per entry), then
  * solve the diagonal block.  For each entry this is exactly the operation
@@ -799,7 +808,7 @@ static int forward_pull(const vsdlss_sn_factor *f, csi d, double *x)
         const double *as = f->panel + f->panel_offset[sn] + ws * (ws + 1) / 2;
         const vsdlss_sni *R = f->row_index + f->row_ptr[sn];
         const csi r0 = f->blk_first[b], r1 = f->blk_end[b];
-        if (simd) { vsdlss_simd_block_update(as, rs, ws, x + bs, R, r0, r1, x); continue; }
+        if (simd) { tree_block_update(as, rs, ws, x + bs, R, r0, r1, x); continue; }
         for (csi j = 0; j < ws; ++j) {
             const double xj = x[bs + j], *col = as + j * rs;
             for (csi r = r0; r < r1; ++r) x[R[r]] -= col[r] * xj;
@@ -843,7 +852,7 @@ static int forward_push(const vsdlss_sn_factor *f, csi s, csi ein, double *x)
         const csi rs = f->row_ptr[s + 1] - f->row_ptr[s];
         const double *as = a + ws * (ws + 1) / 2;
         const vsdlss_sni *R = f->row_index + f->row_ptr[s];
-        if (simd) vsdlss_simd_block_update(as, rs, ws, x + bs, R, 0, ein, x);
+        if (simd) tree_block_update(as, rs, ws, x + bs, R, 0, ein, x);
         else for (csi j = 0; j < ws; ++j) {
             const double xj = x[bs + j], *col = as + j * rs;
             for (csi r = 0; r < ein; ++r) x[R[r]] -= col[r] * xj;
@@ -915,7 +924,7 @@ static inline void pull_block_rows(const vsdlss_sn_factor *f, csi b, csi s, csi 
     csi rs = f->row_ptr[sn + 1] - f->row_ptr[sn];
     const double *as = f->panel + f->panel_offset[sn] + ws * (ws + 1) / 2;
     const vsdlss_sni *R = f->row_index + f->row_ptr[sn];
-    if (simd) { vsdlss_simd_block_update(as, rs, ws, x + bs, R, s, e, x); return; }
+    if (simd) { tree_block_update(as, rs, ws, x + bs, R, s, e, x); return; }
     for (csi j = 0; j < ws; ++j) {
         const double xj = x[bs + j], *col = as + j * rs;
         for (csi r = s; r < e; ++r) x[R[r]] -= col[r] * xj;

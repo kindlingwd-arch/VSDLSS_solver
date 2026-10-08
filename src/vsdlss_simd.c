@@ -107,6 +107,72 @@ SIMD_FN void vsdlss_simd_block_update64(const double *as, csi rs, csi ws, const 
     }
 }
 
+/* vsdlss_simd_block_update for the tree solve's pull and push updates
+ * (ported from the 2026-09-27 solve-panels branch): up to 16 destinations
+ * in registers across the columns, and the last 1..3 rows as independent
+ * scalar chains advanced together, so each column is visited once instead
+ * of once per leftover row.  Power-grid source blocks average about four
+ * rows, so the leftover rows are a large share of the work.  Per entry:
+ * the same products and subtractions in ascending j, same bits. */
+#define XLOAD32(c, r) ((c) ? _mm256_loadu_pd(x + R[r]) \
+                           : _mm256_i32gather_pd(x, _mm_loadu_si128((const __m128i *)(R + (r))), 8))
+#define XSTORE32(c, r, v) do { if (c) _mm256_storeu_pd(x + R[r], (v)); else { double t_[4]; \
+    _mm256_storeu_pd(t_, (v)); x[R[r]] = t_[0]; x[R[(r) + 1]] = t_[1]; \
+    x[R[(r) + 2]] = t_[2]; x[R[(r) + 3]] = t_[3]; } } while (0)
+SIMD_FN void vsdlss_simd_block_update16(const double *as, csi rs, csi ws, const double *xs,
+                                        const int32_t *R, csi r0, csi r1, double *x)
+{
+    csi r = r0;
+    for (; r + 16 <= r1; r += 16) {
+        const int c0 = R[r + 3] - R[r] == 3, c1 = R[r + 7] - R[r + 4] == 3;
+        const int c2 = R[r + 11] - R[r + 8] == 3, c3 = R[r + 15] - R[r + 12] == 3;
+        __m256d v0 = XLOAD32(c0, r), v1 = XLOAD32(c1, r + 4), v2 = XLOAD32(c2, r + 8), v3 = XLOAD32(c3, r + 12);
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) {
+            const __m256d s = _mm256_set1_pd(xs[j]);
+            v0 = SUBMUL(v0, _mm256_loadu_pd(col), s);
+            v1 = SUBMUL(v1, _mm256_loadu_pd(col + 4), s);
+            v2 = SUBMUL(v2, _mm256_loadu_pd(col + 8), s);
+            v3 = SUBMUL(v3, _mm256_loadu_pd(col + 12), s);
+        }
+        XSTORE32(c0, r, v0); XSTORE32(c1, r + 4, v1); XSTORE32(c2, r + 8, v2); XSTORE32(c3, r + 12, v3);
+    }
+    for (; r + 8 <= r1; r += 8) {
+        const int c0 = R[r + 3] - R[r] == 3, c1 = R[r + 7] - R[r + 4] == 3;
+        __m256d v0 = XLOAD32(c0, r), v1 = XLOAD32(c1, r + 4);
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) {
+            const __m256d s = _mm256_set1_pd(xs[j]);
+            v0 = SUBMUL(v0, _mm256_loadu_pd(col), s);
+            v1 = SUBMUL(v1, _mm256_loadu_pd(col + 4), s);
+        }
+        XSTORE32(c0, r, v0); XSTORE32(c1, r + 4, v1);
+    }
+    for (; r + 4 <= r1; r += 4) {
+        const int c0 = R[r + 3] - R[r] == 3;
+        __m256d v0 = XLOAD32(c0, r);
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) v0 = SUBMUL(v0, _mm256_loadu_pd(col), _mm256_set1_pd(xs[j]));
+        XSTORE32(c0, r, v0);
+    }
+    if (r < r1) {
+        const csi m = r1 - r;
+        double u0 = x[R[r]], u1 = m > 1 ? x[R[r + 1]] : 0, u2 = m > 2 ? x[R[r + 2]] : 0;
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) {
+            const double s = xs[j];
+            { double p = col[0] * s; u0 -= p; }
+            if (m > 1) { double p = col[1] * s; u1 -= p; }
+            if (m > 2) { double p = col[2] * s; u2 -= p; }
+        }
+        x[R[r]] = u0;
+        if (m > 1) x[R[r + 1]] = u1;
+        if (m > 2) x[R[r + 2]] = u2;
+    }
+}
+#undef XLOAD32
+#undef XSTORE32
+
 /* Column j of a packed lower triangle of order w, indexed by row. */
 #define PCOL(D, w, j) ((D) + (j) * (w) - (j) * ((j) - 1) / 2 - (j))
 
@@ -269,6 +335,9 @@ void vsdlss_simd_axpy4p_neg(double *y, const double *c, const double *c1, const 
 { (void)y; (void)c; (void)c1; (void)c2; (void)c3; (void)s; (void)n; abort(); }
 void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
                               const int32_t *R, csi r0, csi r1, double *x)
+{ (void)as; (void)rs; (void)ws; (void)xs; (void)R; (void)r0; (void)r1; (void)x; abort(); }
+void vsdlss_simd_block_update16(const double *as, csi rs, csi ws, const double *xs,
+                                const int32_t *R, csi r0, csi r1, double *x)
 { (void)as; (void)rs; (void)ws; (void)xs; (void)R; (void)r0; (void)r1; (void)x; abort(); }
 void vsdlss_simd_tri_update_packed(const double *D, csi w, csi j0, csi j1, const double *xs,
                                    csi r0, csi r1, double *xt)

@@ -33,6 +33,10 @@ int main(void)
         vsdlss_simd_block_update(a,rs,ws,xs,R,r0,r1,x);
         for(csi j=0;j<ws;j++){const double *col=a+j*rs;for(csi r=r0;r<r1;r++)y[R[r]]-=col[r]*xs[j];}
         CHECK(memcmp(x,y,N*8)==0);
+        /* 16-row variant: same contract, same bits */
+        vsdlss_simd_block_update16(a,rs,ws,xs,R,r0,r1,x);
+        for(csi j=0;j<ws;j++){const double *col=a+j*rs;for(csi r=r0;r<r1;r++)y[R[r]]-=col[r]*xs[j];}
+        CHECK(memcmp(x,y,N*8)==0);
         /* packed triangle of order tw, columns [j0,j1), rows [q0,q1) >= j1 */
         {
             csi tw=1+(csi)(rnd()%60), j0=(csi)(rnd()%tw), j1=j0+(csi)(rnd()%(tw-j0+1));
