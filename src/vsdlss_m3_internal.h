@@ -78,14 +78,29 @@ typedef struct vsdlss_sn_symbolic {
     csi *blk_ptr;         /* count+1 */
     csi *blk_src, *blk_first, *blk_end; /* blk_ptr[count] each */
 } vsdlss_sn_symbolic;
+/* Supernodal numeric factor.  Indices below n or count are 32-bit
+ * (vsdlss_sni; the factorization rejects larger cores), offsets 64-bit.
+ *
+ * Panels are packed: panel s (width w, e = |R_s| external rows) holds the
+ * lower triangle of its diagonal block by columns, column j (rows j..w-1)
+ * at VSDLSS_SN_DCOL(j, w), followed by the external rows column-major with
+ * leading dimension e: w(w+1)/2 + w e values, exactly the stored entries
+ * counted by l_nnz, so panel_offset[count] == l_nnz. */
+typedef int32_t vsdlss_sni;
+#define VSDLSS_SN_DCOL(j,w) ((j)*(w)-(j)*((j)-1)/2)
 typedef struct vsdlss_sn_factor {
     csi n, count, l_nnz;
-    csi *column_start, *row_ptr, *row_index, *panel_offset;
+    vsdlss_sni *column_start;  /* count+1 */
+    csi *row_ptr;              /* count+1 */
+    vsdlss_sni *row_index;     /* row_ptr[count] */
+    csi *panel_offset;         /* count+1 */
     double *panel;        /* panel_offset[count] values */
     void *panel_block;    /* allocation owning `panel` (may be aligned inside) */
     /* Tree and source blocks (copied from the symbolic layout) for the
      * tree-parallel triangular solves. */
-    csi *sn_parent, *blk_ptr, *blk_src, *blk_first, *blk_end;
+    vsdlss_sni *sn_parent;     /* count */
+    csi *blk_ptr;              /* count+1 */
+    vsdlss_sni *blk_src, *blk_first, *blk_end;
     /* Solve-tree postorder and per-thread-count subtree splits, built once
      * so repeated tree-parallel solves do not rebuild them (NULL: built per
      * solve). */
@@ -94,10 +109,19 @@ typedef struct vsdlss_sn_factor {
 
 typedef struct vsdlss_m3_component_factor {
     csi n;
-    csi *gather;                 /* NULL, or global vertex of each local index */
+    int renumbered;              /* local numbering is the BFS order */
+    /* Global vertex of each local index.  map32 when every global index
+     * fits 32 bits (then the 64-bit tables are freed once factored);
+     * otherwise gather, or NULL for components->vertices in ascending
+     * order.  During the factorization gather holds the BFS numbering. */
+    uint32_t *map32;
+    csi *gather;
     vsdlss_m4_factor *disk;
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
-    csi *core_map;               /* local vertex of each (permuted) core unknown */
+    /* Local vertex of each (permuted) core unknown: core_map32 when local
+     * indices fit 32 bits, else core_map. */
+    uint32_t *core_map32;
+    csi *core_map;
     vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
     int core_contig;             /* core_map[k] == reduction->count + k (relabelled) */
     /* Solve workspace allocated with the factor, so repeated solves do not
@@ -186,6 +210,10 @@ extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
 extern csi vsdlss_perm2_nt_min;      /* tests: smallest n for its non-temporal stores */
 extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
+/* Return free heap memory to the system when VSDLSS_TRIM >= level (glibc
+ * malloc_trim; no-op elsewhere).  Levels: 1 end of factorization, 2 between
+ * factorization phases. */
+void vsdlss_release_free_memory(int level);
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's
  * reduction replay is bandwidth bound).  Keeps records, returning OK, when
@@ -217,6 +245,12 @@ void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *);
 vsdlss_status vsdlss_sn_reorder_within(const vsdlss_sn_symbolic *s, csi **perm);
 vsdlss_status vsdlss_sn_factorize(const vsdlss *, const vsdlss_sn_symbolic *,
                                   vsdlss_sn_factor **);
+/* Same, but takes ownership of *A and *s and frees them as soon as the
+ * factor has copied what it needs, before L is allocated (always freed;
+ * both NULL on return), then returns free heap memory to the system
+ * (vsdlss_release_free_memory(2)). */
+vsdlss_status vsdlss_sn_factorize_consume(vsdlss **A, vsdlss_sn_symbolic **s,
+                                          vsdlss_sn_factor **);
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *);
 /* In place on x (length n), no allocation on the serial path and no input or
  * output finiteness scans: the caller checks x afterwards (a non-finite input
@@ -237,5 +271,10 @@ int vsdlss_panel_solve_uses_blas(void);
 #endif
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
+/* The same solves for one packed panel of a vsdlss_sn_factor (same
+ * operations and results as the full-layout kernels on the same values). */
+vsdlss_status vsdlss_sn_panel_solve(const double *, csi begin, csi width,
+                                    csi ext, const vsdlss_sni *index, double *, int back);
+vsdlss_status vsdlss_sn_panel_solve_generic(const double *,csi,csi,csi,const vsdlss_sni *,double *,int);
 
 #endif

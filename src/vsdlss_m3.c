@@ -27,8 +27,27 @@ static int trace_on(void)
     if(cached<0){const char *e=getenv("VSDLSS_TRACE");cached=e&&*e&&*e!='0';}
     return cached;
 }
+/* Resident and peak resident set in MB (Linux /proc; -1 elsewhere). */
+static void proc_mem(long *rss, long *hwm)
+{
+    *rss=*hwm=-1;
+#if defined(__linux__)
+    FILE *fp=fopen("/proc/self/status","r"); char line[128];
+    if(!fp) return;
+    while(fgets(line,sizeof line,fp)) {
+        if(!strncmp(line,"VmRSS:",6)) *rss=atol(line+6)/1024;
+        else if(!strncmp(line,"VmHWM:",6)) *hwm=atol(line+6)/1024;
+    }
+    fclose(fp);
+#endif
+}
+static void trace_line(const char *label, double dt)
+{
+    long rss,hwm; proc_mem(&rss,&hwm);
+    fprintf(stderr,"vsdlss trace: %-22s %8.3f s  rss %6ld MB  peak %6ld MB\n",label,dt,rss,hwm);
+}
 #define TRACE(label,t0) do{ if(trace_on()){ double t1_=trace_now(); \
-    fprintf(stderr,"vsdlss trace: %-22s %8.3f s\n",label,t1_-(t0)); (t0)=t1_; } }while(0)
+    trace_line(label,t1_-(t0)); (t0)=t1_; } }while(0)
 
 /* Memory freed by the factorization's temporary structures (adjacency
  * lists, ordering workspaces, symbolic analysis) stays in glibc's
@@ -44,7 +63,7 @@ static int trim_level(void)
     if(level<0) { const char *e=getenv("VSDLSS_TRIM"); level=e&&*e?atoi(e):2; }
     return level;
 }
-static void release_free_memory(int level)
+void vsdlss_release_free_memory(int level)
 {
 #if defined(__GLIBC__)
     if(trim_level()>=level) {
@@ -78,6 +97,8 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
         vsdlss_m4_factor_free(factor->component[k].disk);
         vsdlss_reduction_free(factor->component[k].reduction);
         free(factor->component[k].gather);
+        free(factor->component[k].map32);
+        free(factor->component[k].core_map32);
         free(factor->component[k].ws_local);
         free(factor->component[k].ws_saved);
         free(factor->component[k].ws_core);
@@ -201,6 +222,7 @@ static vsdlss_status prepare_component(void *vctx, csi component)
         const csi *perm=factor->components->order+begin;
         cf->gather=(csi*)vsdlss_big_malloc((size_t)cf->n*sizeof(csi));
         if(!cf->gather) return VSDLSS_ERR_OOM;
+        cf->renumbered=1;
         for(csi k=0;k<cf->n;k++){
             csi g=factor->components->vertices[begin+perm[k]];
             cf->gather[k]=g; x->newidx[g]=k;     /* this component's entries only */
@@ -261,7 +283,7 @@ static vsdlss_status relabel_component(vsdlss_m3_component_factor *cf)
     for(csi q=0;q<r->pk_count;q++){ vsdlss_pk_seg *g=r->pk+q;
         for(csi i=0;i<g->count;i++){ uint32_t h=g->head[i]; g->head[i]=(h&~0x3fffffffu)|(uint32_t)id[h&0x3fffffffu]; }
         for(csi j=0;j<g->nbn;j++) g->nb[j]=(uint32_t)id[g->nb[j]]; }
-    for(csi k=0;k<core;k++){ r->core_vertices[k]=id[r->core_vertices[k]]; cf->core_map[k]=cnt+k; }
+    for(csi k=0;k<core;k++){ if(r->core_vertices) r->core_vertices[k]=id[r->core_vertices[k]]; cf->core_map[k]=cnt+k; }
     for(csi v=0;v<n;v++) g2[id[v]]=cf->gather[v];
     free(cf->gather);
     cf->gather=g2; cf->core_contig=1;
@@ -300,7 +322,10 @@ static vsdlss_status factor_component(void *vctx, csi component)
         /* The solve reads core unknown k at local vertex core_vertices[q[k]]. */
         for(csi k=0;k<r->core_n;k++) q[k]=r->core_vertices[q[k]];
         vsdlss_spfree(r->core); r->core=NULL;   /* only the disk mode reads it later */
-        release_free_memory(2);                  /* ordering workspace, before L */
+        /* core_map replaces core_vertices from here on (the solve checks the
+         * core values itself when writing them back). */
+        free(r->core_vertices); r->core_vertices=NULL;
+        vsdlss_release_free_memory(2);                  /* ordering workspace, before L */
         /* Strict supernodes (no amalgamation zeros) were measured on the
          * 16M-node EMIR case: 11% fewer stored entries but no faster solve
          * and a slower factorization, so the relaxed layout stays. */
@@ -336,12 +361,20 @@ static vsdlss_status factor_component(void *vctx, csi component)
                                100.0*(double)symbolic->relaxed_zeros/(double)(symbolic->l_nnz?symbolic->l_nnz:1),
                                (long long)symbolic->count);
         TRACE("core symbolic",t0);
-        status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
+        status=vsdlss_sn_factorize_consume(&permuted,&symbolic,&cf->numeric);
         TRACE("core numeric",t0);
     }
     if(status==VSDLSS_OK && !factor->disk_mode && relabel_on()) {
         status=relabel_component(cf);
         TRACE("solve-order relabel",t0);
+    }
+    /* 32-bit core map once the numbering is final (in memory only). */
+    if(status==VSDLSS_OK && !factor->disk_mode && cf->core_map && cf->n<=(csi)UINT32_MAX) {
+        const csi cn=cf->reduction->core_n;
+        cf->core_map32=(uint32_t*)vsdlss_big_malloc((size_t)(cn?cn:1)*sizeof(uint32_t));
+        if(!cf->core_map32) {status=VSDLSS_ERR_OOM;goto done;}
+        for(csi k=0;k<cn;k++) cf->core_map32[k]=(uint32_t)cf->core_map[k];
+        free(cf->core_map); cf->core_map=NULL;
     }
 done:
     free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted);
@@ -349,6 +382,73 @@ done:
 }
 
 static vsdlss_status build_inverse(vsdlss_m3_factor *f);
+
+/* 32-bit local -> global maps for every component when the global indices
+ * fit, replacing the BFS gather arrays and components->vertices (which only
+ * the maps read once the factorization is done). */
+static vsdlss_status compact_maps(vsdlss_m3_factor *f)
+{
+    if(f->n>(csi)UINT32_MAX+1) return VSDLSS_OK;
+    const csi *off=f->components->offset;
+    for(csi c=0;c<f->count;c++) {
+        vsdlss_m3_component_factor *cf=f->component+c;
+        const csi cn=cf->n, *src=cf->gather?cf->gather:f->components->vertices+off[c];
+        cf->map32=(uint32_t*)vsdlss_big_malloc((size_t)(cn?cn:1)*sizeof(uint32_t));
+        if(!cf->map32) return VSDLSS_ERR_OOM;
+        int t=vsdlss_parallel_width((double)cn*4); (void)t;
+        uint32_t *m=cf->map32;
+        VSDLSS_OMP(omp parallel for num_threads(t) if(t>1) schedule(static))
+        for(csi i=0;i<cn;i++) m[i]=(uint32_t)src[i];
+    }
+    for(csi c=0;c<f->count;c++) { free(f->component[c].gather); f->component[c].gather=NULL; }
+    free(f->components->vertices); f->components->vertices=NULL;
+    return VSDLSS_OK;
+}
+
+/* A local -> global (or core -> local) map in either width. */
+typedef struct { const uint32_t *u; const csi *w; } idxmap;
+static inline csi im_at(idxmap m, csi i) { return m.u?(csi)m.u[i]:m.w[i]; }
+static idxmap core_map_of(const vsdlss_m3_component_factor *cf)
+{ idxmap m={cf->core_map32,cf->core_map}; return m; }
+
+/* VSDLSS_TRACE: bytes held by the factor, by kind. */
+static void trace_factor_bytes(const vsdlss_m3_factor *f)
+{
+    double mb=1.0/(1<<20), L=0, ridx=0, meta=0, replay=0, maps=0, ws=0, tables=0;
+    const csi n=f->n;
+    tables+=(f->components->vertices?(double)n*sizeof(csi):0)+(double)(f->count+1)*sizeof(csi);    /* components->vertices, offset */
+    maps+=f->inv32?(double)n*4:f->inv64?(double)n*8:0;
+    for(csi c=0;c<f->count;c++) {
+        const vsdlss_m3_component_factor *cf=f->component+c;
+        const vsdlss_reduction *r=cf->reduction;
+        if(cf->gather) maps+=(double)cf->n*sizeof(csi);
+        if(cf->map32) maps+=(double)cf->n*4;
+        if(cf->core_map) maps+=(double)r->core_n*sizeof(csi);
+        if(cf->core_map32) maps+=(double)r->core_n*4;
+        if(r) {
+            if(r->core_vertices) maps+=(double)r->core_n*sizeof(csi);
+            for(csi q=0;q<r->pk_count;q++)
+                replay+=(double)r->pk[q].count*(4+8)+(double)r->pk[q].nbn*(4+8);
+            if(r->records) replay+=(double)r->count*sizeof(vsdlss_elim_record);
+        }
+        ws+=(double)(cf->ws_local?cf->n:0)*8+(double)(cf->ws_core?r->core_n:0)*8+
+            (double)(cf->ws_saved?r->count:0)*8;
+        const vsdlss_sn_factor *s=cf->numeric;
+        if(s) {
+            L+=(double)s->panel_offset[s->count]*8;
+            ridx+=(double)s->row_ptr[s->count]*sizeof(vsdlss_sni);
+            meta+=(double)s->count*(2*sizeof(vsdlss_sni)+3*sizeof(csi))+(double)s->blk_ptr[s->count]*sizeof(vsdlss_sni)*3
+                 +(double)s->count*(2*sizeof(csi)+sizeof(double));             /* + solve tree */
+            fprintf(stderr,"vsdlss trace: component %lld: n %lld, core %lld, supernodes %lld, blocks %lld, row indices %lld, L %lld\n",
+                    (long long)c,(long long)cf->n,(long long)r->core_n,(long long)s->count,
+                    (long long)s->blk_ptr[s->count],(long long)s->row_ptr[s->count],(long long)s->panel_offset[s->count]);
+        }
+    }
+    fprintf(stderr,"vsdlss trace: factor MB: L %.0f, row indices %.0f, supernode metadata %.0f, "
+            "replay %.0f, maps %.0f, vertex tables %.0f, solve buffers %.0f, total %.0f\n",
+            L*mb,ridx*mb,meta*mb,replay*mb,maps*mb,tables*mb,ws*mb,
+            (L+ridx+meta+replay+maps+tables+ws)*mb);
+}
 
 static vsdlss_status factorize_shared(const vsdlss *A, int order,
                                   vsdlss_m3_factor **out,int disk_mode,size_t budget,const char *directory)
@@ -413,12 +513,14 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     free(factor->components->order); factor->components->order=NULL;
     free(factor->components->component_of); factor->components->component_of=NULL;
     free(factor->components->local_of); factor->components->local_of=NULL;
-    release_free_memory(2);                      /* adjacency graph */
+    vsdlss_release_free_memory(2);                      /* adjacency graph */
     run_components(factor,disk_mode,factor_component,&ctx,results);
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];goto fail;
     }
     free(results); results=NULL; free(inputs); inputs=NULL;
+    status=compact_maps(factor);
+    if(status!=VSDLSS_OK) goto fail;
     if(disk_mode) {
         csi cores=0;
         for(component=0;component<factor->count;component++)
@@ -436,8 +538,9 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     }
     status=build_inverse(factor);
     if(status!=VSDLSS_OK) goto fail;
-    release_free_memory(1);
+    vsdlss_release_free_memory(1);
     TRACE("release free memory",t0);
+    if(trace_on()) trace_factor_bytes(factor);
     *out=factor; return VSDLSS_OK;
 fail:
     if(inputs) for(component=0;component<factor->count;component++) vsdlss_reduce_input_free(inputs[component]);
@@ -468,10 +571,12 @@ typedef struct {
     int inplace;                /* internal order, solve directly in out (== rhs) */
 } solve_ctx;
 
-static const csi *component_map(const vsdlss_m3_factor *f, csi c)
+static idxmap component_map(const vsdlss_m3_factor *f, csi c)
 {
     const vsdlss_m3_component_factor *cf=f->component+c;
-    return cf->gather?cf->gather:f->components->vertices+f->components->offset[c];
+    idxmap m={cf->map32,NULL};
+    if(!m.u) m.w=cf->gather?cf->gather:f->components->vertices+f->components->offset[c];
+    return m;
 }
 
 /* inv[g] = (c << shift) | i for global vertex g = component_map(c)[i]. */
@@ -488,17 +593,17 @@ static vsdlss_status build_inverse(vsdlss_m3_factor *f)
     if(!f->inv32 && !f->inv64) return VSDLSS_ERR_OOM;
     int T=vsdlss_parallel_width((double)n*4); (void)T;
     for(csi c=0;c<count;c++) {
-        const csi cn=f->component[c].n, *map=component_map(f,c);
+        const csi cn=f->component[c].n; const idxmap map=component_map(f,c);
         const uint64_t hi=(uint64_t)c<<bi;
         int t=cn>=65536?T:1; (void)t;
         if(f->inv32) {
             uint32_t *inv=f->inv32;
             VSDLSS_OMP(omp parallel for num_threads(t) if(t>1) schedule(static))
-            for(csi i=0;i<cn;i++) inv[map[i]]=(uint32_t)(hi|(uint64_t)i);
+            for(csi i=0;i<cn;i++) inv[im_at(map,i)]=(uint32_t)(hi|(uint64_t)i);
         } else {
             uint64_t *inv=f->inv64;
             VSDLSS_OMP(omp parallel for num_threads(t) if(t>1) schedule(static))
-            for(csi i=0;i<cn;i++) inv[map[i]]=hi|(uint64_t)i;
+            for(csi i=0;i<cn;i++) inv[im_at(map,i)]=hi|(uint64_t)i;
         }
     }
     return VSDLSS_OK;
@@ -556,9 +661,9 @@ static vsdlss_status solve_local(void *vctx, csi c)
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
         for(csi i=0;i<cn;i++) { double v=src[i]; local[i]=v; bad|=!isfinite(v); }
     } else if(!x->pregathered) {
-        const csi *map=component_map(x->f,c); const double *rhs=x->rhs;
+        const idxmap map=component_map(x->f,c); const double *rhs=x->rhs;
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
-        for(csi i=0;i<cn;i++) { double v=rhs[map[i]]; local[i]=v; bad|=!isfinite(v); }
+        for(csi i=0;i<cn;i++) { double v=rhs[im_at(map,i)]; local[i]=v; bad|=!isfinite(v); }
     }
     if(bad) return VSDLSS_ERR_NONFINITE;
     TRACE("solve: gather",t0);
@@ -579,24 +684,33 @@ static vsdlss_status solve_local(void *vctx, csi c)
              * write-back's scan reports it as vsdlss_sn_solve's scans did. */
             if(cf->core_contig) {
                 /* Relabelled: the core RHS is local[count..n); solve it in
-                 * place.  A non-finite result is reported by the backward
-                 * replay's scan of the core entries. */
+                 * place.  With core_vertices kept, the backward replay's
+                 * scan of the core entries reports a non-finite result;
+                 * without them (dropped after factorization) it is checked
+                 * here, in one sequential pass over the core tail. */
                 LEDGER_MARK(LG_CORE_GATHER,tl);
                 status=vsdlss_sn_solve_inplace(cf->numeric,local+r->count);
                 if(status!=VSDLSS_OK) return status;
                 if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
+                if(!r->core_vertices) {
+                    const double *cv=local+r->count;
+                    int ct=vsdlss_parallel_width((double)core*4); (void)ct;
+                    VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static) reduction(|:bad))
+                    for(csi k=0;k<core;k++) bad|=!isfinite(cv[k]);
+                    if(bad) return VSDLSS_ERR_NONFINITE;
+                }
                 goto core_done;
             }
-            const csi *cm=cf->core_map;
+            const idxmap cm=core_map_of(cf);
             int ct=vsdlss_parallel_width((double)core*4); (void)ct;
             VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static))
-            for(csi k=0;k<core;k++) core_b[k]=local[cm[k]];
+            for(csi k=0;k<core;k++) core_b[k]=local[im_at(cm,k)];
             LEDGER_MARK(LG_CORE_GATHER,tl);
             status=vsdlss_sn_solve_inplace(cf->numeric,core_b);   /* marks LG_CORE_FWD/BWD */
             if(status!=VSDLSS_OK) return status;
             if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
             VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static) reduction(|:bad))
-            for(csi k=0;k<core;k++) { double v=core_b[k]; local[cm[k]]=v; bad|=!isfinite(v); }
+            for(csi k=0;k<core;k++) { double v=core_b[k]; local[im_at(cm,k)]=v; bad|=!isfinite(v); }
             if(bad) return VSDLSS_ERR_NONFINITE;
             LEDGER_MARK(LG_CORE_SCATTER,tl);
         }
@@ -623,9 +737,9 @@ static vsdlss_status scatter_local(void *vctx, csi c)
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
         for(csi i=0;i<cn;i++) out[i]=local[i];
     } else {
-        const csi *map=component_map(x->f,c); double *out=x->out;
+        const idxmap map=component_map(x->f,c); double *out=x->out;
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static))
-        for(csi i=0;i<cn;i++) out[map[i]]=local[i];
+        for(csi i=0;i<cn;i++) out[im_at(map,i)]=local[i];
     }
     return VSDLSS_OK;
 }
@@ -822,10 +936,10 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
             if(pl->bktG) pl->bktG[g]=(uint16_t)b;
         }
         if(lo<hi) {
-            csi c=comp_of(f,lo); const csi *map=component_map(f,c);
+            csi c=comp_of(f,lo); idxmap map=component_map(f,c);
             for(csi p=lo;p<hi;p++) {
                 while(p>=off[c+1]) { c++; map=component_map(f,c); }
-                const csi b=map[p-off[c]]>>PERM_SH; cw[b]++;
+                const csi b=im_at(map,p-off[c])>>PERM_SH; cw[b]++;
                 if(pl->bktW) pl->bktW[p]=(uint16_t)b;
             }
         }
@@ -844,10 +958,10 @@ static vsdlss_perm_plan *perm_plan_build(const vsdlss_m3_factor *f, int T)
         memcpy(qw,pl->posW+(size_t)t*B,(size_t)B*sizeof(csi));
         for(csi g=lo;g<hi;g++) { csi p=packed_of(f,g); pl->offG[qg[p>>PERM_SH]++]=(uint16_t)(p&PERM_MASK); }
         if(lo<hi) {
-            csi c=comp_of(f,lo); const csi *map=component_map(f,c);
+            csi c=comp_of(f,lo); idxmap map=component_map(f,c);
             for(csi p=lo;p<hi;p++) {
                 while(p>=off[c+1]) { c++; map=component_map(f,c); }
-                csi g=map[p-off[c]]; pl->offW[qw[g>>PERM_SH]++]=(uint16_t)(g&PERM_MASK);
+                csi g=im_at(map,p-off[c]); pl->offW[qw[g>>PERM_SH]++]=(uint16_t)(g&PERM_MASK);
             }
         }
     }
@@ -972,7 +1086,7 @@ static void perm2_writeback(const vsdlss_m3_factor *f, const vsdlss_perm_plan *p
                 const csi e=off[c+1]<hi?off[c+1]:hi, base=off[c];
                 const double *l=loc[c];
                 if(pl->bktW) { const uint16_t *bk=pl->bktW; for(;p<e;p++) PERM_PUT(bk[p],l[p-base]); }
-                else { const csi *map=component_map(f,c); for(;p<e;p++) PERM_PUT(map[p-base]>>PERM_SH,l[p-base]); }
+                else { const idxmap map=component_map(f,c); for(;p<e;p++) PERM_PUT(im_at(map,p-base)>>PERM_SH,l[p-base]); }
                 c++;
             }
         }
@@ -1079,8 +1193,9 @@ vsdlss_status vsdlss_m3_internal_order(const vsdlss_m3_factor *factor, csi *perm
 {
     if(!factor || !factor->components || !factor->component || !perm) return VSDLSS_ERR_INVALID;
     for(csi c=0;c<factor->count;c++) {
-        const csi cn=factor->component[c].n, *map=component_map(factor,c);
-        memcpy(perm+factor->components->offset[c],map,(size_t)cn*sizeof(csi));
+        const csi cn=factor->component[c].n; const idxmap map=component_map(factor,c);
+        csi *dst=perm+factor->components->offset[c];
+        for(csi i=0;i<cn;i++) dst[i]=im_at(map,i);
     }
     return VSDLSS_OK;
 }
@@ -1108,24 +1223,24 @@ static vsdlss_status solve_batch(const vsdlss_m3_factor *f,csi nrhs,const double
         const vsdlss_m3_component_factor *cf=f->component+c;
         const vsdlss_reduction *r=cf->reduction;
         const csi cn=cf->n,core=r->core_n,cnt=r->count;
-        const csi *map=component_map(f,c), *cm=cf->core_map;
+        const idxmap map=component_map(f,c), cm=core_map_of(cf);
         double *local=malloc((size_t)(cn?cn:1)*sizeof(double));
         double *perm=core?malloc((size_t)core*(size_t)nrhs*sizeof(double)):NULL;
         double *saved=cnt?malloc((size_t)cnt*(size_t)nrhs*sizeof(double)):NULL;
         if(!local||(core&&!perm)||(cnt&&!saved)){st=VSDLSS_ERR_OOM;goto next;}
         for(csi r0=0;r0<nrhs&&st==VSDLSS_OK;r0++){
             const double *b=rhs+(size_t)r0*ldrhs; int bad=0;
-            for(csi k=0;k<cn;k++){local[k]=b[map[k]];bad|=!isfinite(local[k]);}
+            for(csi k=0;k<cn;k++){local[k]=b[im_at(map,k)];bad|=!isfinite(local[k]);}
             if(bad){st=VSDLSS_ERR_NONFINITE;break;}
             st=vsdlss_reduce_forward_inplace(r,local,cnt?saved+(size_t)r0*cnt:NULL);
-            if(st==VSDLSS_OK)for(csi k=0;k<core;k++)perm[(size_t)r0*core+k]=local[cm[k]];
+            if(st==VSDLSS_OK)for(csi k=0;k<core;k++)perm[(size_t)r0*core+k]=local[im_at(cm,k)];
         }
         if(st==VSDLSS_OK&&core)st=vsdlss_sn_solve_batch(cf->numeric,nrhs,perm,core);
         for(csi r0=0;r0<nrhs&&st==VSDLSS_OK;r0++){
             double *xo=dest+(size_t)r0*lddest;
-            for(csi k=0;k<core;k++)local[cm[k]]=perm[(size_t)r0*core+k];
+            for(csi k=0;k<core;k++)local[im_at(cm,k)]=perm[(size_t)r0*core+k];
             st=vsdlss_reduce_backward_inplace(r,cnt?saved+(size_t)r0*cnt:NULL,local);
-            if(st==VSDLSS_OK)for(csi k=0;k<cn;k++)xo[map[k]]=local[k];
+            if(st==VSDLSS_OK)for(csi k=0;k<cn;k++)xo[im_at(map,k)]=local[k];
         }
 next:
         free(local);free(perm);free(saved);

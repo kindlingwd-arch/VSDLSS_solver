@@ -164,9 +164,9 @@ bench-sn: bench_sn
 	./bench_sn 18 4 8
 
 # Generated kernel changes must invalidate all consumers.
-$(LIBOBJS) test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel bench_parallel bench_m3 bench_sn: src/vsdlss_small_solve.inc
+$(LIBOBJS) test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel bench_parallel bench_m3 bench_sn: src/vsdlss_small_solve.inc src/vsdlss_panel_solve.inc
 
-test_small: test/test_small.c $(LIBSRCS) src/vsdlss_small_solve.inc
+test_small: test/test_small.c $(LIBSRCS) src/vsdlss_small_solve.inc src/vsdlss_panel_solve.inc
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_small.c $(LIBSRCS) $(LDLIBS)
 
 test-small: test_small
@@ -174,7 +174,7 @@ test-small: test_small
 
 test: test-small
 
-test_reduced_dag: test/test_reduced_dag.c $(LIBSRCS) src/vsdlss_small_solve.inc
+test_reduced_dag: test/test_reduced_dag.c $(LIBSRCS) src/vsdlss_small_solve.inc src/vsdlss_panel_solve.inc
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_reduced_dag.c $(LIBSRCS) $(LDLIBS)
 
 test-reduced-dag: test_reduced_dag
