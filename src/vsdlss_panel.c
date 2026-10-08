@@ -34,6 +34,18 @@ static int solve_kv(void)
     return vsdlss_solve_kv;
 }
 
+/* Forward external updates of packed (M3) panels -- the serial fwd_kv2
+ * kernel and the tree solve's pull and push steps -- use
+ * vsdlss_simd_block_update16: 16 destinations in registers and the last 1..3
+ * rows as interleaved chains.  VSDLSS_SOLVE_UPD16=0 selects the 8-row
+ * vsdlss_simd_block_update.  Same operations per entry: same bits. */
+int vsdlss_solve_upd16(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("VSDLSS_SOLVE_UPD16"); v = !(e && e[0] == '0'); }
+    return v;
+}
+
 #ifdef VSDLSS_BLAS
 /* Wide panels (at least VSDLSS_BLAS_SOLVE_MIN columns, default 32; 0
  * disables) are solved with BLAS. */
@@ -98,7 +110,13 @@ vsdlss_status vsdlss_panel_solve(const double *a,csi begin,csi width,
 #define RCOL(j) (a+width*(width+1)/2+(j)*ext)
 #define RLD ext
 #define PACKED 1
-#define BLOCK_UPDATE vsdlss_simd_block_update
+#define BLOCK_UPDATE sn_block_update
+static inline void sn_block_update(const double *as, csi rs, csi ws, const double *xs,
+                                   const vsdlss_sni *R, csi r0, csi r1, double *x)
+{
+    if (vsdlss_solve_upd16()) vsdlss_simd_block_update16(as, rs, ws, xs, R, r0, r1, x);
+    else vsdlss_simd_block_update(as, rs, ws, xs, R, r0, r1, x);
+}
 #define SMALL(w) psolve_##w
 #define DG(w,j,r) a[VSDLSS_SN_DCOL(j,w)+(r)-(j)]
 #define RC(w,j) (a+(w)*((w)+1)/2+(j)*ext)
