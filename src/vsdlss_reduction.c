@@ -1,6 +1,8 @@
 #include "vsdlss_m3_internal.h"
 #include "vsdlss_parallel.h"
 
+#include <stdatomic.h>
+
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -86,18 +88,63 @@ static csi bs_min(const min_bitset *s)
     return idx;
 }
 
+/* Lazily deleted entries ("tombstones").  Removing an entry from a long
+ * sorted list by shifting the rest costs O(degree), so eliminating the d
+ * leaves of a star would cost O(d^2).  A list longer than TOMB_MIN instead
+ * marks the entry (TOMB bit on its vertex, which keeps the list sorted for
+ * the binary searches) and counts it in dead[v]; adj[v].count stays the
+ * live degree, the physical length is count + dead[v].  A list is compacted
+ * when it has more dead than live entries (amortized O(1) per removal),
+ * before it is scanned, and before it is copied to grow.  A new entry takes
+ * the nearest dead slot instead of shifting the whole tail.  Live entries
+ * keep their order and values, so every result is unchanged.  dead[] is
+ * allocated on the first tombstone: graphs without long lists (power grids)
+ * never pay for it. */
+#define TOMB (INT64_C(1)<<62)
+csi vsdlss_reduce_tomb_min = 32;     /* tests: shortest list using tombstones */
+#define TOMB_MIN vsdlss_reduce_tomb_min
+#define TOMB_MAX UINT16_MAX
+typedef struct { _Atomic(uint16_t *) dead; csi n; } tomb_ctx;
+
+static inline csi vkey(csi vertex) { return vertex & ~TOMB; }
+static inline csi phys_len(tomb_ctx *t, const numeric_list *adj, csi v)
+{
+    uint16_t *d=t?atomic_load_explicit(&t->dead,memory_order_acquire):NULL;
+    return adj[v].count+(d?d[v]:0);
+}
+static uint16_t *tomb_dead(tomb_ctx *t)
+{
+    uint16_t *d=atomic_load(&t->dead);
+    if(d) return d;
+    uint16_t *fresh=(uint16_t *)calloc((size_t)(t->n?t->n:1),sizeof(uint16_t)), *expect=NULL;
+    if(!fresh) return NULL;
+    if(!atomic_compare_exchange_strong(&t->dead,&expect,fresh)) { free(fresh); return expect; }
+    return fresh;
+}
+
 static csi edge_lower_bound(const numeric_edge *e, csi count, csi vertex)
 {
     csi lo=0, hi=count;
-    while(lo<hi) { csi mid=lo+(hi-lo)/2; if(e[mid].vertex<vertex) lo=mid+1; else hi=mid; }
+    while(lo<hi) { csi mid=lo+(hi-lo)/2; if(vkey(e[mid].vertex)<vertex) lo=mid+1; else hi=mid; }
     return lo;
 }
 
 static numeric_edge *list_edges(edge_arena *ar, const numeric_list *l)
 { return ar[SLOT_ARENA(l->slot)].edge+SLOT_OFF(l->slot); }
 
+/* Drop v's tombstones in place (the live entries keep their order). */
+static void list_compact(edge_arena *ar, tomb_ctx *t, numeric_list *adj, csi v)
+{
+    uint16_t *d=t?atomic_load(&t->dead):NULL;
+    if(!d || !d[v]) return;
+    numeric_edge *e=list_edges(ar,adj+v); const csi len=adj[v].count+d[v]; csi u=0;
+    for(csi j=0;j<len;j++) if(!(e[j].vertex&TOMB)) e[u++]=e[j];
+    d[v]=0;
+}
+
 static vsdlss_status list_reserve(edge_arena *ar, csi grow_id, numeric_list *list, csi needed)
 {
+    /* The list has no tombstones (callers compact first): its length is count. */
     edge_arena *g=ar+grow_id; csi capacity, need_arena;
     if(needed<=list->capacity) return VSDLSS_OK;
     capacity=list->capacity?list->capacity:4;
@@ -118,37 +165,72 @@ static vsdlss_status list_reserve(edge_arena *ar, csi grow_id, numeric_list *lis
     return VSDLSS_OK;
 }
 
-static vsdlss_status edge_set(edge_arena *ar, csi grow_id, numeric_list *adj,
+/* Insert (y, value) into the sorted list of x, which has no live y. */
+static vsdlss_status list_insert(edge_arena *ar, tomb_ctx *t, csi grow_id, numeric_list *adj,
+                                 csi x, csi y, double value)
+{
+    uint16_t *d=t?atomic_load(&t->dead):NULL;
+    if(adj[x].count>=MAX_LIST-1) return VSDLSS_ERR_OOM;
+    if(d && d[x]) {
+        /* Shift only up to the nearest dead slot. */
+        numeric_edge *e=list_edges(ar,adj+x); const csi len=adj[x].count+d[x];
+        const csi pos=edge_lower_bound(e,len,y);
+        csi l=pos-1, r=pos;
+        for(;;) {
+            if(r<len && (e[r].vertex&TOMB)) {
+                memmove(e+pos+1,e+pos,(size_t)(r-pos)*sizeof(*e));
+                e[pos].vertex=y; e[pos].value=value; break;
+            }
+            if(l>=0 && (e[l].vertex&TOMB)) {
+                memmove(e+l,e+l+1,(size_t)(pos-1-l)*sizeof(*e));
+                e[pos-1].vertex=y; e[pos-1].value=value; break;
+            }
+            r++; l--;
+        }
+        d[x]--; adj[x].count++;
+        return VSDLSS_OK;
+    }
+    if(list_reserve(ar,grow_id,adj+x,adj[x].count+1)!=VSDLSS_OK) return VSDLSS_ERR_OOM;
+    numeric_edge *e=list_edges(ar,adj+x);
+    const csi pos=edge_lower_bound(e,adj[x].count,y);
+    memmove(e+pos+1,e+pos,(size_t)(adj[x].count-pos)*sizeof(*e));
+    e[pos].vertex=y; e[pos].value=value; adj[x].count++;
+    return VSDLSS_OK;
+}
+
+static vsdlss_status edge_set(edge_arena *ar, tomb_ctx *t, csi grow_id, numeric_list *adj,
                               csi a, csi b, double value)
 {
     numeric_edge *ea=list_edges(ar,adj+a), *eb;
-    csi pa=edge_lower_bound(ea,adj[a].count,b), pb;
-    if(pa<adj[a].count && ea[pa].vertex==b) {
+    const csi la=phys_len(t,adj,a);
+    csi pa=edge_lower_bound(ea,la,b), pb;
+    if(pa<la && ea[pa].vertex==b) {
         double updated=ea[pa].value+value;
-        eb=list_edges(ar,adj+b); pb=edge_lower_bound(eb,adj[b].count,a);
+        eb=list_edges(ar,adj+b); pb=edge_lower_bound(eb,phys_len(t,adj,b),a);
         if(!isfinite(updated)) return VSDLSS_ERR_NONFINITE;
         ea[pa].value=eb[pb].value=updated; return VSDLSS_OK;
     }
     if(adj[a].count>=MAX_LIST-1 || adj[b].count>=MAX_LIST-1) return VSDLSS_ERR_OOM;
-    if(list_reserve(ar,grow_id,adj+a,adj[a].count+1)!=VSDLSS_OK ||
-       list_reserve(ar,grow_id,adj+b,adj[b].count+1)!=VSDLSS_OK) return VSDLSS_ERR_OOM;
-    ea=list_edges(ar,adj+a); eb=list_edges(ar,adj+b);
-    pb=edge_lower_bound(eb,adj[b].count,a);
-    memmove(ea+pa+1,ea+pa,(size_t)(adj[a].count-pa)*sizeof(*ea));
-    ea[pa].vertex=b; ea[pa].value=value; adj[a].count++;
-    memmove(eb+pb+1,eb+pb,(size_t)(adj[b].count-pb)*sizeof(*eb));
-    eb[pb].vertex=a; eb[pb].value=value; adj[b].count++;
-    return VSDLSS_OK;
+    vsdlss_status st=list_insert(ar,t,grow_id,adj,a,b,value);
+    return st!=VSDLSS_OK?st:list_insert(ar,t,grow_id,adj,b,a,value);
 }
 
-static void edge_remove(edge_arena *ar, numeric_list *list, csi vertex)
+static vsdlss_status edge_remove(edge_arena *ar, tomb_ctx *t, numeric_list *adj, csi w, csi vertex)
 {
-    numeric_edge *e=list_edges(ar,list);
-    csi at=edge_lower_bound(e,list->count,vertex);
-    if(at<list->count && e[at].vertex==vertex) {
-        memmove(e+at,e+at+1,(size_t)(list->count-at-1)*sizeof(*e));
-        list->count--;
+    numeric_edge *e=list_edges(ar,adj+w);
+    const csi len=phys_len(t,adj,w);
+    csi at=edge_lower_bound(e,len,vertex);
+    if(!(at<len && e[at].vertex==vertex)) return VSDLSS_OK;
+    if(len<=TOMB_MIN || !t) {
+        memmove(e+at,e+at+1,(size_t)(len-at-1)*sizeof(*e));
+        adj[w].count--;
+        return VSDLSS_OK;
     }
+    uint16_t *d=tomb_dead(t);
+    if(!d) return VSDLSS_ERR_OOM;
+    e[at].vertex|=TOMB; adj[w].count--; d[w]++;
+    if(d[w]>adj[w].count || d[w]==TOMB_MAX) list_compact(ar,t,adj,w);
+    return VSDLSS_OK;
 }
 
 static int cmp_edge(const void *x, const void *y)
@@ -558,6 +640,7 @@ vsdlss_status vsdlss_reduce_pack(vsdlss_reduction *r)
 typedef struct {
     numeric_list *adj; double *diag; unsigned char *active;
     edge_arena *ar; vsdlss_elim_record *records;
+    tomb_ctx *tomb;
 } reduce_state;
 
 /* Eliminate v (degree <= 3) into *record; grow lists into arena grow_id.
@@ -569,6 +652,7 @@ static vsdlss_status eliminate(reduce_state *z, csi grow_id, csi v,
     const numeric_edge *e;
     if(!isfinite(diag[v])) return VSDLSS_ERR_NONFINITE;
     if(diag[v]<=0.0) return VSDLSS_ERR_NOT_POSDEF;
+    list_compact(z->ar,z->tomb,adj,v);        /* scanned below */
     record->vertex=v; record->degree=adj[v].count; record->pivot=diag[v];
     e=list_edges(z->ar,adj+v);
     for(a=0;a<record->degree;a++) {
@@ -579,15 +663,21 @@ static vsdlss_status eliminate(reduce_state *z, csi grow_id, csi v,
         diag[w]-=record->multiplier[a]*avw;
         if(!isfinite(diag[w])) return VSDLSS_ERR_NONFINITE;
     }
-    for(a=0;a<record->degree;a++) for(b=a+1;b<record->degree;b++) {
-        /* v's own list is not modified here, but arenas may move. */
-        double vb=list_edges(z->ar,adj+v)[b].value, updated=-record->multiplier[a]*vb;
-        vsdlss_status st;
-        if(!isfinite(updated)) return VSDLSS_ERR_NONFINITE;
-        st=edge_set(z->ar,grow_id,adj,record->neighbor[a],record->neighbor[b],updated);
+    /* v leaves its neighbours' lists first, so a fill entry can take the
+     * slot v leaves in a long list (values do not depend on the order). */
+    double av[3];
+    for(a=0;a<record->degree;a++) av[a]=list_edges(z->ar,adj+v)[a].value;
+    for(a=0;a<record->degree;a++) {
+        vsdlss_status st=edge_remove(z->ar,z->tomb,adj,record->neighbor[a],v);
         if(st!=VSDLSS_OK) return st;
     }
-    for(a=0;a<record->degree;a++) edge_remove(z->ar,adj+record->neighbor[a],v);
+    for(a=0;a<record->degree;a++) for(b=a+1;b<record->degree;b++) {
+        double updated=-record->multiplier[a]*av[b];
+        vsdlss_status st;
+        if(!isfinite(updated)) return VSDLSS_ERR_NONFINITE;
+        st=edge_set(z->ar,z->tomb,grow_id,adj,record->neighbor[a],record->neighbor[b],updated);
+        if(st!=VSDLSS_OK) return st;
+    }
     z->active[v]=0;
     return VSDLSS_OK;
 }
@@ -610,6 +700,7 @@ static vsdlss_status eliminate_range(reduce_state *z, csi grow_id, csi lo, csi h
         if(d==4) break;
         bs_clear(&bucket[d],v); v+=lo;
         if(block) {
+            list_compact(z->ar,z->tomb,z->adj,v);
             const numeric_edge *e=list_edges(z->ar,z->adj+v); int inside=1;
             for(k=0;k<z->adj[v].count;k++) if(e[k].vertex<lo||e[k].vertex>=hi) { inside=0; break; }
             if(!inside) continue;   /* stays for the sequential pass */
@@ -795,6 +886,7 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
     vsdlss_reduction *r=NULL; numeric_list *adj; double *diag;
     unsigned char *active=NULL; csi *local=NULL; vsdlss_status status=VSDLSS_OK;
     edge_arena *ar=NULL; csi blocks=0, narenas=0;
+    tomb_ctx tomb; atomic_init(&tomb.dead,NULL); tomb.n=in?in->n:0;
     csi *made=NULL; vsdlss_elim_record *tail=NULL; int direct=0;
     csi n,col,k,v,core_n,nnz,at;
     if(ws) memset(ws,0,sizeof(*ws));
@@ -826,7 +918,7 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
     r->blocks=blocks;
 
     {
-        reduce_state z={adj,diag,active,ar,r->records};
+        reduce_state z={adj,diag,active,ar,r->records,&tomb};
         csi total=0;
         r->block_ptr[0]=0;
         if(blocks) {
@@ -907,6 +999,7 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
         at=0; r->core->p[0]=0;
         for(col=0;col<core_n;col++) {
             csi original=r->core_vertices[col], j;
+            list_compact(ar,&tomb,adj,original);
             const numeric_edge *e=list_edges(ar,adj+original);
             for(j=0;j<adj[original].count;j++) {
                 csi neighbor=e[j].vertex;
@@ -940,7 +1033,7 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
         }
     }
     for(k=0;k<narenas;k++) free(ar[k].edge);
-    free(ar); free(active); free(local); free(made); vsdlss_reduce_input_free(in);
+    free(ar); free(active); free(local); free(made); free(atomic_load(&tomb.dead)); vsdlss_reduce_input_free(in);
     if(pack && !direct) {
         status=vsdlss_reduce_pack(r);
         if(status!=VSDLSS_OK) {
@@ -955,7 +1048,7 @@ ws_fail:
     free(ws->local); free(ws->saved); free(ws->core); memset(ws,0,sizeof(*ws));
 fail:
     if(ar) for(k=0;k<narenas;k++) free(ar[k].edge);
-    free(ar); free(active); free(local); free(made); free(tail); vsdlss_reduce_input_free(in);
+    free(ar); free(active); free(local); free(made); free(tail); free(atomic_load(&tomb.dead)); vsdlss_reduce_input_free(in);
     vsdlss_reduction_free(r); return status;
 }
 

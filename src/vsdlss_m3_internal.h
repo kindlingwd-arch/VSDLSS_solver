@@ -205,6 +205,7 @@ void vsdlss_reduction_free(vsdlss_reduction *);
 /* Size thresholds (internal; tests lower them to reach the large-input
  * paths on small matrices).  Results depend on them, never on threads. */
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
+extern csi vsdlss_reduce_tomb_min; /* tests: shortest adjacency list removed lazily (tombstones) */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */

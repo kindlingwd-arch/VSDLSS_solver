@@ -1,5 +1,7 @@
 #include "../src/vsdlss_m3_internal.h"
 #include "m3_test_alloc.h"
+#include "../src/vsdlss_parallel.h"
+#include <time.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -875,8 +877,110 @@ static int test_packed_reduction_matches_records(void)
     vsdlss_spfree(A); return 0;
 }
 
+/* Upper CSC of the SPD matrix with -1 (slightly varied) on the given edges
+ * (a != b, no duplicates) and a dominant diagonal. */
+static vsdlss *edges_matrix(csi n, const csi *ea, const csi *eb, csi m)
+{
+    csi *deg=calloc((size_t)n,sizeof(csi)), *cnt=calloc((size_t)n+1,sizeof(csi));
+    vsdlss *A=deg&&cnt?vsdlss_spalloc(n,n,n+m,1,0):NULL;
+    if(!A) { free(deg); free(cnt); return NULL; }
+    for(csi k=0;k<m;k++) { deg[ea[k]]++; deg[eb[k]]++; cnt[(ea[k]>eb[k]?ea[k]:eb[k])+1]++; }
+    for(csi j=0;j<n;j++) cnt[j+1]+=cnt[j]+1;
+    memcpy(A->p,cnt,(size_t)(n+1)*sizeof(csi));
+    for(csi k=0;k<m;k++) {
+        csi a=ea[k]<eb[k]?ea[k]:eb[k], b=ea[k]<eb[k]?eb[k]:ea[k];
+        A->i[cnt[b]]=a; A->x[cnt[b]++]=-1.0-0.001*(double)(k%13);
+    }
+    for(csi j=0;j<n;j++) { A->i[cnt[j]]=j; A->x[cnt[j]]=(double)deg[j]+0.5; }
+    for(csi j=0;j<n;j++)                         /* sort each column by row */
+        for(csi p=A->p[j]+1;p<A->p[j+1];p++) for(csi q=p;q>A->p[j]&&A->i[q]<A->i[q-1];q--) {
+            csi ti=A->i[q]; double tx=A->x[q]; A->i[q]=A->i[q-1]; A->x[q]=A->x[q-1]; A->i[q-1]=ti; A->x[q-1]=tx; }
+    free(deg); free(cnt); return A;
+}
+
+/* Star: hub 0 with `leaves` leaves and `spokes` paths hub-u-w-x whose x
+ * form a ring (degree-2 eliminations insert fill into the hub's list). */
+static vsdlss *star_graph(csi leaves, csi spokes)
+{
+    const csi n=1+leaves+3*spokes, m=leaves+4*spokes;
+    csi *ea=malloc((size_t)m*sizeof(csi)), *eb=malloc((size_t)m*sizeof(csi)), k=0;
+    if(!ea||!eb) { free(ea); free(eb); return NULL; }
+    for(csi i=1;i<=leaves;i++) { ea[k]=0; eb[k++]=i; }
+    for(csi i=0;i<spokes;i++) {
+        csi u=leaves+1+3*i, w=u+1, x=u+2, xn=leaves+1+3*((i+1)%spokes)+2;
+        ea[k]=0; eb[k++]=u; ea[k]=u; eb[k++]=w; ea[k]=w; eb[k++]=x; ea[k]=x; eb[k++]=xn;
+    }
+    vsdlss *A=edges_matrix(n,ea,eb,k);
+    free(ea); free(eb); return A;
+}
+
+/* A path with `hubs` vertices (0..hubs-1) each joined to `fan` random
+ * distinct vertices. */
+static vsdlss *hub_graph(csi n, csi hubs, csi fan)
+{
+    const csi cap=n+hubs*fan;
+    csi *ea=malloc((size_t)cap*sizeof(csi)), *eb=malloc((size_t)cap*sizeof(csi)), k=0;
+    unsigned char *mark=calloc((size_t)n,1); uint64_t r=0x9E3779B97F4A7C15ULL;
+    if(!ea||!eb||!mark) { free(ea); free(eb); free(mark); return NULL; }
+    for(csi i=0;i+1<n;i++) { ea[k]=i; eb[k++]=i+1; }
+    for(csi h=0;h<hubs;h++) {
+        memset(mark,0,(size_t)n); mark[h]=1; if(h>0) mark[h-1]=1; if(h+1<n) mark[h+1]=1;
+        for(csi j=0;j<fan;j++) {
+            csi v;
+            do { r^=r<<13; r^=r>>7; r^=r<<17; v=(csi)(r%(uint64_t)n); } while(mark[v] || (v<hubs && v<h));
+            mark[v]=1; ea[k]=h; eb[k++]=v;
+        }
+    }
+    vsdlss *A=edges_matrix(n,ea,eb,k);
+    free(ea); free(eb); free(mark); return A;
+}
+
+/* Lazily deleted adjacency entries: the same solution bits whatever the
+ * tombstone threshold (1: almost every removal, huge: never), at 1 and 4
+ * threads with the blocked parallel pass; and a large star factors in
+ * linear rather than quadratic time. */
+static int test_reduction_tombstones(void)
+{
+    const csi saved_min=vsdlss_reduce_tomb_min, saved_blk=vsdlss_reduce_block;
+    const csi mins[4]={(csi)1<<62,1,4,32};
+    vsdlss *G[2]={star_graph(20000,6000),hub_graph(60000,40,1500)};
+    CHECK(G[0]&&G[1]);
+    vsdlss_reduce_block=4096;
+    for(int g=0;g<2;g++) {
+        const csi n=G[g]->n;
+        double *b=malloc((size_t)n*8), *ref=malloc((size_t)n*8), *x=malloc((size_t)n*8);
+        CHECK(b&&ref&&x);
+        for(csi i=0;i<n;i++) b[i]=sin(0.37*(double)i)+0.2;
+        for(int t=1;t<=(vsdlss_parallel_enabled()?4:1);t+=3) for(int q=0;q<4;q++) {
+            vsdlss_m3_factor *f=NULL; double eta;
+            vsdlss_reduce_tomb_min=mins[q];
+            CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+            CHECK(vsdlss_factorize_m3(G[g],5,&f)==VSDLSS_OK);
+            CHECK(vsdlss_m3_solve(f,b,q||t>1?x:ref)==VSDLSS_OK);
+            if(q||t>1) CHECK(memcmp(x,ref,(size_t)n*8)==0);
+            else CHECK(vsdlss_backward_error(G[g],ref,b,&eta)==VSDLSS_OK && eta<1e-13);
+            vsdlss_m3_factor_free(f);
+        }
+        free(b); free(ref); free(x);
+    }
+    vsdlss_spfree(G[0]); vsdlss_spfree(G[1]);
+    /* 10^6 leaves and 10^5 spokes: shifting the hub's list would move
+     * ~5e11 entries; with tombstones the reduction is linear. */
+    vsdlss_reduce_tomb_min=saved_min; vsdlss_reduce_block=saved_blk;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    vsdlss *S=star_graph(1000000,100000); CHECK(S);
+    vsdlss_reduction *red=NULL; clock_t c0=clock();
+    CHECK(vsdlss_reduce(S,&red)==VSDLSS_OK);
+    double sec=(double)(clock()-c0)/CLOCKS_PER_SEC;
+    CHECK(red->count>1000000 && sec<20.0);
+    vsdlss_reduction_free(red); vsdlss_spfree(S);
+    printf("tombstones: identical solutions for every threshold; 1.3M-vertex star reduced in %.2f s\n",sec);
+    return 0;
+}
+
 int main(void)
 {
+    CHECK(test_reduction_tombstones()==0);
     CHECK(test_interleaved_components_and_extract()==0);
     CHECK(test_packed_reduction_matches_records()==0);
     CHECK(test_isolate_single_component_and_zero_edge()==0);
