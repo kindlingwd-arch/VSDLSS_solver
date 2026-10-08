@@ -21,6 +21,8 @@ static void big_hint(void *p,size_t bytes)
 #endif
 }
 void *vsdlss_big_malloc(size_t bytes){void *p=malloc(bytes);big_hint(p,bytes);return p;}
+void *vsdlss_big_malloc_aligned(size_t align,size_t bytes)
+{void *p=NULL;if(posix_memalign(&p,align,bytes?bytes:align))return NULL;big_hint(p,bytes);return p;}
 void *vsdlss_big_calloc(size_t count,size_t size)
 {
     void *p=calloc(count,size);

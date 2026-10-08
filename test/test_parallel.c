@@ -326,12 +326,12 @@ static int internal_order_solve(void)
 /* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
  * takes it: several buckets, many small components, blocks straddling
  * components) against the direct loops: the same bits for every thread
- * count and both inverse-map widths, cached plans, aliasing; a non-finite
+ * count, both inverse-map widths, plain and non-temporal stores, cached plans, aliasing; a non-finite
  * RHS fails and leaves the output untouched. */
 static int two_pass_permutation(void)
 {
     vsdlss *A=two_nets(); CHECK(A);
-    const csi n=A->n, saved_min=vsdlss_perm2_min;
+    const csi n=A->n, saved_min=vsdlss_perm2_min, saved_nt=vsdlss_perm2_nt_min;
     double *b=malloc(n*8),*bb=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8);
     CHECK(b&&bb&&ref&&x);
     for(csi i=0;i<n;i++) b[i]=cos(0.021*(double)i)+0.3;
@@ -343,8 +343,9 @@ static int two_pass_permutation(void)
     vsdlss_m3_factor_free(f);
     vsdlss_perm2_min=1;
     int maxt=vsdlss_parallel_enabled()?4:1;
-    for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+    for(int nt=0;nt<2;nt++) for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
         vsdlss_m3_inverse_force64=wide;
+        vsdlss_perm2_nt_min=nt?1:(csi)1<<62;          /* non-temporal stores or plain */
         CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
         f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
         for(int rep=0;rep<2;rep++){                 /* second call: cached plan */
@@ -359,7 +360,7 @@ static int two_pass_permutation(void)
         for(csi i=0;i<n;i++) CHECK(x[i]==55);
         vsdlss_m3_factor_free(f);
     }
-    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min;
+    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_nt_min=saved_nt;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
     return 0;
