@@ -4,7 +4,7 @@ import tarfile, hashlib
 root=Path(__file__).resolve().parents[1]
 out=root/'dist';out.mkdir(exist_ok=True)
 files=[root/'Makefile',root/'README.md']
-for directory in ('src','include','test','examples','tools','docs'):
+for directory in ('src','include','test','examples','tools','docs','third_party'):
     files.extend(p for p in (root/directory).rglob('*')
                  if p.is_file() and not p.is_symlink()
                  and p.suffix in ('.c','.h','.inc','.py','.md','.tsv','.txt','.s'))
