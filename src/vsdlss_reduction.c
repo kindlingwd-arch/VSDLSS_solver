@@ -512,7 +512,7 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
         if(pk_blocked(r)) {
             int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
             (void)bt;
-            VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4))
+            VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,1))
             for(csi b=0;b<r->blocks;b++) forward_seg(pk+b,work,SV(saved,pk[b]));
             q0=r->blocks;
         }
@@ -522,7 +522,7 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
     if(blocks_valid(r)) {
         int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
         (void)bt;
-        VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4) reduction(|:bad))
+        VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,1) reduction(|:bad))
         for(csi b=0;b<r->blocks;b++)
             for(csi q=r->block_ptr[b];q<r->block_ptr[b+1]&&!bad;q++) bad|=forward_record(r,q,work,saved);
         if(bad) return status_of(bad);
@@ -554,7 +554,7 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
         if(q0) {
             int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
             (void)bt;
-            VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4) reduction(&:ok))
+            VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,1) reduction(&:ok))
             for(csi b=0;b<r->blocks;b++) ok&=backward_seg(pk+b,SV(saved,pk[b]),x);
         }
         return ok?VSDLSS_OK:VSDLSS_ERR_NONFINITE;
@@ -565,7 +565,7 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
     if(blocked) {
         int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
         (void)bt;
-        VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,4) reduction(|:bad))
+        VSDLSS_OMP(omp parallel for num_threads(bt) if(bt>1) schedule(dynamic,1) reduction(|:bad))
         for(csi b=0;b<r->blocks;b++)
             for(csi q=r->block_ptr[b+1];q>r->block_ptr[b]&&!bad;q--) bad|=backward_record(r,q-1,saved,x);
         if(bad) return status_of(bad);
