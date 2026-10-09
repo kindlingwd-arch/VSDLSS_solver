@@ -126,7 +126,7 @@ int main(int argc, char **argv)
     const csi n = r->n;
     double tail_rec = 0, rec_bytes[3] = {0};
     for (csi q = 0; q < r->pk_count; q++) {
-        double b = (double)r->pk[q].count * 12 + (double)r->pk[q].nbn * 12;
+        double b = (double)r->pk[q].count * (r->pk[q].head ? 12 : 9) + (double)r->pk[q].nbn * 12;
         rec_bytes[0] += b; rec_bytes[q < r->blocks ? 1 : 2] += b;
         if (q >= r->blocks) tail_rec += (double)r->pk[q].count;
     }

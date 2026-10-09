@@ -828,7 +828,7 @@ static int test_packed_reduction_matches_records(void)
             CHECK(a->k0==b->k0 && a->count==b->count && a->nbn==b->nbn);
             if(a->count){
                 CHECK(memcmp(a->head,b->head,(size_t)a->count*4)==0 && memcmp(a->nb,b->nb,(size_t)a->nbn*4)==0);
-                CHECK(memcmp(a->val,b->val,(size_t)(a->count+a->nbn)*8)==0);
+                CHECK(memcmp(a->piv,b->piv,(size_t)a->count*8)==0 && memcmp(a->val,b->val,(size_t)a->nbn*8)==0);
             }
         }
         double *b=malloc(n*8),*core1=malloc(n*8),*core2=malloc(n*8),*s1=malloc(n*8),*s2=malloc(n*8);

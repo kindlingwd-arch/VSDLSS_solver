@@ -276,7 +276,7 @@ static vsdlss_status relabel_component(vsdlss_m3_component_factor *cf)
     if(!id||!g2){ free(id); free(g2); return VSDLSS_ERR_OOM; }
     for(csi v=0;v<n;v++) id[v]=-1;
     csi pos=0;
-    for(csi q=0;q<r->pk_count;q++){ const vsdlss_pk_seg *g=r->pk+q;
+    for(csi q=0;q<r->pk_count;q++){ const vsdlss_pk_seg *g=r->pk+q; if(!g->head && g->count) goto skip;
         for(csi i=0;i<g->count;i++){ csi v=(csi)(g->head[i]&0x3fffffffu); if(v<0||v>=n||id[v]>=0) goto skip; id[v]=pos++; } }
     if(pos!=cnt) goto skip;
     for(csi k=0;k<core;k++){ csi v=cf->core_map[k]; if(v<0||v>=n||id[v]>=0) goto skip; id[v]=cnt+k; }
@@ -284,6 +284,15 @@ static vsdlss_status relabel_component(vsdlss_m3_component_factor *cf)
         for(csi i=0;i<g->count;i++){ uint32_t h=g->head[i]; g->head[i]=(h&~0x3fffffffu)|(uint32_t)id[h&0x3fffffffu]; }
         for(csi j=0;j<g->nbn;j++) g->nb[j]=(uint32_t)id[g->nb[j]]; }
     for(csi k=0;k<core;k++){ if(r->core_vertices) r->core_vertices[k]=id[r->core_vertices[k]]; cf->core_map[k]=cnt+k; }
+    /* Record k now pivots on vertex k: keep only the degrees (1 byte instead
+     * of 4 per record, read by both replays). */
+    for(csi q=0;q<r->pk_count;q++){ vsdlss_pk_seg *g=r->pk+q; int seq=g->count>0;
+        for(csi i=0;i<g->count&&seq;i++) seq=(csi)(g->head[i]&0x3fffffffu)==g->k0+i;
+        if(!seq) continue;
+        uint8_t *deg=(uint8_t*)malloc((size_t)g->count);
+        if(!deg){ free(id); free(g2); return VSDLSS_ERR_OOM; }
+        for(csi i=0;i<g->count;i++) deg[i]=(uint8_t)(g->head[i]>>30);
+        free(g->head); g->head=NULL; g->deg=deg; }
     for(csi v=0;v<n;v++) g2[id[v]]=cf->gather[v];
     free(cf->gather);
     cf->gather=g2; cf->core_contig=1;
@@ -428,7 +437,7 @@ static void trace_factor_bytes(const vsdlss_m3_factor *f)
         if(r) {
             if(r->core_vertices) maps+=(double)r->core_n*sizeof(csi);
             for(csi q=0;q<r->pk_count;q++)
-                replay+=(double)r->pk[q].count*(4+8)+(double)r->pk[q].nbn*(4+8);
+                replay+=(double)r->pk[q].count*(r->pk[q].head?4+8:1+8)+(double)r->pk[q].nbn*(4+8);
             if(r->records) replay+=(double)r->count*sizeof(vsdlss_elim_record);
         }
         ws+=(double)(cf->ws_local?cf->n:0)*8+(double)(cf->ws_core?r->core_n:0)*8+
@@ -1146,8 +1155,19 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         }
     }
     LEDGER_MARK(LG_SETUP,tl);
+    double before[LG_OTHER];
+    if(lg) memcpy(before,vsdlss_ledger.wall,sizeof before);
     run_components(factor,factor->disk_mode,solve_local,&ctx,results);
-    if(lg) tl=vsdlss_ledger_now();
+    if(lg) {
+        /* Concurrent components: phase sums exceed the step's wall time;
+         * scale this solve's share of them to it. */
+        double now_=vsdlss_ledger_now(), wall=now_-tl, sum=0;
+        for(int k=0;k<LG_OTHER;k++) sum+=vsdlss_ledger.wall[k]-before[k];
+        if(sum>wall && sum>0)
+            for(int k=0;k<LG_OTHER;k++)
+                vsdlss_ledger.wall[k]=before[k]+(vsdlss_ledger.wall[k]-before[k])*wall/sum;
+        tl=now_;
+    }
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
     double t0=trace_now();
     if(inplace) ;                               /* solution already in place */

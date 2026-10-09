@@ -244,7 +244,7 @@ void vsdlss_reduction_free(vsdlss_reduction *reduction)
     if(!reduction) return;
     free(reduction->records); free(reduction->core_vertices); free(reduction->block_ptr);
     if(reduction->pk) for(csi q=0;q<reduction->pk_count;q++) {
-        free(reduction->pk[q].head); free(reduction->pk[q].nb); free(reduction->pk[q].val);
+        free(reduction->pk[q].head); free(reduction->pk[q].deg); free(reduction->pk[q].nb); free(reduction->pk[q].piv); free(reduction->pk[q].val);
     }
     free(reduction->pk);
     vsdlss_spfree(reduction->core); free(reduction);
@@ -267,9 +267,9 @@ typedef struct { csi s, i, o; } pk_cursor;
 
 static void decode(const vsdlss_pk_seg *g, csi i, csi o, vsdlss_elim_record *t)
 {
-    uint32_t h=g->head[i]; csi d=(csi)(h>>30);
-    t->vertex=(csi)(h&PK_VMASK); t->degree=d; t->pivot=g->val[i+o];
-    for(csi j=0;j<d;j++) { t->neighbor[j]=g->nb[o+j]; t->multiplier[j]=g->val[i+o+1+j]; }
+    csi d=vsdlss_pk_degree(g,i);
+    t->vertex=vsdlss_pk_vertex(g,i); t->degree=d; t->pivot=g->piv[i];
+    for(csi j=0;j<d;j++) { t->neighbor[j]=g->nb[o+j]; t->multiplier[j]=g->val[o+j]; }
 }
 
 static const vsdlss_elim_record *next_record(const vsdlss_reduction *r, csi k, pk_cursor *c,
@@ -295,7 +295,7 @@ static const vsdlss_elim_record *prev_record(const vsdlss_reduction *r, csi k, p
     const vsdlss_pk_seg *g;
     if(r->records) return r->records+k;
     while(c->i==0) { c->s--; c->i=r->pk[c->s].count; c->o=r->pk[c->s].nbn; }
-    g=r->pk+c->s; c->i--; c->o-=(csi)(g->head[c->i]>>30);
+    g=r->pk+c->s; c->i--; c->o-=vsdlss_pk_degree(g,c->i);
     decode(g,c->i,c->o,t);
     return t;
 }
@@ -454,12 +454,25 @@ static vsdlss_status status_of(int bad)
  * backward_record. */
 static void forward_seg(const vsdlss_pk_seg *g, double *restrict work, double *restrict saved)
 {
-    const uint32_t *restrict head=g->head, *restrict nb=g->nb;
+    const uint32_t *restrict nb=g->nb;
     const double *restrict val=g->val;
     csi o=0;
+    if(!g->head) {                     /* relabelled: vertex k0+i, 1-byte degrees */
+        const uint8_t *restrict deg=g->deg; const csi k0=g->k0;
+        for(csi i=0;i<g->count;i++) {
+            csi d=deg[i];
+            const double *m=val+o; const uint32_t *w=nb+o;
+            double s=work[k0+i];
+            if(saved) saved[i]=s;
+            for(csi j=0;j<d;j++) { double update=m[j]*s; work[w[j]]-=update; }
+            o+=d;
+        }
+        return;
+    }
+    const uint32_t *restrict head=g->head;
     for(csi i=0;i<g->count;i++) {
         uint32_t h=head[i]; csi d=(csi)(h>>30);
-        const double *m=val+i+o+1; const uint32_t *w=nb+o;
+        const double *m=val+o; const uint32_t *w=nb+o;
         double s=work[h&PK_VMASK];
         if(saved) saved[i]=s;
         for(csi j=0;j<d;j++) { double update=m[j]*s; work[w[j]]-=update; }
@@ -470,16 +483,31 @@ static void forward_seg(const vsdlss_pk_seg *g, double *restrict work, double *r
 /* Returns 0 when a recovered value is not finite. */
 static int backward_seg(const vsdlss_pk_seg *g, const double *restrict saved, double *restrict x)
 {
-    const uint32_t *restrict head=g->head, *restrict nb=g->nb;
-    const double *restrict val=g->val;
+    const uint32_t *restrict nb=g->nb;
+    const double *restrict piv=g->piv, *restrict val=g->val;
     csi o=g->nbn; int ok=1;
+    if(!g->head) {
+        const uint8_t *restrict deg=g->deg;
+        for(csi i=g->count;i>0;) {
+            i--;
+            csi d=deg[i], v_=g->k0+i;
+            o-=d;
+            const double *v=val+o; const uint32_t *w=nb+o;
+            double value=(saved?saved[i]:x[v_])/piv[i];
+            for(csi j=0;j<d;j++) { double update=v[j]*x[w[j]]; value-=update; }
+            ok&=isfinite(value)!=0;
+            x[v_]=value;
+        }
+        return ok;
+    }
+    const uint32_t *restrict head=g->head;
     for(csi i=g->count;i>0;) {
         i--;
         uint32_t h=head[i]; csi d=(csi)(h>>30);
         o-=d;
-        const double *v=val+i+o; const uint32_t *w=nb+o;
-        double value=(saved?saved[i]:x[h&PK_VMASK])/v[0];
-        for(csi j=0;j<d;j++) { double update=v[1+j]*x[w[j]]; value-=update; }
+        const double *v=val+o; const uint32_t *w=nb+o;
+        double value=(saved?saved[i]:x[h&PK_VMASK])/piv[i];
+        for(csi j=0;j<d;j++) { double update=v[j]*x[w[j]]; value-=update; }
         ok&=isfinite(value)!=0;
         x[h&PK_VMASK]=value;
     }
@@ -593,22 +621,23 @@ static vsdlss_status pack_segment(const vsdlss_reduction *r, const vsdlss_elim_r
     if(!cnt) return VSDLSS_OK;
     uint32_t *head=(uint32_t *)malloc((size_t)cnt*sizeof(uint32_t));
     uint32_t *nb=(uint32_t *)malloc((size_t)(nbn?nbn:1)*sizeof(uint32_t));
-    double *val=(double *)malloc((size_t)(cnt+nbn)*sizeof(double));
-    if(!head||!nb||!val) { free(head); free(nb); free(val); return VSDLSS_ERR_OOM; }
+    double *piv=(double *)malloc((size_t)cnt*sizeof(double));
+    double *val=(double *)malloc((size_t)(nbn?nbn:1)*sizeof(double));
+    if(!head||!nb||!piv||!val) { free(head); free(nb); free(piv); free(val); return VSDLSS_ERR_OOM; }
     for(csi i=0,o=0;i<cnt;i++) {
         const vsdlss_elim_record *e=rec+i;
         head[i]=(uint32_t)e->vertex|((uint32_t)e->degree<<30);
-        val[i+o]=e->pivot;
-        for(csi j=0;j<e->degree;j++) { nb[o+j]=(uint32_t)e->neighbor[j]; val[i+o+1+j]=e->multiplier[j]; }
+        piv[i]=e->pivot;
+        for(csi j=0;j<e->degree;j++) { nb[o+j]=(uint32_t)e->neighbor[j]; val[o+j]=e->multiplier[j]; }
         o+=e->degree;
     }
-    g->count=cnt; g->nbn=nbn; g->head=head; g->nb=nb; g->val=val;
+    g->count=cnt; g->nbn=nbn; g->head=head; g->nb=nb; g->piv=piv; g->val=val;
     return VSDLSS_OK;
 }
 
 static void free_segments(vsdlss_reduction *r)
 {
-    if(r->pk) for(csi q=0;q<r->pk_count;q++) { free(r->pk[q].head); free(r->pk[q].nb); free(r->pk[q].val); }
+    if(r->pk) for(csi q=0;q<r->pk_count;q++) { free(r->pk[q].head); free(r->pk[q].deg); free(r->pk[q].nb); free(r->pk[q].piv); free(r->pk[q].val); }
     free(r->pk); r->pk=NULL; r->pk_count=0;
 }
 

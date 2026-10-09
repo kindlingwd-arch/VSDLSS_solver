@@ -23,8 +23,16 @@ typedef struct vsdlss_elim_record {
 typedef struct vsdlss_pk_seg {
     csi k0, count, nbn;
     uint32_t *head, *nb;
-    double *val;
+    uint8_t *deg;
+    double *piv, *val;
 } vsdlss_pk_seg;
+
+/* Degree and pivot vertex of record i of a packed segment, in either form
+ * (head, or deg after a solve-order relabel; see vsdlss_reduction). */
+static inline csi vsdlss_pk_degree(const vsdlss_pk_seg *g, csi i)
+{ return g->head ? (csi)(g->head[i] >> 30) : (csi)g->deg[i]; }
+static inline csi vsdlss_pk_vertex(const vsdlss_pk_seg *g, csi i)
+{ return g->head ? (csi)(g->head[i] & 0x3fffffffu) : g->k0 + i; }
 
 typedef struct vsdlss_reduction {
     csi n, count, core_n;
@@ -40,8 +48,11 @@ typedef struct vsdlss_reduction {
      * cover records [pk[s].k0, pk[s].k0 + pk[s].count) in order.  When the
      * reduction is blocked, segment b < blocks is block b and the last one
      * holds the sequential tail.  Within a segment, record i has head[i] =
-     * vertex | degree << 30, neighbours nb[o..o+d) and pivot, multipliers
-     * val[i+o], val[i+o+1..i+o+d] (o = sum of the degrees before i).  Packed
+     * vertex | degree << 30, pivot piv[i], neighbours nb[o..o+d) and
+     * multipliers val[o..o+d) (o = sum of the degrees before i); the forward
+     * replay does not read the pivots, so they are kept apart.  When the
+     * vertex of every record k is k itself (solve-order relabel), head is
+     * replaced by deg[i] = degree (head NULL, vertex = k0 + i).  Packed
      * records were validated (indices in range, pivots and multipliers
      * finite, pivots nonzero), so replay needs no per-entry checks. */
     csi pk_count;

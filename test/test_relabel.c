@@ -6,6 +6,7 @@
 #include "../src/vsdlss_m3_internal.h"
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 extern int vsdlss_m3_relabel;
 static int fails;
 #define CHECK(c,msg,...) do{ if(!(c)){ fails++; fprintf(stderr,"FAIL: " msg "\n",__VA_ARGS__); } }while(0)
@@ -27,6 +28,45 @@ static vsdlss *grid3(csi m)
     A->p[n]=nz; return A;
 }
 
+/* A relabelled reduction keeps 1-byte degrees instead of head words.  The
+ * same records in head form (vertex k0+i) must replay bitwise identically:
+ * in-place forward/backward and the cursor paths of reduce_rhs/recover. */
+static void compact_form(const vsdlss_m3_factor *f,const char *name)
+{
+    for(csi c=0;c<f->count;c++){
+        const vsdlss_m3_component_factor *cf=f->component+c;
+        const vsdlss_reduction *r=cf->reduction;
+        if(!cf->core_contig || !r->count) continue;
+        int compact=1; for(csi q=0;q<r->pk_count;q++) if(r->pk[q].count && (r->pk[q].head || !r->pk[q].deg)) compact=0;
+        CHECK(compact,"%s relabelled component %lld not in 1-byte degree form",name,(long long)c);
+        if(!compact) continue;
+        const csi n=r->n,cnt=r->count,core=r->core_n;
+        vsdlss_pk_seg *seg=malloc((size_t)r->pk_count*sizeof(*seg));
+        csi *cv=malloc((size_t)(core?core:1)*sizeof(csi));
+        for(csi k=0;k<core;k++) cv[k]=cnt+k;
+        for(csi q=0;q<r->pk_count;q++){
+            seg[q]=r->pk[q]; seg[q].deg=NULL;
+            seg[q].head=malloc((size_t)(seg[q].count?seg[q].count:1)*4);
+            for(csi i=0;i<seg[q].count;i++) seg[q].head[i]=(uint32_t)(seg[q].k0+i)|((uint32_t)r->pk[q].deg[i]<<30);
+        }
+        vsdlss_reduction a=*r,h=*r; a.core_vertices=cv; h.core_vertices=cv; h.pk=seg;
+        double *b=malloc(n*8),*w1=malloc(n*8),*w2=malloc(n*8),*c1=malloc((core+1)*8),*c2=malloc((core+1)*8);
+        double *s1=malloc(cnt*8),*s2=malloc(cnt*8);
+        for(csi i=0;i<n;i++) b[i]=cos(0.29*(double)i)+0.4;
+        memcpy(w1,b,n*8); memcpy(w2,b,n*8);
+        CHECK(vsdlss_reduce_forward_inplace(&a,w1,NULL)==VSDLSS_OK && vsdlss_reduce_forward_inplace(&h,w2,NULL)==VSDLSS_OK,"%s fwd",name);
+        CHECK(!memcmp(w1,w2,n*8),"%s compact forward differs",name);
+        CHECK(vsdlss_reduce_backward_inplace(&a,NULL,w1)==VSDLSS_OK && vsdlss_reduce_backward_inplace(&h,NULL,w2)==VSDLSS_OK,"%s bwd",name);
+        CHECK(!memcmp(w1,w2,n*8),"%s compact backward differs",name);
+        CHECK(vsdlss_reduce_rhs(&a,b,c1,s1)==VSDLSS_OK && vsdlss_reduce_rhs(&h,b,c2,s2)==VSDLSS_OK,"%s rhs",name);
+        CHECK(!memcmp(c1,c2,core*8) && !memcmp(s1,s2,cnt*8),"%s compact cursor rhs differs",name);
+        CHECK(vsdlss_reduce_recover(&a,s1,c1,w1)==VSDLSS_OK && vsdlss_reduce_recover(&h,s2,c2,w2)==VSDLSS_OK,"%s recover",name);
+        CHECK(!memcmp(w1,w2,n*8),"%s compact cursor recover differs",name);
+        for(csi q=0;q<r->pk_count;q++) free(seg[q].head);
+        free(seg);free(cv);free(b);free(w1);free(w2);free(c1);free(c2);free(s1);free(s2);
+    }
+}
+
 static void run(vsdlss *A,const char *name,int threads)
 {
     csi n=A->n;
@@ -40,6 +80,9 @@ static void run(vsdlss *A,const char *name,int threads)
     int contig=0; for(csi c=0;c<f1->count;c++) contig+=f1->component[c].core_contig;
     for(csi c=0;c<f0->count;c++) CHECK(!f0->component[c].core_contig,"%s relabel off but contiguous",name);
     CHECK(contig>0,"%s no relabelled component",name);
+    for(csi c=0;c<f0->count;c++) for(csi q=0;q<f0->component[c].reduction->pk_count;q++)
+        CHECK(!f0->component[c].reduction->pk[q].deg,"%s relabel off but compact records",name);
+    compact_form(f1,name);
     CHECK(vsdlss_m3_solve(f0,b,x0)==VSDLSS_OK && vsdlss_m3_solve(f1,b,x1)==VSDLSS_OK,"%s solve",name);
     CHECK(!memcmp(x0,x1,n*8),"%s relabel changed the solution",name);
     CHECK(vsdlss_m3_solve_many(f0,2,b,n,x0,n)==VSDLSS_OK && vsdlss_m3_solve_many(f1,2,b,n,x1,n)==VSDLSS_OK,"%s many",name);
