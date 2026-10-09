@@ -261,6 +261,7 @@ static int sn_reorder_on(void)
  * packed/internal order (vsdlss_m3_export_packed_permutation) changes with
  * it.  Applies to packed reductions of renumbered (BFS) components. */
 int vsdlss_m3_relabel = -1;
+void (*vsdlss_m3_core_hook)(csi, const vsdlss *) = NULL;
 static int relabel_on(void)
 {
     if(vsdlss_m3_relabel<0){ const char *e=getenv("VSDLSS_RELABEL"); vsdlss_m3_relabel=e?atoi(e):1; }
@@ -328,6 +329,7 @@ static vsdlss_status factor_component(void *vctx, csi component)
         if(status!=VSDLSS_OK) goto done;
         permuted=vsdlss_symperm(r->core,pinv,1);
         if(!permuted) {status=VSDLSS_ERR_OOM;goto done;}
+        if(vsdlss_m3_core_hook) vsdlss_m3_core_hook(component,permuted);
         /* The solve reads core unknown k at local vertex core_vertices[q[k]]. */
         for(csi k=0;k<r->core_n;k++) q[k]=r->core_vertices[q[k]];
         vsdlss_spfree(r->core); r->core=NULL;   /* only the disk mode reads it later */
