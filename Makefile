@@ -278,6 +278,11 @@ bench_core: test/bench_core.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal
 bench_phase: test/bench_phase.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_phase.c $(LIBSRCS) $(LDLIBS)
 
+# Components + weighted adjacency phase alone, thread sweep, bitwise check:
+#   ./bench_components SIDE[:CHAIN[:NETS]] "threads" [reps] [shuffle]
+bench_components: test/bench_components.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_components.c $(LIBSRCS) $(LDLIBS)
+
 # Single-solve scaling (one factor, several solve thread counts) and the
 # internal-order solve; PG_DUMP=file exports the system for bench_cholmod.
 bench_pg_solve: test/bench_pg_solve.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h

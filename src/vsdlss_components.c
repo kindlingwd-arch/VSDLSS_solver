@@ -3,7 +3,9 @@
 
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 static int checked_count(csi n, size_t width)
 {
@@ -26,6 +28,24 @@ void vsdlss_wgraph_free(vsdlss_wgraph *g)
     if (!g) return;
     free(g->ptr); free(g->idx); free(g->val); free(g->diag); free(g);
 }
+
+/* VSDLSS_TRACE=2 also prints the steps of this phase to stderr. */
+static int step_trace_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) { const char *e = getenv("VSDLSS_TRACE"); cached = e && atoi(e) >= 2; }
+    return cached;
+}
+static double step_now(void)
+{
+#ifdef _OPENMP
+    return omp_get_wtime();
+#else
+    return (double)clock() / CLOCKS_PER_SEC;
+#endif
+}
+#define STEP(label, t0) do { if (step_trace_on()) { double t1_ = step_now(); \
+    fprintf(stderr, "vsdlss trace:   components: %-12s %8.3f s\n", label, t1_ - (t0)); (t0) = t1_; } } while (0)
 
 /* Lock-free union-find with linking by index: the larger root is always
  * hung under the smaller one, so every root is the minimum vertex of its
@@ -51,6 +71,34 @@ static void uf_union(csi *parent, csi a, csi b)
         if (__atomic_compare_exchange_n(&parent[a], &expect, b, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
             return;
     }
+}
+
+/* Breadth-first search from queue[0] (already marked); label is stored on
+ * discovery, unvisited marks are < 0 (serial_marks) or >= 0 (union-find
+ * roots).  Returns the queue length; the order equals the plain loop's.  On large shuffled graphs every
+ * step is a dependent cache miss (offset -> list -> mark), so the three
+ * loads are prefetched for vertices further down the queue. */
+#define BFS_PF_OFFSET 24
+#define BFS_PF_LIST 12
+#define BFS_PF_MARK 6
+static csi bfs_run(const csi *ptr, const csi *adj, csi *mark, csi *queue,
+                   csi label, int serial_marks)
+{
+    csi head = 0, tail = 1;
+    while (head < tail) {
+        if (head + BFS_PF_OFFSET < tail) __builtin_prefetch(&ptr[queue[head + BFS_PF_OFFSET]]);
+        if (head + BFS_PF_LIST < tail) __builtin_prefetch(&adj[ptr[queue[head + BFS_PF_LIST]]]);
+        if (head + BFS_PF_MARK < tail) {
+            csi u = queue[head + BFS_PF_MARK];
+            for (csi at = ptr[u]; at < ptr[u + 1]; ++at) __builtin_prefetch(&mark[adj[at]], 1);
+        }
+        csi v = queue[head++];
+        for (csi at = ptr[v]; at < ptr[v + 1]; ++at) {
+            csi w = adj[at];
+            if (serial_marks ? mark[w] < 0 : mark[w] >= 0) { mark[w] = label; queue[tail++] = w; }
+        }
+    }
+    return tail;
 }
 
 /* Connected components, BFS order within each component and (optionally)
@@ -87,6 +135,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
         status = vsdlss_validate_upper_csc(A);
         if (status != VSDLSS_OK) return status;
     }
+    double t0 = step_trace_on() ? step_now() : 0;
     const csi n = A->n, *Ap = A->p, *Ai = A->i; const double *Ax = A->x;
     int T = vsdlss_parallel_width((double)Ap[n] * 4);
     /* Every pass here is memory bound.  On a 2-vCPU VM none of the parallel
@@ -147,6 +196,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
         }
         adj_offset[seed + 1] += adj_offset[seed];
     }
+    STEP("degrees", t0);
     if (!checked_count(adjacency_n, sizeof(csi))) { status = VSDLSS_ERR_OOM; goto fail; }
     if (adjacency_n > 0) {
         adjacent = (csi *)vsdlss_big_malloc((size_t)adjacency_n * sizeof(csi));
@@ -199,6 +249,7 @@ static vsdlss_status components_build_impl(const vsdlss *A,
         }
     }
 
+    STEP(UF ? "fill+unions" : "fill", t0);
     /* Component labels.  Serial: one BFS after another, seeds in increasing
      * order.  Parallel: union-find, roots (= smallest vertices) numbered in
      * increasing order, then the BFS run per component. */
@@ -217,15 +268,9 @@ static vsdlss_status components_build_impl(const vsdlss *A,
                 if (!grown) { status = VSDLSS_ERR_OOM; goto fail; }
                 sizes = grown; cap *= 2;
             }
-            csi *queue = components->order + discovered, head = 0, tail = 1;
+            csi *queue = components->order + discovered, tail;
             queue[0] = seed; mark[seed] = count;
-            while (head < tail) {
-                csi v = queue[head++];
-                for (csi at = adj_offset[v]; at < adj_offset[v + 1]; ++at) {
-                    csi w = adjacent[at];
-                    if (mark[w] < 0) { mark[w] = count; queue[tail++] = w; }
-                }
-            }
+            tail = bfs_run(adj_offset, adjacent, mark, queue, count, 1);
             discovered += tail; sizes[count++] = tail;
         }
         components->count = count;
@@ -264,31 +309,59 @@ static vsdlss_status components_build_impl(const vsdlss *A,
         VSDLSS_OMP(omp parallel for num_threads(T) schedule(dynamic,1))
         for (csi s = 0; s < count; ++s) {
             const csi comp = sched[s], root = roots[comp];
-            csi *queue = components->order + components->offset[comp], head = 0, tail = 1;
+            csi *queue = components->order + components->offset[comp];
             queue[0] = root; mark[root] = -1 - comp;
-            while (head < tail) {
-                csi v = queue[head++];
-                for (csi at = adj_offset[v]; at < adj_offset[v + 1]; ++at) {
-                    csi w = adjacent[at];
-                    if (mark[w] >= 0) { mark[w] = -1 - comp; queue[tail++] = w; }
-                }
-            }
+            bfs_run(adj_offset, adjacent, mark, queue, -1 - comp, 0);
         }
         VSDLSS_OMP(omp parallel for num_threads(T) schedule(static))
         for (csi v = 0; v < n; ++v) mark[v] = -1 - mark[v];
     }
-    for (component = 0; component < count; ++component) sizes[component] = 0;
-    for (seed = 0; seed < n; ++seed) {
-        component = mark[seed];
-        csi position = sizes[component]++;
-        components->local_of[seed] = position;
-        components->vertices[components->offset[component] + position] = seed;
+    STEP("bfs", t0);
+    /* local_of / vertices: vertices of each component in increasing order.
+     * With threads and few components (the usual one net or VDD/GND pair),
+     * P vertex ranges count their members per component, then each range
+     * writes from its own prefix offset: same result as the serial loop. */
+    int P = T > 1 && count <= n / (64 * (csi)T) ? T : 1;
+    csi *range_at = P > 1 ? (csi *)malloc((size_t)P * (size_t)count * sizeof(csi)) : NULL;
+    if (range_at) {
+        VSDLSS_OMP(omp parallel for num_threads(P) schedule(static,1))
+        for (int t = 0; t < P; ++t) {
+            csi *at = range_at + (size_t)t * (size_t)count;
+            for (csi c = 0; c < count; ++c) at[c] = 0;
+            for (csi v = n * t / P; v < n * (t + 1) / P; ++v) at[mark[v]]++;
+        }
+        for (component = 0; component < count; ++component) {
+            csi run = components->offset[component];
+            for (int t = 0; t < P; ++t) {
+                csi *at = range_at + (size_t)t * (size_t)count + component, c = *at;
+                *at = run; run += c;
+            }
+        }
+        VSDLSS_OMP(omp parallel for num_threads(P) schedule(static,1))
+        for (int t = 0; t < P; ++t) {
+            csi *at = range_at + (size_t)t * (size_t)count;
+            for (csi v = n * t / P; v < n * (t + 1) / P; ++v) {
+                csi c = mark[v], position = at[c]++;
+                components->local_of[v] = position - components->offset[c];
+                components->vertices[position] = v;
+            }
+        }
+        free(range_at);
+    } else {
+        for (component = 0; component < count; ++component) sizes[component] = 0;
+        for (seed = 0; seed < n; ++seed) {
+            component = mark[seed];
+            csi position = sizes[component]++;
+            components->local_of[seed] = position;
+            components->vertices[components->offset[component] + position] = seed;
+        }
     }
     /* The concatenated BFS queues follow `offset`; convert global vertices
      * to local indices. */
     VSDLSS_OMP(omp parallel for num_threads(T) if(T>1) schedule(static))
     for (csi v = 0; v < n; ++v)
         components->order[v] = components->local_of[components->order[v]];
+    STEP("maps", t0);
     if (graph) {
         vsdlss_wgraph *g = (vsdlss_wgraph *)calloc(1, sizeof(*g));
         if (!g) { status = VSDLSS_ERR_OOM; goto fail; }

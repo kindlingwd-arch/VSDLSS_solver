@@ -280,7 +280,7 @@ int main(int argc,char **argv)
     double lbytes=0,ridx=0,redb=0; csi lnz=0,core=0,maxw=0,npan=0;
     for(csi k=0;k<f->count;k++){ const vsdlss_m3_component_factor *cf=f->component+k; const vsdlss_reduction *r=cf->reduction;
         core+=r->core_n;
-        for(csi q=0;q<r->pk_count;q++) redb+=4.0*r->pk[q].count+4.0*r->pk[q].nbn+8.0*(r->pk[q].count+r->pk[q].nbn);
+        for(csi q=0;q<r->pk_count;q++) redb+=(r->pk[q].head?4.0:1.0)*r->pk[q].count+4.0*r->pk[q].nbn+8.0*(r->pk[q].count+r->pk[q].nbn);
         if(cf->numeric){ const vsdlss_sn_factor *s=cf->numeric; lnz+=s->l_nnz; lbytes+=8.0*s->panel_offset[s->count]; ridx+=8.0*s->row_ptr[s->count]; npan+=s->count;
             for(csi q=0;q<s->count;q++){csi w=s->column_start[q+1]-s->column_start[q]; if(w>maxw)maxw=w;} } }
     if(getenv("TR_WE")){ /* (w,e) histogram of core panels, weighted by bytes */
@@ -291,7 +291,7 @@ int main(int argc,char **argv)
                 hn[bw][be]++; hb[bw][be]+=8.0*(w*(w+1)/2+w*e); } }
         long long dh[4]={0}, runs=0; int last=-1;
         for(csi k=0;k<f->count;k++){ const vsdlss_reduction *r=f->component[k].reduction;
-            for(csi q=0;q<r->pk_count;q++) for(csi i=0;i<r->pk[q].count;i++){ int d=(int)(r->pk[q].head[i]>>30); dh[d]++; if(d!=last) runs++; last=d; } }
+            for(csi q=0;q<r->pk_count;q++) for(csi i=0;i<r->pk[q].count;i++){ int d=(int)vsdlss_pk_degree(r->pk+q,i); dh[d]++; if(d!=last) runs++; last=d; } }
         { long long nb_=0,maxb=0,tail=0,tot=0; for(csi k=0;k<f->count;k++){ const vsdlss_reduction *r=f->component[k].reduction; if(r->blocks>=1&&r->pk_count==r->blocks+1){ nb_+=r->blocks; for(csi b=0;b<r->blocks;b++){ if(r->pk[b].count>maxb)maxb=r->pk[b].count; } tail+=r->pk[r->blocks].count; } tot+=r->count; }
           printf("# replay blocks %lld (largest %lld records), sequential tail %lld of %lld records\n",nb_,maxb,tail,tot); }
         printf("# replay records by degree 0/1/2/3: %lld %lld %lld %lld, degree changes %lld\n",dh[0],dh[1],dh[2],dh[3],runs);
