@@ -192,9 +192,9 @@ static int solve_kernel(void)
 }
 
 /* Two power-grid-like nets (chains with taps between junctions), plus
- * isolated vertices and pairs, numbered in shuffled order.  Upper CSC with
- * sorted columns. */
-static vsdlss *two_nets(void)
+ * (extras) isolated vertices and pairs, numbered in shuffled order.  Upper
+ * CSC with sorted columns. */
+static vsdlss *two_nets_ex(int extras)
 {
     enum { G=40, CH=4 };
     csi cap=2*(2*G*G*(CH+2)+G*G)+2000, m=0, n=0;
@@ -210,8 +210,10 @@ static vsdlss *two_nets(void)
             ea[m]=prev; eb[m++]=base+y2*g+x2;
         }
     }
-    for(int k=0;k<100;k++){ ea[m]=n; eb[m++]=n+1; n+=2; }
-    n+=300;                                     /* isolated vertices */
+    if(extras){
+        for(int k=0;k<100;k++){ ea[m]=n; eb[m++]=n+1; n+=2; }
+        n+=300;                                 /* isolated vertices */
+    }
     csi *perm=malloc(n*sizeof(csi)); uint64_t r=12345;
     for(csi i=0;i<n;i++) perm[i]=i;
     for(csi i=n-1;i>0;i--){ r^=r<<13; r^=r>>7; r^=r<<17; csi j=(csi)(r%(uint64_t)(i+1)),t=perm[i]; perm[i]=perm[j]; perm[j]=t; }
@@ -228,17 +230,19 @@ static vsdlss *two_nets(void)
     free(ea); free(eb); free(perm); free(cnt); return A;
 }
 
-/* Components, BFS order and weighted adjacency are identical for 1, 3 and 4
- * threads (serial BFS vs union-find + concurrent BFS, row-range fill). */
-static int components_threads_equal(void)
+static vsdlss *two_nets(void){ return two_nets_ex(1); }
+
+/* Components, BFS order and weighted adjacency are identical for 1 to 8
+ * threads (serial BFS vs union-find + concurrent BFS, row-range fill, and
+ * for few components the per-range vertex maps). */
+static int components_equal_on(vsdlss *A, csi expect_count)
 {
-    vsdlss *A=two_nets(); CHECK(A);
     const csi n=A->n;
     vsdlss_components *c1=NULL,*c2=NULL; vsdlss_wgraph *g1=NULL,*g2=NULL;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     CHECK(vsdlss_components_build_graph(A,&c1,&g1)==VSDLSS_OK);
-    CHECK(c1->count==2+100+300);
-    for(int t=3;t<=4;t++){
+    CHECK(c1->count==expect_count);
+    for(int t=2;t<=8;t++){
         CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
         CHECK(vsdlss_components_build_graph(A,&c2,&g2)==VSDLSS_OK);
         CHECK(c2->count==c1->count);
@@ -253,6 +257,18 @@ static int components_threads_equal(void)
         CHECK(memcmp(g1->diag,g2->diag,n*sizeof(double))==0);
         vsdlss_components_free(c2); vsdlss_wgraph_free(g2); c2=NULL; g2=NULL;
     }
+    vsdlss_components_free(c1); vsdlss_wgraph_free(g1);
+    return 0;
+}
+
+static int components_threads_equal(void)
+{
+    vsdlss *nets=two_nets_ex(0); CHECK(nets);
+    CHECK(components_equal_on(nets,2)==0);
+    vsdlss_spfree(nets);
+    vsdlss *A=two_nets(); CHECK(A);
+    const csi n=A->n;
+    CHECK(components_equal_on(A,2+100+300)==0);
     /* Full factor/solve with the two nets as concurrent components. */
     double *b=malloc(n*8),*x1=malloc(n*8),*x2=malloc(n*8); CHECK(b&&x1&&x2);
     for(csi i=0;i<n;i++) b[i]=sin(0.01*(double)i)+0.5;
@@ -275,7 +291,7 @@ static int components_threads_equal(void)
         vsdlss_m3_factor_free(f); f=NULL;
     }
     double eta; CHECK(vsdlss_backward_error(A,x1,b,&eta)==VSDLSS_OK&&eta<1e-13);
-    vsdlss_components_free(c1); vsdlss_wgraph_free(g1); vsdlss_spfree(A); free(b); free(x1); free(x2);
+    vsdlss_spfree(A); free(b); free(x1); free(x2);
     return 0;
 }
 

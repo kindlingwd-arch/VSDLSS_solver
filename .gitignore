@@ -55,3 +55,4 @@
 /test_relabel
 /test_kernels_asan
 /build/
+/bench_components

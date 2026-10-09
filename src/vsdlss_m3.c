@@ -518,6 +518,7 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];goto fail;
     }
+    TRACE("components factored",t0);     /* wall time of the per-component lines */
     free(results); results=NULL; free(inputs); inputs=NULL;
     status=compact_maps(factor);
     if(status!=VSDLSS_OK) goto fail;
@@ -539,7 +540,7 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     status=build_inverse(factor);
     if(status!=VSDLSS_OK) goto fail;
     vsdlss_release_free_memory(1);
-    TRACE("release free memory",t0);
+    TRACE("maps+inverse+trim",t0);
     if(trace_on()) trace_factor_bytes(factor);
     *out=factor; return VSDLSS_OK;
 fail:
