@@ -210,6 +210,10 @@ extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
 extern csi vsdlss_perm2_nt_min;      /* tests: smallest n for its non-temporal stores */
+/* Benchmarks (bench_core): called with each component's ordered core
+ * matrix (upper CSC, postordered) before its supernodal analysis; may run
+ * concurrently for different components.  NULL in normal use. */
+extern void (*vsdlss_m3_core_hook)(csi component, const vsdlss *core);
 extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
 /* Return free heap memory to the system when VSDLSS_TRIM >= level (glibc
  * malloc_trim; no-op elsewhere).  Levels: 1 end of factorization, 2 between
