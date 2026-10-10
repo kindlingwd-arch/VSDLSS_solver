@@ -379,6 +379,11 @@ static vsdlss_status factor_component(void *vctx, csi component)
         status=relabel_component(cf);
         TRACE("solve-order relabel",t0);
     }
+    /* The tail's forward plan needs the final vertex numbering. */
+    if(status==VSDLSS_OK && !factor->disk_mode && cf->reduction) {
+        status=vsdlss_reduce_tail_plan(cf->reduction);
+        if(cf->reduction->tail_levels) TRACE("reduction tail plan",t0);
+    }
     /* 32-bit core map once the numbering is final (in memory only). */
     if(status==VSDLSS_OK && !factor->disk_mode && cf->core_map && cf->n<=(csi)UINT32_MAX) {
         const csi cn=cf->reduction->core_n;

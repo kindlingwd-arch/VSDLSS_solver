@@ -301,17 +301,17 @@ static int test_reduction_rhs_nonempty_core_and_transactions(void)
     vsdlss_reduction_free(r);
 
     { vsdlss_elim_record record={0,1,{1,0,0},1,{2,0,0}};
-      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL,0,NULL};
+      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
       double huge[]={DBL_MAX,DBL_MAX}, outcore[]={8}, outsaved[]={9};
       CHECK(vsdlss_reduce_rhs(&fake,huge,outcore,outsaved)==VSDLSS_ERR_NONFINITE);
       CHECK(outcore[0]==8 && outsaved[0]==9); }
-    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL,0,NULL};
+    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
       double rhs[]={3,4}, core_only[2], recovered[2];
       CHECK(vsdlss_reduce_rhs(&no_elimination,rhs,core_only,NULL)==VSDLSS_OK);
       CHECK(core_only[0]==3 && core_only[1]==4);
       CHECK(vsdlss_reduce_recover(&no_elimination,NULL,core_only,recovered)==VSDLSS_OK);
       CHECK(recovered[0]==3 && recovered[1]==4); }
-    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL,0,NULL};
+    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
       CHECK(vsdlss_reduce_rhs(&empty,NULL,NULL,NULL)==VSDLSS_OK);
       CHECK(vsdlss_reduce_recover(&empty,NULL,NULL,NULL)==VSDLSS_OK); }
     return 0;
@@ -935,6 +935,137 @@ static vsdlss *hub_graph(csi n, csi hubs, csi fan)
     free(ea); free(eb); free(mark); return A;
 }
 
+/* Level-scheduled sequential tail: the same bits as the serial tail replay
+ * for every thread count, both record layouts (relabel on: 1-byte degrees;
+ * off: head words) and solve / solve_many, on a grid whose edges are chains
+ * (the chains crossing block boundaries form the tail). */
+extern int vsdlss_m3_relabel;
+static int test_reduction_tail_levels(void)
+{
+    const csi saved_blk=vsdlss_reduce_block, saved_tail=vsdlss_reduce_tail_min, saved_grain=vsdlss_reduce_tail_grain;
+    const int saved_relabel=vsdlss_m3_relabel;
+    vsdlss_reduce_tail_grain=1;             /* small levels: still run them in parallel */
+    const csi G=40, S=3;
+    test_edge *edge=malloc((size_t)(2*G*(G-1)*(S+1))*sizeof(*edge)); csi e=0, n=G*G;
+    CHECK(edge);
+    for(csi y=0;y<G;y++) for(csi x=0;x<G;x++) for(int dir=0;dir<2;dir++) {
+        csi x2=x+(dir==0), y2=y+(dir==1), prev=y*G+x;
+        if(x2>=G||y2>=G) continue;
+        for(csi c=0;c<S;c++) { csi node=n++; edge[e++]=(test_edge){prev,node,1.0+0.001*(double)(e%97)}; prev=node; }
+        edge[e++]=(test_edge){prev,y2*G+x2,0.5+0.002*(double)(e%89)};
+    }
+    vsdlss *A=make_laplacian(n,edge,e); CHECK(A); free(edge);
+    double *b=malloc((size_t)n*16), *ref=malloc((size_t)n*16), *x=malloc((size_t)n*16);
+    CHECK(b&&ref&&x);
+    for(csi i=0;i<2*n;i++) b[i]=sin(0.29*(double)i)+0.1;
+    vsdlss_reduce_block=256;
+    int scheduled=0;
+    for(int relabel=0;relabel<2;relabel++) {
+        vsdlss_m3_relabel=relabel;
+        for(int t=1;t<=(vsdlss_parallel_enabled()?4:1);t*=2) for(int on=0;on<2;on++) {
+            vsdlss_m3_factor *f=NULL; double eta;
+            vsdlss_reduce_tail_min=on?1:(csi)1<<62;
+            CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+            CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+            for(csi c=0;c<f->count;c++) {
+                const vsdlss_reduction *r=f->component[c].reduction;
+                if(r && r->tail_levels) { CHECK(on && r->blocks>0); scheduled++; }
+            }
+            const int first=!on&&t==1;
+            CHECK(vsdlss_m3_solve_many(f,2,b,n,first?ref:x,n)==VSDLSS_OK);
+            if(first) CHECK(vsdlss_backward_error(A,ref,b,&eta)==VSDLSS_OK && eta<1e-13);
+            else CHECK(memcmp(x,ref,(size_t)n*16)==0);
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK && memcmp(x,ref,(size_t)n*8)==0);
+            vsdlss_m3_factor_free(f);
+        }
+    }
+    CHECK(scheduled>0);
+    vsdlss_reduce_block=saved_blk; vsdlss_reduce_tail_min=saved_tail; vsdlss_m3_relabel=saved_relabel;
+    vsdlss_reduce_tail_grain=saved_grain;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    free(b); free(ref); free(x); vsdlss_spfree(A);
+    printf("tail levels: identical solutions with and without the level schedule\n");
+    return 0;
+}
+
+/* The tail's level order and forward plan are the same at 1 and 4 threads,
+ * with both built in parallel at 4: a 2% grid joined by wires of 20..60
+ * nodes, all numbered at random, so nearly every record is in the tail. */
+static int test_reduction_tail_order_threads(void)
+{
+    if(!vsdlss_parallel_enabled()) return 0;
+    const csi n=300000, G=77, ng=G*G;
+    csi *perm=malloc((size_t)n*sizeof(csi)), *ea=malloc((size_t)2*n*sizeof(csi)), *eb=malloc((size_t)2*n*sizeof(csi));
+    CHECK(perm&&ea&&eb);
+    uint64_t s=88172645463325252ULL;
+#define RND() (s^=s<<13,s^=s>>7,s^=s<<17,s)
+    for(csi i=0;i<n;i++) perm[i]=i;
+    for(csi i=n-1;i>0;i--) { csi j=(csi)(RND()%(uint64_t)(i+1)), x=perm[i]; perm[i]=perm[j]; perm[j]=x; }
+    csi m=0;
+#define EDGE(u,v) do { csi a_=perm[u], b_=perm[v]; ea[m]=a_<b_?a_:b_; eb[m++]=a_<b_?b_:a_; } while(0)
+    for(csi y=0;y<G;y++) for(csi x=0;x<G;x++) { if(x+1<G) EDGE(y*G+x,y*G+x+1); if(y+1<G) EDGE(y*G+x,(y+1)*G+x); }
+    for(csi i=ng;i<n;) {
+        csi len=20+(csi)(RND()%41), prev=(csi)(RND()%(uint64_t)ng);
+        if(i+len>n) len=n-i;
+        for(csi c=0;c<len;c++,i++) { EDGE(prev,i); prev=i; }
+        EDGE(prev,(csi)(RND()%(uint64_t)ng));
+    }
+#undef EDGE
+    /* upper CSC: column b, rows a ascending, then the diagonal */
+    vsdlss *A=vsdlss_spalloc(n,n,n+m,1,0); csi *cnt=calloc((size_t)n+1,sizeof(csi)), *ord=malloc((size_t)m*sizeof(csi)), *tmp=malloc((size_t)m*sizeof(csi));
+    double *diag=calloc((size_t)n,sizeof(double));
+    CHECK(A&&cnt&&ord&&tmp&&diag);
+    for(csi k=0;k<m;k++) cnt[ea[k]+1]++;
+    for(csi i=0;i<n;i++) cnt[i+1]+=cnt[i];
+    for(csi k=0;k<m;k++) tmp[cnt[ea[k]]++]=k;                      /* by row */
+    memset(cnt,0,((size_t)n+1)*sizeof(csi));
+    for(csi k=0;k<m;k++) cnt[eb[k]+1]++;
+    for(csi i=0;i<n;i++) cnt[i+1]+=cnt[i];
+    for(csi k=0;k<m;k++) ord[cnt[eb[tmp[k]]]++]=tmp[k];            /* stably by column */
+    for(csi k=0;k<m;k++) { const double w=0.5+(double)(RND()%1000)/1000.0; tmp[k]=k; diag[ea[k]]+=w; diag[eb[k]]+=w; A->x[k]=w; }
+#undef RND
+    csi z=0, q=0;
+    double *wt=malloc((size_t)m*sizeof(double)); CHECK(wt); memcpy(wt,A->x,(size_t)m*sizeof(double));
+    for(csi j=0;j<n;j++) {
+        A->p[j]=z;
+        for(;q<m&&eb[ord[q]]==j;q++) { A->i[z]=ea[ord[q]]; A->x[z++]=-wt[ord[q]]; }
+        A->i[z]=j; A->x[z++]=diag[j]+1e-3;
+    }
+    A->p[n]=z;
+    free(perm); free(ea); free(eb); free(cnt); free(ord); free(tmp); free(diag); free(wt);
+    const csi saved=vsdlss_reduce_tail_order_grain;
+    vsdlss_reduce_tail_order_grain=64;
+    vsdlss_reduction *ref=NULL;
+    for(int t=1;t<=4;t+=3) {
+        vsdlss_reduce_input *in=NULL; vsdlss_reduction *r=NULL;
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        CHECK(vsdlss_reduce_prepare_csc(A,&in)==VSDLSS_OK);
+        CHECK(vsdlss_reduce_run_packed(in,&r,NULL)==VSDLSS_OK);
+        CHECK(vsdlss_reduce_tail_plan(r)==VSDLSS_OK);
+        CHECK(r->blocks>0 && r->tail_levels>1 && r->tail_fwd);
+        const vsdlss_pk_seg *g=r->pk+r->blocks;
+        CHECK(g->count>n/2);
+        if(!ref) { ref=r; continue; }
+        const vsdlss_pk_seg *h=ref->pk+ref->blocks;
+        CHECK(g->count==h->count && g->nbn==h->nbn && r->tail_levels==ref->tail_levels);
+        CHECK(memcmp(g->head,h->head,(size_t)g->count*sizeof(uint32_t))==0);
+        CHECK(memcmp(g->nb,h->nb,(size_t)g->nbn*sizeof(uint32_t))==0);
+        CHECK(memcmp(r->tail_fwd->tgt,ref->tail_fwd->tgt,(size_t)g->nbn*sizeof(uint32_t))==0);
+        CHECK(memcmp(r->tail_fwd->src,ref->tail_fwd->src,(size_t)g->nbn*sizeof(uint32_t))==0);
+        CHECK(memcmp(r->tail_fwd->m,ref->tail_fwd->m,(size_t)g->nbn*sizeof(double))==0);
+        for(csi l=0;l<r->tail_levels;l++) {                        /* sorted by distinct target */
+            for(csi u=r->tail_fwd->lp[l]+1;u<r->tail_fwd->lp[l+1];u++) CHECK(r->tail_fwd->tgt[u-1]<r->tail_fwd->tgt[u]);
+        }
+        vsdlss_reduction_free(r);
+    }
+    vsdlss_reduction_free(ref);
+    vsdlss_reduce_tail_order_grain=saved;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    vsdlss_spfree(A);
+    printf("tail order: same level order and plan at 1 and 4 threads\n");
+    return 0;
+}
+
 /* Lazily deleted adjacency entries: the same solution bits whatever the
  * tombstone threshold (1: almost every removal, huge: never), at 1 and 4
  * threads with the blocked parallel pass; and a large star factors in
@@ -980,6 +1111,8 @@ static int test_reduction_tombstones(void)
 
 int main(void)
 {
+    CHECK(test_reduction_tail_levels()==0);
+    CHECK(test_reduction_tail_order_threads()==0);
     CHECK(test_reduction_tombstones()==0);
     CHECK(test_interleaved_components_and_extract()==0);
     CHECK(test_packed_reduction_matches_records()==0);

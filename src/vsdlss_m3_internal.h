@@ -34,6 +34,12 @@ static inline csi vsdlss_pk_degree(const vsdlss_pk_seg *g, csi i)
 static inline csi vsdlss_pk_vertex(const vsdlss_pk_seg *g, csi i)
 { return g->head ? (csi)(g->head[i] & 0x3fffffffu) : g->k0 + i; }
 
+/* Forward plan of the scheduled tail: the updates of level l are
+ * [lp[l], lp[l+1]), sorted by target; update u subtracts m[u] times the
+ * pivot value of tail record src[u] from work[tgt[u]].  Target and
+ * multiplier are copies, so the forward pass streams the plan. */
+struct vsdlss_tail_plan { csi levels; csi *lp; uint32_t *tgt, *src; double *m; };
+
 typedef struct vsdlss_reduction {
     csi n, count, core_n;
     vsdlss_elim_record *records;
@@ -57,6 +63,22 @@ typedef struct vsdlss_reduction {
      * finite, pivots nonzero), so replay needs no per-entry checks. */
     csi pk_count;
     struct vsdlss_pk_seg *pk;
+    /* Optional level schedule of the sequential tail (tail_levels > 0; the
+     * reduction is blocked and the tail is segment pk[blocks]).  The tail
+     * records are stored level by level (within a level in the order of
+     * their first updater, see tail_order); no two records of one level
+     * share a vertex (pivot or neighbour), and a record's level is above
+     * that of every earlier record it shares a vertex with, so every vector
+     * entry still sees its updates in the original order and a level's
+     * records can be replayed concurrently.  Level l is chunks [tail_level[l], tail_level[l+1]);
+     * chunk c is tail records [tail_chunk_rec[c], tail_chunk_rec[c+1]) whose
+     * neighbours start at tail_chunk_nb[c] (offsets within the tail). */
+    csi tail_levels;
+    csi *tail_level, *tail_chunk_rec, *tail_chunk_nb;
+    /* Forward plan of the scheduled tail (vsdlss_reduce_tail_plan): each
+     * level's updates sorted by target, so the threads of a level write
+     * disjoint contiguous ranges of the vector.  NULL: none. */
+    struct vsdlss_tail_plan *tail_fwd;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -217,6 +239,9 @@ void vsdlss_reduction_free(vsdlss_reduction *);
  * paths on small matrices).  Results depend on them, never on threads. */
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
 extern csi vsdlss_reduce_tomb_min; /* tests: shortest adjacency list removed lazily (tombstones) */
+extern csi vsdlss_reduce_tail_min; /* smallest sequential tail given a level schedule (tests: lower it) */
+extern csi vsdlss_reduce_tail_grain; /* records per thread per level of the scheduled tail (tests: lower it) */
+extern csi vsdlss_reduce_tail_order_grain; /* same, for building the level order (tests: lower it) */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
@@ -249,6 +274,10 @@ vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *, vsdlss_reduction *
  * use the same work/x vector, untouched between them except at core vertices. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
+/* Build the forward plan of a level-scheduled tail (see tail_fwd) once the
+ * vertex numbering is final (after the solve-order relabel); a no-op without
+ * a schedule.  VSDLSS_ERR_OOM on allocation failure. */
+vsdlss_status vsdlss_reduce_tail_plan(vsdlss_reduction *);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
 /* Compose an elimination-tree postorder into (q, pinv) for matrix A (the
