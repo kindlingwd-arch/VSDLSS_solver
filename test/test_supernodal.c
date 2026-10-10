@@ -211,6 +211,7 @@ static int wide_tree_solve(void)
     CHECK(vsdlss_sn_analyze_relaxed(P,&s)==VSDLSS_OK&&vsdlss_sn_factorize(P,s,&f)==VSDLSS_OK);
     csi maxw=0;for(csi d=0;d<f->count;d++){csi w=f->column_start[d+1]-f->column_start[d];if(w>maxw)maxw=w;}
     CHECK(maxw>=64&&f->count>1);
+    if(getenv("VSDLSS_TEST_VERBOSE"))fprintf(stderr,"wide_tree_solve: max panel width %lld\n",(long long)maxw);
     int blas=0;
 #ifdef VSDLSS_BLAS
     blas=vsdlss_panel_solve_uses_blas();
@@ -219,27 +220,49 @@ static int wide_tree_solve(void)
     double *b=malloc((size_t)n*8),*x1=malloc((size_t)n*8),*xt=malloc((size_t)n*8);CHECK(b&&x1&&xt);
     for(csi i=0;i<n;i++)b[i]=sin(0.11*(double)i)+0.2;
     const int saved=vsdlss_top_branches,env=getenv("VSDLSS_TOP_BRANCHES")!=NULL;
-    for(int nt=1;nt<=8;nt*=2){
-        if(nt>1&&!vsdlss_parallel_enabled())break;
-        CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
-        for(int mode=-1;mode<=3;mode++){            /* default, then every forward/backward combination */
-            const int want=nt==1?0:mode<0?(blas?3:0):mode;
-            long c[3];for(int k=0;k<3;k++)c[k]=vsdlss_sn_tree_solves(k);
-            vsdlss_top_branches=mode;
-            double *x=nt==1&&mode<0?x1:xt;
-            memcpy(x,b,(size_t)n*8);
-            CHECK(vsdlss_sn_solve_inplace(f,x)==VSDLSS_OK);
-            CHECK(vsdlss_sn_tree_solves(0)-c[0]==(nt>1));
-            if(!env)CHECK(vsdlss_sn_tree_solves(1)-c[1]==(want&1)&&vsdlss_sn_tree_solves(2)-c[2]==(want>>1));
-            CHECK(memcmp(x1,x,(size_t)n*8)==0);
-            CHECK(vsdlss_sn_solve(f,b,xt)==VSDLSS_OK&&memcmp(x1,xt,(size_t)n*8)==0);
+    /* The same with the blocked triangle steps (0: the default kernels): for
+     * each block size one result at every thread count and schedule, and a
+     * solution of the system. */
+    const int saved_tri=vsdlss_solve_tri_blk;
+    static const int tri[]={0,16,64,128};
+    double *xd=malloc((size_t)n*8),*r=malloc((size_t)n*8);CHECK(xd&&r);
+    for(unsigned q=0;q<sizeof tri/sizeof*tri;q++){
+        if(q&&getenv("VSDLSS_SOLVE_TRI_BLK"))break;     /* the run's block size was the first pass */
+        if(q)vsdlss_solve_tri_blk=tri[q];
+        const long splits=vsdlss_sn_panel_tri_splits();
+        for(int nt=1;nt<=8;nt*=2){
+            if(nt>1&&!vsdlss_parallel_enabled())break;
+            CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
+            for(int mode=-1;mode<=3;mode++){            /* default, then every forward/backward combination */
+                const int want=nt==1?0:mode<0?(blas?3:0):mode;
+                long c[3];for(int k=0;k<3;k++)c[k]=vsdlss_sn_tree_solves(k);
+                vsdlss_top_branches=mode;
+                double *x=nt==1&&mode<0?x1:xt;
+                memcpy(x,b,(size_t)n*8);
+                CHECK(vsdlss_sn_solve_inplace(f,x)==VSDLSS_OK);
+                CHECK(vsdlss_sn_tree_solves(0)-c[0]==(nt>1));
+                if(!env)CHECK(vsdlss_sn_tree_solves(1)-c[1]==(want&1)&&vsdlss_sn_tree_solves(2)-c[2]==(want>>1));
+                CHECK(memcmp(x1,x,(size_t)n*8)==0);
+                CHECK(vsdlss_sn_solve(f,b,xt)==VSDLSS_OK&&memcmp(x1,xt,(size_t)n*8)==0);
+            }
+        }
+        /* residual of the permuted system */
+        CHECK(vsdlss_spmv_sym_upper(P,x1,r)==VSDLSS_OK);
+        { double e=0;for(csi i=0;i<n;i++){double d=fabs(r[i]-b[i]);if(d>e)e=d;} CHECK(e<1e-10); }
+        /* the widest panel's blocks are large enough for a team to share */
+        if(q&&tri[q]>=64&&maxw>=384&&vsdlss_parallel_enabled()&&!getenv("VSDLSS_SOLVE_TRI_WORK"))
+            CHECK(vsdlss_sn_panel_tri_splits()>splits);
+        if(!q)memcpy(xd,x1,(size_t)n*8);
+        else{
+            /* another summation order, not another answer; and wide panels did take it */
+            double e=0;int same=memcmp(xd,x1,(size_t)n*8)==0;
+            for(csi i=0;i<n;i++){double d=fabs(xd[i]-x1[i])/(1+fabs(xd[i]));if(d>e)e=d;}
+            CHECK(e<1e-12&&!same);
         }
     }
+    vsdlss_solve_tri_blk=saved_tri;
     vsdlss_top_branches=saved;
-    /* residual of the permuted system */
-    { double *r=malloc((size_t)n*8);CHECK(r);CHECK(vsdlss_spmv_sym_upper(P,x1,r)==VSDLSS_OK);
-      double e=0;for(csi i=0;i<n;i++){double d=fabs(r[i]-b[i]);if(d>e)e=d;}
-      free(r);CHECK(e<1e-10); }
+    free(xd);free(r);
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     free(b);free(x1);free(xt);free(q);free(pinv);
     vsdlss_sn_factor_free(f);vsdlss_sn_symbolic_free(s);vsdlss_spfree(P);vsdlss_spfree(A);return 0;
@@ -260,6 +283,6 @@ int main(int argc,char **argv)
     CHECK(large_powergrid()==0);
     CHECK(wide_tree_solve()==0);
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    printf("test_supernodal: random SPD, orders 0-%d, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction, wide-panel tree solve (top in order / by branches): ALL OK\n",MAX_ORDER);
+    printf("test_supernodal: random SPD, orders 0-%d, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction, wide-panel tree solve (top in order / by branches, blocked triangles): ALL OK\n",MAX_ORDER);
     return 0;
 }

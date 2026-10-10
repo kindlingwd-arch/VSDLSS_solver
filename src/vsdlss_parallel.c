@@ -49,6 +49,9 @@ int vsdlss_get_num_threads(void){return requested;}
 int vsdlss_parallel_last_team_size(void){return observed;}
 static _Thread_local int budget=0;
 int vsdlss_parallel_set_budget(int threads){int old=budget;budget=threads;return old;}
+static _Thread_local int tasks_ok=0;
+int vsdlss_parallel_set_tasks(int on){int old=tasks_ok;tasks_ok=on;return old;}
+int vsdlss_parallel_tasks(void){return tasks_ok;}
 int vsdlss_parallel_width(double work)
 {
 #ifdef _OPENMP

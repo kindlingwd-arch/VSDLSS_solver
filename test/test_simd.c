@@ -47,6 +47,15 @@ int main(void)
             for(csi r=q0;r<q1;r++){double t=y[5+r];for(csi j=j0;j<j1;j++)t-=a[j*tw-j*(j-1)/2+r-j]*xs[j];y[5+r]=t;}
             CHECK(memcmp(x,y,N*8)==0);
         }
+        /* backward dots on a packed triangle: columns [j0,j1), rows [q0,q0+m) >= j1 */
+        {
+            csi tw=1+(csi)(rnd()%70), j0=(csi)(rnd()%tw), j1=j0+(csi)(rnd()%(tw-j0+1));
+            csi q0=j1+(csi)(rnd()%(tw-j1+1)), m=(csi)(rnd()%(tw-q0+1));
+            for(csi i=0;i<tw*(tw+1)/2;i++)a[i]=uni();
+            vsdlss_simd_tri_dots_packed(a,tw,j0,j1,q0,m,x+100+q0,x+100+j0);
+            for(csi j=j0;j<j1;j++){double t=y[100+j];for(csi r=q0;r<q0+m;r++)t-=a[j*tw-j*(j-1)/2+r-j]*y[100+r];y[100+j]=t;}
+            CHECK(memcmp(x,y,N*8)==0);
+        }
         /* axpy */
         double sc=uni();
         vsdlss_simd_axpy_neg(x+3,a+1,sc,n);

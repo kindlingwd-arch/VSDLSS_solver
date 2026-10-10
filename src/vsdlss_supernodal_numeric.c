@@ -1190,7 +1190,9 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt,
 #else
         const int tid = 0, T = 1;
 #endif
+        const int tasks = vsdlss_parallel_set_tasks(1);    /* see solve_tree */
         forward_pull_team(f, d, x, tid, T, &bad, NULL, 0, bf);
+        vsdlss_parallel_set_tasks(tasks);
     }
     return bad;
 }
@@ -1428,12 +1430,19 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
         const csi ntop = sp->ntop; const int *tkid = sp->tkid;
         g.left = left_heap ? left_heap : left_stack;
         for (csi i = 0; i < ntop; ++i) atomic_init(&g.left[i], tkid[i]);
+        /* Every thread of a tree-top team marks itself as running tasks:
+         * a panel kernel called from one of them may hand part of a large
+         * step to the others as child tasks (vsdlss_parallel_tasks). */
         VSDLSS_OMP(omp parallel num_threads(nt_top))
-        VSDLSS_OMP(omp single)
-        for (csi i = 0; i < ntop; ++i) {
-            if (tkid[i]) continue;                  /* the leaves of the top are ready */
-            VSDLSS_OMP(omp task firstprivate(i))
-            top_forward(&g, i);
+        {
+            const int tasks = vsdlss_parallel_set_tasks(1);
+            VSDLSS_OMP(omp single)
+            for (csi i = 0; i < ntop; ++i) {
+                if (tkid[i]) continue;                  /* the leaves of the top are ready */
+                VSDLSS_OMP(omp task firstprivate(i))
+                top_forward(&g, i);
+            }
+            vsdlss_parallel_set_tasks(tasks);
         }
     }
     free(left_heap);
@@ -1469,6 +1478,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
             /* Ranges were cut for plan->T threads; another team size finds
              * its own. */
             const int use = T == plan->T;
+            const int tasks = vsdlss_parallel_set_tasks(1);
             csi k = 0;
             for (csi i = 0; i <= nbig; ++i) {
                 const csi kend = i < nbig ? bigk[i] : count;
@@ -1483,6 +1493,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
                 }
                 k = kend + 1;
             }
+            vsdlss_parallel_set_tasks(tasks);
         }
         bad |= badt;
         top_plan_free(plan_owned);
@@ -1501,10 +1512,14 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
     if ((branches & 2) && !bad) {
         /* The roots of the forest are the children of a virtual root. */
         VSDLSS_OMP(omp parallel num_threads(nt_top))
-        VSDLSS_OMP(omp single)
         {
-            const csi last = backward_kids(&g, count - 1, 0);
-            if (last >= 0) backward_branch(&g, last);
+            const int tasks = vsdlss_parallel_set_tasks(1);
+            VSDLSS_OMP(omp single)
+            {
+                const csi last = backward_kids(&g, count - 1, 0);
+                if (last >= 0) backward_branch(&g, last);
+            }
+            vsdlss_parallel_set_tasks(tasks);
         }
     } else
     for (csi k = count - 1; k >= 0 && !bad; --k)

@@ -47,6 +47,19 @@ static int PS(fwd_diag4)(const double *a,csi width,csi ext,double *xb)
     return 0;
 }
 
+#if PACKED
+/* Backward triangle J^T x = y with the blocked kernel (opt-in, see
+ * vsdlss_panel.c): pivots are checked before x is touched, non-finite
+ * results by one scan afterwards; the status codes of the default loop. */
+static vsdlss_status PS(tri_back)(const double *a,csi begin,csi width,double *x)
+{
+    for(csi j=0;j<width;j++){ double d=DCOL(j)[0]; if(!isfinite(d)||d<=0)return VSDLSS_ERR_INVALID; }
+    tri_solve(a,width,x+begin,1);
+    for(csi j=0;j<width;j++) if(!isfinite(x[begin+j]))return VSDLSS_ERR_NONFINITE;
+    return VSDLSS_OK;
+}
+#endif
+
 vsdlss_status PS(generic)(const double *a,csi begin,csi width,
                           csi ext,const IDX_T *index,double *x,int back)
 {
@@ -146,6 +159,9 @@ vsdlss_status PS(generic)(const double *a,csi begin,csi width,
         }
     }
     if(bad)return VSDLSS_ERR_NONFINITE;
+#if PACKED
+    if(back && vsdlss_sn_panel_tri_blocked(width))return PS(tri_back)(a,begin,width,x);
+#endif
     if(back)for(csi j=width;j-- >0;){
         const double *dj=DCOL(j);
         double d=dj[0],v=x[begin+j];
@@ -163,6 +179,9 @@ vsdlss_status PS(generic)(const double *a,csi begin,csi width,
 static inline vsdlss_status PS(back_diag)(const double *a,csi begin,csi width,csi ext,double *x)
 {
     csi rows=width+ext; (void)rows; (void)ext;
+#if PACKED
+    if(vsdlss_sn_panel_tri_blocked(width))return PS(tri_back)(a,begin,width,x);
+#endif
     for(csi j=width;j-- >0;){
         const double *dj=DCOL(j);
         double d=dj[0],v=x[begin+j];
@@ -290,6 +309,18 @@ static vsdlss_status PS(blas_fwd)(const double *a, csi width, csi ext, double *x
         double d = DCOL(j)[0];
         if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
     }
+#if PACKED
+    if (vsdlss_sn_panel_tri_blocked(width)) {
+        /* Blocked triangle (opt-in): the built-in forward kernels, which a
+         * team can share, in place of dtpsv. */
+        tri_solve(a, width, xb, 0);
+        if (E) {
+            VSDLSS_BLAS_GUARD
+            dgemv_("N", &E, &W, &p1, RCOL(0), &LD, xb, &one, &zero, t, &one);
+        }
+        return VSDLSS_OK;
+    }
+#endif
     VSDLSS_BLAS_GUARD
     {
         PS_TRSV("N", xb);
@@ -326,14 +357,21 @@ static vsdlss_status PS(blas)(const double *a, csi begin, csi width,
         (void)PS(blas_fwd)(a, width, ext, x + begin, t);   /* pivots checked above */
         for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
     } else {
+        int tri = 0;
+#if PACKED
+        tri = vsdlss_sn_panel_tri_blocked(width);     /* blocked triangle (opt-in) in place of dtpsv */
+#endif
         VSDLSS_BLAS_GUARD
         {
             if (E) {
                 for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
                 dgemv_("T", &E, &W, &m1, RCOL(0), &LD, t, &one, &p1, x + begin, &one);
             }
-            PS_TRSV("T", x + begin);
+            if (!tri) PS_TRSV("T", x + begin);
         }
+#if PACKED
+        if (tri) tri_solve(a, width, x + begin, 1);
+#endif
     }
     free(heap);
     for (csi j = 0; j < width; j++) if (!isfinite(x[begin + j])) return VSDLSS_ERR_NONFINITE;

@@ -277,6 +277,67 @@ SIMD_FN int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, 
             _mm256_movemask_pd(_mm256_cmp_pd(y, y, _CMP_UNORD_Q))) != 0;
 }
 
+/* Dot products of columns [j0, j1) of a packed triangle with xr over rows
+ * [r0, r0 + n): dot8 with one pointer per column (packed columns are not
+ * equally spaced), then four columns, then single columns.  Every lane
+ * holds one column's chain in ascending row order. */
+SIMD_FN void vsdlss_simd_tri_dots_packed(const double *D, csi w, csi j0, csi j1, csi r0, csi n,
+                                         const double *xr, double *v)
+{
+    csi j = j0;
+    for (; j + 8 <= j1; j += 8, v += 8) {
+        const double *c0 = PCOL(D, w, j) + r0, *c1 = PCOL(D, w, j + 1) + r0;
+        const double *c2 = PCOL(D, w, j + 2) + r0, *c3 = PCOL(D, w, j + 3) + r0;
+        const double *c4 = PCOL(D, w, j + 4) + r0, *c5 = PCOL(D, w, j + 5) + r0;
+        const double *c6 = PCOL(D, w, j + 6) + r0, *c7 = PCOL(D, w, j + 7) + r0;
+        __m256d acc = _mm256_loadu_pd(v), acd = _mm256_loadu_pd(v + 4);
+        csi r = 0;
+        for (; r + 4 <= n; r += 4) {
+            __m256d q0, q1, q2, q3, p0, p1, p2, p3;
+            TRANSPOSE4(_mm256_loadu_pd(c0 + r), _mm256_loadu_pd(c1 + r), _mm256_loadu_pd(c2 + r),
+                       _mm256_loadu_pd(c3 + r), q0, q1, q2, q3);
+            TRANSPOSE4(_mm256_loadu_pd(c4 + r), _mm256_loadu_pd(c5 + r), _mm256_loadu_pd(c6 + r),
+                       _mm256_loadu_pd(c7 + r), p0, p1, p2, p3);
+            const __m256d x0 = _mm256_set1_pd(xr[r]), x1 = _mm256_set1_pd(xr[r + 1]);
+            const __m256d x2 = _mm256_set1_pd(xr[r + 2]), x3 = _mm256_set1_pd(xr[r + 3]);
+            acc = SUBMUL(acc, q0, x0); acd = SUBMUL(acd, p0, x0);
+            acc = SUBMUL(acc, q1, x1); acd = SUBMUL(acd, p1, x1);
+            acc = SUBMUL(acc, q2, x2); acd = SUBMUL(acd, p2, x2);
+            acc = SUBMUL(acc, q3, x3); acd = SUBMUL(acd, p3, x3);
+        }
+        for (; r < n; ++r) {
+            const __m256d x0 = _mm256_set1_pd(xr[r]);
+            acc = SUBMUL(acc, _mm256_set_pd(c3[r], c2[r], c1[r], c0[r]), x0);
+            acd = SUBMUL(acd, _mm256_set_pd(c7[r], c6[r], c5[r], c4[r]), x0);
+        }
+        _mm256_storeu_pd(v, acc); _mm256_storeu_pd(v + 4, acd);
+    }
+    for (; j + 4 <= j1; j += 4, v += 4) {
+        const double *c0 = PCOL(D, w, j) + r0, *c1 = PCOL(D, w, j + 1) + r0;
+        const double *c2 = PCOL(D, w, j + 2) + r0, *c3 = PCOL(D, w, j + 3) + r0;
+        __m256d acc = _mm256_loadu_pd(v);
+        csi r = 0;
+        for (; r + 4 <= n; r += 4) {
+            __m256d q0, q1, q2, q3;
+            TRANSPOSE4(_mm256_loadu_pd(c0 + r), _mm256_loadu_pd(c1 + r), _mm256_loadu_pd(c2 + r),
+                       _mm256_loadu_pd(c3 + r), q0, q1, q2, q3);
+            acc = SUBMUL(acc, q0, _mm256_set1_pd(xr[r]));
+            acc = SUBMUL(acc, q1, _mm256_set1_pd(xr[r + 1]));
+            acc = SUBMUL(acc, q2, _mm256_set1_pd(xr[r + 2]));
+            acc = SUBMUL(acc, q3, _mm256_set1_pd(xr[r + 3]));
+        }
+        for (; r < n; ++r)
+            acc = SUBMUL(acc, _mm256_set_pd(c3[r], c2[r], c1[r], c0[r]), _mm256_set1_pd(xr[r]));
+        _mm256_storeu_pd(v, acc);
+    }
+    for (; j < j1; ++j, ++v) {
+        const double *c = PCOL(D, w, j) + r0;
+        double t = *v;
+        for (csi r = 0; r < n; ++r) { double u = c[r] * xr[r]; t -= u; }
+        *v = t;
+    }
+}
+
 /* y[i] = (((y[i] - c[i]*s[0]) - c[ld+i]*s[1]) - c[2ld+i]*s[2]) - c[3ld+i]*s[3]:
  * four axpy_neg calls in one pass over y (same operations per entry, in the
  * same order, so the same bits); y is loaded and stored once per four
@@ -350,4 +411,7 @@ void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, 
 { (void)y; (void)c; (void)ld; (void)s; (void)n; abort(); }
 int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
+void vsdlss_simd_tri_dots_packed(const double *D, csi w, csi j0, csi j1, csi r0, csi n,
+                                 const double *xr, double *v)
+{ (void)D; (void)w; (void)j0; (void)j1; (void)r0; (void)n; (void)xr; (void)v; abort(); }
 #endif

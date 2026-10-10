@@ -12,6 +12,12 @@ int vsdlss_parallel_width(double work);
  * (nested teams for concurrently processed components; 0 or 1 = serial).
  * Thread-local; returns the previous value. */
 int vsdlss_parallel_set_budget(int threads);
+/* Set by the threads of a team that runs OpenMP tasks and has members
+ * waiting for them (the tree top of a tree-parallel solve): a kernel called
+ * there may split a large step into child tasks instead of opening a team.
+ * Thread-local; returns the previous value. */
+int vsdlss_parallel_set_tasks(int on);
+int vsdlss_parallel_tasks(void);
 /* malloc / calloc for large arrays (>= 8 MiB): the fresh pages are marked
  * for transparent huge pages, which cuts first-touch page faults by up to
  * 512x and TLB misses in random access.  A hint only (no-op elsewhere;

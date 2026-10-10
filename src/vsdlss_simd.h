@@ -37,6 +37,13 @@ int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *
 
 /* Eight backward dot products (two interleaved dot4 chains; same bits). */
 int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v);
+/* Backward dot products on a packed lower triangle D of order w (layout as
+ * for tri_update_packed), columns [j0, j1), rows [r0, r0 + n), r0 >= j1:
+ *   v[j - j0] -= D(r, j) * xr[r - r0], r ascending.
+ * One chain per column (eight columns at a time, as dot8), so the result of
+ * a column does not depend on which columns it is grouped with. */
+void vsdlss_simd_tri_dots_packed(const double *D, csi w, csi j0, csi j1, csi r0, csi n,
+                                 const double *xr, double *v);
 /* Four consecutive axpy_neg over columns c + k*ld with scalars s[k] (same bits). */
 void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, csi n);
 /* The same with four column pointers c, c1, c2, c3 (same bits). */
