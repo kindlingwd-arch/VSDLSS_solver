@@ -49,6 +49,16 @@ int vsdlss_get_num_threads(void){return requested;}
 int vsdlss_parallel_last_team_size(void){return observed;}
 static _Thread_local int budget=0;
 int vsdlss_parallel_set_budget(int threads){int old=budget;budget=threads;return old;}
+static _Thread_local atomic_int *team_busy=NULL;
+atomic_int *vsdlss_parallel_set_tasks(atomic_int *busy){atomic_int *old=team_busy;team_busy=busy;return old;}
+int vsdlss_parallel_tasks(void){return team_busy!=NULL;}
+int vsdlss_parallel_helpers(void)
+{
+#ifdef _OPENMP
+    if(team_busy){int n=omp_get_num_threads()-atomic_load_explicit(team_busy,memory_order_relaxed);return n>0?n:0;}
+#endif
+    return 0;
+}
 int vsdlss_parallel_width(double work)
 {
 #ifdef _OPENMP

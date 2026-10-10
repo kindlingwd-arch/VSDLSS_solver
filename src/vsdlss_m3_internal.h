@@ -306,6 +306,17 @@ int vsdlss_solve_upd16(void);
 vsdlss_status vsdlss_sn_panel_solve(const double *, csi begin, csi width,
                                     csi ext, const vsdlss_sni *index, double *, int back);
 vsdlss_status vsdlss_sn_panel_solve_generic(const double *,csi,csi,csi,const vsdlss_sni *,double *,int);
+/* Blocked triangle steps of packed panels (opt-in, see vsdlss_panel.c):
+ * the block size in columns, 0 = off (default), -1 = read
+ * VSDLSS_SOLVE_TRI_BLK on first use.  With it the solution differs from the
+ * default kernels in rounding and depends on the block size, but not on the
+ * thread count. */
+extern int vsdlss_solve_tri_blk;
+/* 1 when a packed panel of this width takes the blocked triangle steps. */
+int vsdlss_sn_panel_tri_blocked(csi width);
+/* Number of their shared steps cut into pieces for a team so far
+ * (process-wide; for tests). */
+long vsdlss_sn_panel_tri_splits(void);
 #ifdef VSDLSS_BLAS
 /* 1 when vsdlss_sn_panel_solve takes the BLAS path for a panel of this shape. */
 int vsdlss_sn_panel_solve_is_blas(csi width, csi ext);
