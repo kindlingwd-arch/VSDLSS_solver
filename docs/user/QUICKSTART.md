@@ -129,4 +129,4 @@ make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt' test   # 可选：MKL �
 
 C 接口用 `vsdlss_factorize_m3(A, 6, &f)` 选择 METIS（命令行 `-p` 只支持 0–5）。自己的程序链接 `libvsdlss.a` 时，同时链接 `build/metis/libmetis.a`，编译选项加 `-fopenmp -DVSDLSS_METIS -DVSDLSS_METIS_THREADSAFE`。
 
-运行时：带 BLAS 构建时设 `VSDLSS_BLAS_SOLVE_MIN=0`（否则求解改为串行）和单线程 BLAS（MKL：`MKL_THREADING_LAYER=SEQUENTIAL`）；多路服务器建议 `OMP_PROC_BIND=spread OMP_PLACES=cores`。
+运行时：带 BLAS 构建时用单线程 BLAS（MKL：`MKL_THREADING_LAYER=SEQUENTIAL`）。BLAS 求解现在保留树并行，不必再设 `VSDLSS_BLAS_SOLVE_MIN=0`；2 线程实测不慢于内置内核，更多线程下根分隔子面板仍是单线程，建议在目标机器上对比 `VSDLSS_BLAS_SOLVE_MIN=0` 后选取（见 [blas-tree-solve-20261010](../reconstruction/blas-tree-solve-20261010.md)）；多路服务器建议 `OMP_PROC_BIND=spread OMP_PLACES=cores`。

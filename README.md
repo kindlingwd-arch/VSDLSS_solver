@@ -191,6 +191,7 @@ M4 显式数值工作区不随线程数增加，但 OpenMP 运行库/线程栈�
 三角求解改用 `dtrsv`/`dgemv`，阈值由 `VSDLSS_BLAS_MIN`、`VSDLSS_BLAS_SOLVE_MIN` 设置（面板宽度，默认 32，0 关闭）。
 BLAS 必须线程安全并在求解器内单线程运行（OpenBLAS 需 `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`，或用 MKL sequential）；
 此时各线程数结果相同，但与内置内核不逐位相同。IBM 电源网格基准上分解快 1.4–3.5 倍、求解时间减少 10–40%；
+BLAS 求解保留树并行（子树并行 + 树顶按分支，`VSDLSS_TOP_BRANCHES` 可切换），见 [blas-tree-solve-20261010](docs/reconstruction/blas-tree-solve-20261010.md)；
 实测、与 CHOLMOD 的对比和注意事项见 [perf-solve-blas-20260923](docs/reconstruction/perf-solve-blas-20260923.md)。
 
 可选 METIS：`make METIS=1 METIS_CFLAGS=... METIS_LIBS=...`（默认关闭，需 64 位 idx_t）后，排序 6 对低度消元后的核心

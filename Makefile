@@ -12,7 +12,9 @@ endif
 # 0 disables).  The BLAS must be thread safe and single threaded inside the
 # solver (e.g. OpenBLAS with OPENBLAS_NUM_THREADS=1 and OMP_NUM_THREADS=1, or
 # MKL sequential); results then match for every solver thread count but are
-# not bitwise equal to the built-in kernels.
+# not bitwise equal to the built-in kernels.  BLAS solves keep the
+# tree-parallel schedule; with them the tree top runs by branches
+# (VSDLSS_TOP_BRANCHES: bit 1 forward, bit 2 backward, 0 in order; same bits).
 BLAS ?= 0
 BLAS_LIBS ?= -lopenblas
 ifeq ($(BLAS),1)
@@ -232,8 +234,17 @@ dist:
 test_supernodal: test/test_supernodal.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h src/vsdlss_dense.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_supernodal.c $(LIBSRCS) $(LDLIBS)
 
+# BLAS builds run it twice more with a narrow BLAS threshold: BLAS-solved
+# panels then sit inside the split subtrees and all over the tree top of
+# every test matrix, so the thread-count checks cover the stored-product
+# pulls and both by-branches passes; the last run takes the tree top in
+# order with every target on a team (the path BLAS solves leave by default).
 test-supernodal: test_supernodal
 	./test_supernodal
+ifeq ($(BLAS),1)
+	VSDLSS_BLAS_SOLVE_MIN=4 ./test_supernodal
+	VSDLSS_BLAS_SOLVE_MIN=4 VSDLSS_TOP_BRANCHES=0 VSDLSS_FWD_TOP_WORK=1 ./test_supernodal
+endif
 
 .PHONY: test-supernodal
 

@@ -265,6 +265,39 @@ static vsdlss_status PS(back_relaxed)(const double *a,csi begin,csi width,
 #endif
 
 #ifdef VSDLSS_BLAS
+#if PACKED
+#define PS_TRSV(tr, xb) dtpsv_("L", tr, "N", &W, a, xb, &one)
+#else
+#define PS_TRSV(tr, xb) dtrsv_("L", tr, "N", &W, a, &LDD, xb, &one)
+#endif
+/* Forward BLAS step of one wide panel without the scatter: pivot checks,
+ * dtrsv (dtpsv for the packed layout) on the diagonal block, then
+ * t = L_ext * x_J with one dgemv (beta 0) over all ext external rows.
+ * xb points at the panel's own entries of x.  The serial solve subtracts
+ * t[r] from x[index[r]] right away; the tree solve keeps t and lets every
+ * target subtract its rows when it is solved.  Both apply the same t with
+ * one subtraction per entry, so they give the same bits.  Returns INVALID
+ * before touching xb on a bad pivot. */
+static vsdlss_status PS(blas_fwd)(const double *a, csi width, csi ext, double *xb, double *t)
+{
+    const csi rows = width + ext; (void)rows;
+    int W = (int)width, E = (int)ext, LD = (int)(RLD > 0 ? RLD : 1), one = 1;
+    double p1 = 1.0, zero = 0.0;
+#if !PACKED
+    int LDD = (int)rows;
+#endif
+    for (csi j = 0; j < width; j++) {
+        double d = DCOL(j)[0];
+        if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
+    }
+    VSDLSS_BLAS_GUARD
+    {
+        PS_TRSV("N", xb);
+        if (E) dgemv_("N", &E, &W, &p1, RCOL(0), &LD, xb, &one, &zero, t, &one);
+    }
+    return VSDLSS_OK;
+}
+
 /* Wide panels (at least VSDLSS_BLAS_SOLVE_MIN columns) use dtrsv (dtpsv
  * for the packed layout) + dgemv.  Same pivot checks as the built-in path;
  * a non-finite result is reported for J here and, for the external rows,
@@ -274,38 +307,39 @@ static vsdlss_status PS(blas)(const double *a, csi begin, csi width,
 {
     const csi rows = width + ext; (void)rows;
     int W = (int)width, E = (int)ext, LD = (int)(RLD > 0 ? RLD : 1), one = 1;
-    double p1 = 1.0, m1 = -1.0, zero = 0.0;
+    double p1 = 1.0, m1 = -1.0;
+#if !PACKED
+    int LDD = (int)rows;
+#endif
     for (csi j = 0; j < width; j++) {
         double d = DCOL(j)[0];
         if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
     }
-    double stack[VSDLSS_SOLVE_GATHER];
-    double *t = ext <= VSDLSS_SOLVE_GATHER ? stack : (double *)malloc((size_t)ext * sizeof(double));
-    if (!t) return PS(generic)(a, begin, width, ext, index, x, back);
-#if PACKED
-#define PS_TRSV(tr) dtpsv_("L", tr, "N", &W, a, x + begin, &one)
-#else
-    int LDD = (int)rows;
-#define PS_TRSV(tr) dtrsv_("L", tr, "N", &W, a, &LDD, x + begin, &one)
-#endif
+    /* t starts on a 64-byte boundary, as the tree solve's stored products
+     * do: with the same panel and x, every BLAS call then sees the same
+     * operand alignment in both schedules. */
+    _Alignas(64) double stack[VSDLSS_SOLVE_GATHER];
+    double *heap = ext <= VSDLSS_SOLVE_GATHER ? NULL : (double *)malloc(((size_t)ext + 8) * sizeof(double));
+    double *t = heap ? (double *)(((uintptr_t)heap + 63) & ~(uintptr_t)63) : stack;
+    if (ext > VSDLSS_SOLVE_GATHER && !heap) return PS(generic)(a, begin, width, ext, index, x, back);
     if (!back) {
-        PS_TRSV("N");
-        if (E) {
-            dgemv_("N", &E, &W, &p1, RCOL(0), &LD, x + begin, &one, &zero, t, &one);
-            for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
-        }
+        (void)PS(blas_fwd)(a, width, ext, x + begin, t);   /* pivots checked above */
+        for (csi r = 0; r < ext; r++) x[index[r]] -= t[r];
     } else {
-        if (E) {
-            for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
-            dgemv_("T", &E, &W, &m1, RCOL(0), &LD, t, &one, &p1, x + begin, &one);
+        VSDLSS_BLAS_GUARD
+        {
+            if (E) {
+                for (csi r = 0; r < ext; r++) t[r] = x[index[r]];
+                dgemv_("T", &E, &W, &m1, RCOL(0), &LD, t, &one, &p1, x + begin, &one);
+            }
+            PS_TRSV("T", x + begin);
         }
-        PS_TRSV("T");
     }
-#undef PS_TRSV
-    if (t != stack) free(t);
+    free(heap);
     for (csi j = 0; j < width; j++) if (!isfinite(x[begin + j])) return VSDLSS_ERR_NONFINITE;
     return VSDLSS_OK;
 }
+#undef PS_TRSV
 #endif
 
 static vsdlss_status PS(dispatch)(const double *a,csi begin,csi width,
