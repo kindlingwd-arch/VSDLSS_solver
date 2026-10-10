@@ -79,7 +79,7 @@ make CFLAGS='-O2 -Wall -Wextra -Werror -Iinclude -std=c11' test
 文件求解：
 
 ```bash
-./vsdlss_solver [-p 0|1|2|3|4|5] [--demo-rhs] jobname
+./vsdlss_solver [-p 0|1|2|3|4|5|6] [--threads n|auto] [--demo-rhs] jobname
 ```
 
 `-p 0`（默认）和 `-p 5` 使用近似最小度（AMD，商图形式），`-p 1` 使用 RCM，`-p 2` 使用自然序，`-p 3` 使用动态最小度，`-p 4` 使用 MLD。

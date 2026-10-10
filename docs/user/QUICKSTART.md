@@ -127,7 +127,9 @@ make -j8 METIS=1 test
 make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt' test   # 可选：MKL 用于分解中的宽超节点
 ```
 
-C 接口用 `vsdlss_factorize_m3(A, 6, &f)` 选择 METIS（命令行 `-p` 只支持 0–5）。自己的程序链接 `libvsdlss.a` 时，同时链接 `build/metis/libmetis.a`，编译选项加 `-fopenmp -DVSDLSS_METIS -DVSDLSS_METIS_THREADSAFE`。
+C 接口用 `vsdlss_factorize_m3(A, 6, &f)` 选择 METIS，命令行用 `vsdlss_solver --m3 -p 6`。自己的程序链接 `libvsdlss.a` 时，同时链接 `build/metis/libmetis.a`，编译选项加 `-fopenmp -DVSDLSS_METIS -DVSDLSS_METIS_THREADSAFE`。
+
+线程数：`vsdlss_set_num_threads(n)` 只对调用它的线程生效，`n = 0` 为自动（OpenMP 默认线程数，遵守 `OMP_NUM_THREADS` 与 taskset/容器的 CPU 限制；Linux 上不超过可用的物理核数，超线程对带宽受限的求解没有帮助）；从未调用过的线程用环境变量 `VSDLSS_NUM_THREADS`（数字或 `auto`），没有设置时为 1。命令行 `--threads` 默认 `auto`。不同线程数的解逐位相同；求解受内存带宽限制，线程多到一定程度不再变快，建议在目标机器上比较几个线程数（`tools/diag_solve.sh`）。
 
 运行时：带 BLAS 构建时用单线程 BLAS（MKL：`MKL_THREADING_LAYER=SEQUENTIAL`）。BLAS 求解现在保留树并行，不必再设 `VSDLSS_BLAS_SOLVE_MIN=0`；2 线程实测不慢于内置内核，更多线程下根分隔子面板仍是单线程，建议在目标机器上对比 `VSDLSS_BLAS_SOLVE_MIN=0` 后选取（见 [blas-tree-solve-20261010](../reconstruction/blas-tree-solve-20261010.md)）；多路服务器建议 `OMP_PROC_BIND=spread OMP_PLACES=cores`。
 
