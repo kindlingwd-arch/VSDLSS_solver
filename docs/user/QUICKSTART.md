@@ -130,3 +130,25 @@ make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt' test   # 可选：MKL �
 C 接口用 `vsdlss_factorize_m3(A, 6, &f)` 选择 METIS（命令行 `-p` 只支持 0–5）。自己的程序链接 `libvsdlss.a` 时，同时链接 `build/metis/libmetis.a`，编译选项加 `-fopenmp -DVSDLSS_METIS -DVSDLSS_METIS_THREADSAFE`。
 
 运行时：带 BLAS 构建时用单线程 BLAS（MKL：`MKL_THREADING_LAYER=SEQUENTIAL`）。BLAS 求解现在保留树并行，不必再设 `VSDLSS_BLAS_SOLVE_MIN=0`；2 线程实测不慢于内置内核，更多线程下根分隔子面板仍是单线程，建议在目标机器上对比 `VSDLSS_BLAS_SOLVE_MIN=0` 后选取（见 [blas-tree-solve-20261010](../reconstruction/blas-tree-solve-20261010.md)）；多路服务器建议 `OMP_PROC_BIND=spread OMP_PLACES=cores`。
+
+## 7. 瞬态驱动示例与大规模性能排查
+
+`examples/transient_driver.cpp`（C++17）：读文本矩阵与右端项，分解一次，对第 1..N 步右端项反复求解并与参考解比较；文件格式与 `SolveCase` 语义见文件头注释。
+
+```sh
+make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt -Wl,-rpath,<mkl>/lib' transient_driver
+VSDLSS_THREADS=32 OMP_PROC_BIND=spread OMP_PLACES=cores ./transient_driver diag.txt data.txt
+```
+
+输出分别给出分解时间、第一次求解（冷，含缺页与求解计划构建）和后续各步求解（热）的时间与中位数；性能比较请用热求解。每步还给出缺页次数：`major_faults` 大于 0 说明在换页。
+
+**几千万结点时，调用方内存往往比求解器本身更关键**：6400 万结点双网，求解器约需 17–18 GB；若调用方把文本整行读成字符串数组、用 `std::set` 去重、同时保留原矩阵和多份右端项，额外会多出约 8 GB（装载期间更多），在 20 GB 的机器上就会换页，求解慢数倍，且时间随线程数近似线性变化。该示例逐行解析、建完 CSC 即释放中间数据，4M 用例上峰值内存 1.70 → 1.05 GB。`CHECK_RESIDUAL=0` 再省下 CSC（nnz × 16 字节）。
+
+求解偏慢时，用 `tools/diag_solve.sh` 一次收集机器、环境变量、实际加载的 OpenMP/MKL 库，并在当前环境与推荐环境下扫描线程数、打开分阶段计时：
+
+```sh
+tools/diag_solve.sh "./transient_driver diag.txt data.txt"    # 线程数由 VSDLSS_THREADS 控制
+tools/diag_solve.sh "./vsdlss_solver --m3 --threads {T} job"  # {T} 换成各线程数
+```
+
+常见原因：没设 `MKL_THREADING_LAYER=SEQUENTIAL`（实测求解慢约 2 倍，同时加载 `libiomp5` 与 `libgomp` 时更糟）；内存不足换页；容器限制了可用核数（`nproc`）；双路机器内存集中在一个 NUMA 节点（试 `numactl --interleave=all`）。

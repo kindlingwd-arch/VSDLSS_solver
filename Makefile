@@ -139,7 +139,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 
 clean:
 	rm -rf build/metis
-	rm -f libvsdlss.a quickstart vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -221,6 +221,11 @@ libvsdlss.a: $(LIBOBJS)
 
 quickstart: examples/quickstart.c libvsdlss.a include/vsdlss.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ examples/quickstart.c libvsdlss.a $(LDLIBS)
+
+# One factorization, many solves (transient) from text files; C++17.
+CXX ?= g++
+transient_driver: examples/transient_driver.cpp libvsdlss.a include/vsdlss.h
+	$(CXX) -O2 -Wall -Wextra -std=c++17 -Iinclude $(PARFLAGS) -o $@ examples/transient_driver.cpp libvsdlss.a $(LDLIBS)
 
 smoke: quickstart
 	./quickstart m1
