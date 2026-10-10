@@ -25,6 +25,10 @@
 //      中位数；每次求解的缺页次数（major fault > 0 说明在换页）与峰值内存；
 //      VSDLSS_TRACE=1 时库在 stderr 打印每次求解的分阶段耗时。
 //   4. STEPS=N：最多 N 步（默认 40），遇到缺失的 <s>b_vector.txt 即停止。
+//      VSDLSS_INTERLEAVE=1：把进程内存交错分布到所有 NUMA 结点（等同 numactl
+//      --interleave=all，无需安装 numactl），同时让内核的自动 NUMA 平衡
+//      （kernel.numa_balancing=1）不再扫描这些内存；双路服务器上每次求解
+//      出现约百万次 minor fault 时试它。
 //      CHECK_RESIDUAL=0：不算残差，分解后释放 CSC（再省 nnz*16 字节）。
 //
 //  构建与运行（见 docs/user/QUICKSTART.md 第 7 节）
@@ -50,6 +54,41 @@
 #include <utility>
 #include <vector>
 #include <sys/resource.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+// VSDLSS_INTERLEAVE=1: interleave this process's memory over all online NUMA
+// nodes (what `numactl --interleave=all` does, without needing numactl).
+// Memory with an explicit policy is also left alone by the kernel's automatic
+// NUMA balancing (kernel.numa_balancing=1), whose hinting faults and page
+// migrations otherwise show up as ~1e6 minor faults per solve on a two-socket
+// server.  Must run before the large allocations.  Returns a short status.
+static std::string interleaveMemory() {
+#if defined(__linux__) && defined(SYS_set_mempolicy)
+    std::ifstream in("/sys/devices/system/node/online");   // e.g. "0-1" or "0,2-3"
+    std::string list;
+    if (!(in >> list)) return "no NUMA information";
+    unsigned long mask[16] = {0}; int maxnode = 0, nodes = 0;
+    std::stringstream ss(list); std::string part;
+    while (std::getline(ss, part, ',')) {
+        int a = 0, b = 0; const auto dash = part.find('-');
+        try {
+            a = std::stoi(part.substr(0, dash));
+            b = dash == std::string::npos ? a : std::stoi(part.substr(dash + 1));
+        } catch (...) { return "cannot parse node list " + list; }
+        for (int nd = a; nd <= b && nd < 16 * 64; ++nd) { mask[nd / 64] |= 1UL << (nd % 64); ++nodes; if (nd + 1 > maxnode) maxnode = nd + 1; }
+    }
+    if (nodes < 2) return "single NUMA node, nothing to interleave";
+    const int MPOL_INTERLEAVE_ = 3;
+    if (syscall(SYS_set_mempolicy, MPOL_INTERLEAVE_, mask, (unsigned long)maxnode + 1) != 0)
+        return std::string("set_mempolicy failed: ") + std::strerror(errno);
+    return "interleaved over nodes " + list;
+#else
+    return "not supported on this platform";
+#endif
+}
 #ifdef __GLIBC__
 #include <malloc.h>
 static void releaseFreeMemory() { malloc_trim(0); }
@@ -270,7 +309,8 @@ static int envInt(const char* name, int def) { const char* e = std::getenv(name)
 
 int main(int argc, char** argv) {
     try {
-        // Before the first call into the library / MKL.
+        // Before the first call into the library / MKL and the large allocations.
+        const std::string numa = envInt("VSDLSS_INTERLEAVE", 0) ? interleaveMemory() : "off (VSDLSS_INTERLEAVE=1 to interleave)";
         setDefaultEnv("MKL_THREADING_LAYER", "SEQUENTIAL");
         setDefaultEnv("VSDLSS_BLAS_MIN", "16");
         // VSDLSS_THREADS = n or auto; else VSDLSS_NUM_THREADS (read by the
@@ -310,6 +350,7 @@ int main(int argc, char** argv) {
                   << "solver=libvsdlss M3 order=6 threads=" << vsdlss_get_num_threads() << " max_team=" << solver.observedThreads() << '\n'
                   << "env MKL_THREADING_LAYER=" << std::getenv("MKL_THREADING_LAYER")
                   << " VSDLSS_BLAS_SOLVE_MIN=" << (std::getenv("VSDLSS_BLAS_SOLVE_MIN") ? std::getenv("VSDLSS_BLAS_SOLVE_MIN") : "(library default)") << '\n'
+                  << "numa: " << numa << '\n'
                   << "load+setup_ms=" << ms(t0, t1) << '\n'
                   << "first: factor_ms=" << solver.factor_ms << " solve_ms(cold)=" << solver.solve_only_ms
                   << " total_ms=" << ms(t2, t3) << '\n'
