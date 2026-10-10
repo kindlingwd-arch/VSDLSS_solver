@@ -4,6 +4,7 @@
  *
  *   ./bench_phase dump.bin            order threads_list [reps]
  *   ./bench_phase grid:SIDE[:CHAIN]   order threads_list [reps]
+ *   ./bench_phase text:DIR            order threads_list [reps]   (DIR/diag.txt, DIR/data.txt)
  *   build: make bench_phase METIS=1 (order 6), or without METIS for order 5
  *
  * dump.bin is a PG_DUMP system (int64 n, nnz, upper CSC p, i, x, b).
@@ -22,7 +23,7 @@
  * with the bytes each phase streams (records or L) per millisecond.  The
  * vector is reset (outside the timing) before every repetition.  Results
  * are bitwise compared across thread counts (bwd after fwd, core). */
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE   /* getline, syscall */
 #include "../src/vsdlss_m3_internal.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -30,6 +31,39 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <errno.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+/* VSDLSS_INTERLEAVE=1: interleave the process's memory over the online NUMA
+ * nodes (as numactl --interleave=all), which also keeps the kernel's
+ * automatic NUMA balancing from scanning it (see examples/transient_driver). */
+static void interleave_memory(void)
+{
+    const char *e = getenv("VSDLSS_INTERLEAVE");
+    if (!e || atoi(e) == 0) { puts("# numa: off (VSDLSS_INTERLEAVE=1 to interleave)"); return; }
+#if defined(__linux__) && defined(SYS_set_mempolicy)
+    FILE *f = fopen("/sys/devices/system/node/online", "r"); char list[256] = "";
+    if (!f || !fgets(list, sizeof list, f)) { if (f) fclose(f); puts("# numa: no NUMA information"); return; }
+    fclose(f);
+    unsigned long mask[16] = {0}; int maxnode = 0, nodes = 0;
+    for (char *s = list; *s && *s != '\n';) {
+        char *end; long a = strtol(s, &end, 10), b = a;
+        if (end == s) break;
+        if (*end == '-') { s = end + 1; b = strtol(s, &end, 10); }
+        for (long nd = a; nd <= b && nd < 1024; nd++) { mask[nd / 64] |= 1UL << (nd % 64); nodes++; if (nd + 1 > maxnode) maxnode = (int)nd + 1; }
+        s = *end == ',' ? end + 1 : end;
+    }
+    if (nodes < 2) { puts("# numa: single NUMA node, nothing to interleave"); return; }
+    if (syscall(SYS_set_mempolicy, 3 /* MPOL_INTERLEAVE */, mask, (unsigned long)maxnode + 1) != 0)
+        printf("# numa: set_mempolicy failed: %s\n", strerror(errno));
+    else printf("# numa: interleaved over nodes %s", list);
+#else
+    puts("# numa: not supported on this platform");
+#endif
+}
 
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
@@ -82,6 +116,105 @@ static vsdlss *read_dump(const char *path)
     return A;
 }
 
+/* text:DIR -- the files of examples/transient_driver: DIR/diag.txt ("value" or
+ * "i value" per line) and DIR/data.txt ("row col value", strict upper,
+ * zero-based).  Blank lines and lines starting with '#' are skipped. */
+static int text_line(FILE *f, char **buf, size_t *cap)
+{
+    for (;;) {
+        if (getline(buf, cap, f) < 0) return 0;
+        char *s = *buf; while (*s == ' ' || *s == '\t') s++;
+        if (*s && *s != '\n' && *s != '\r' && *s != '#') return 1;
+    }
+}
+static vsdlss *read_text(const char *dir)
+{
+    char path[4096]; char *line = NULL; size_t cap = 0;
+    snprintf(path, sizeof path, "%s/diag.txt", dir);
+    FILE *f = fopen(path, "r");
+    if (!f) { perror(path); return NULL; }
+    size_t nd = 0, capd = 1 << 20; double *diag = malloc(capd * sizeof(double));
+    while (diag && text_line(f, &line, &cap)) {
+        char *e; double a = strtod(line, &e), b; char *e2;
+        b = strtod(e, &e2);
+        if (e2 != e) a = b;                          /* "i value" */
+        if (nd == capd) { capd *= 2; diag = realloc(diag, capd * sizeof(double)); if (!diag) break; }
+        diag[nd++] = a;
+    }
+    fclose(f);
+    snprintf(path, sizeof path, "%s/data.txt", dir);
+    f = fopen(path, "r");
+    if (!f || !diag) { perror(path); free(diag); free(line); return NULL; }
+    size_t ne = 0, cape = 1 << 20; int64_t *ri = malloc(cape * 8), *ci = malloc(cape * 8); double *vv = malloc(cape * 8);
+    while (ri && ci && vv && text_line(f, &line, &cap)) {
+        char *e; int64_t r = strtoll(line, &e, 10), c = strtoll(e, &e, 10); double v = strtod(e, NULL);
+        if (r < 0 || c <= r || (size_t)c >= nd) { fprintf(stderr, "bad entry %lld %lld\n", (long long)r, (long long)c); return NULL; }
+        if (ne == cape) {
+            cape *= 2; ri = realloc(ri, cape * 8); ci = realloc(ci, cape * 8); vv = realloc(vv, cape * 8);
+            if (!ri || !ci || !vv) break;
+        }
+        ri[ne] = r; ci[ne] = c; vv[ne++] = v;
+    }
+    fclose(f); free(line);
+    if (!ri || !ci || !vv) { puts("out of memory reading data.txt"); return NULL; }
+    const csi n = (csi)nd;
+    vsdlss *A = vsdlss_spalloc(n, n, n + (csi)ne, 1, 0);
+    size_t *byrow = malloc(ne * sizeof(size_t)), *rp = calloc(nd + 1, sizeof(size_t));
+    if (!A || !byrow || !rp) { puts("out of memory building CSC"); return NULL; }
+    for (size_t k = 0; k < ne; k++) rp[ri[k] + 1]++;                   /* entries by row ... */
+    for (size_t i = 0; i < nd; i++) rp[i + 1] += rp[i];
+    for (size_t k = 0; k < ne; k++) byrow[rp[ri[k]]++] = k;
+    for (csi j = 0; j <= n; j++) A->p[j] = 0;
+    for (size_t k = 0; k < ne; k++) A->p[ci[k] + 1]++;
+    for (csi j = 0; j < n; j++) A->p[j + 1] += A->p[j] + 1;              /* + the diagonal */
+    csi *pos = malloc((size_t)n * sizeof(csi));
+    if (!pos) return NULL;
+    for (csi j = 0; j < n; j++) pos[j] = A->p[j];
+    for (size_t q = 0; q < ne; q++) {                                  /* ... so each column gets ascending rows */
+        const size_t k = byrow[q]; const csi p = pos[ci[k]]++;
+        A->i[p] = ri[k]; A->x[p] = vv[k];
+    }
+    for (csi j = 0; j < n; j++) { A->i[A->p[j + 1] - 1] = j; A->x[A->p[j + 1] - 1] = diag[j]; }
+    free(pos); free(byrow); free(rp); free(ri); free(ci); free(vv); free(diag);
+    return A;
+}
+
+/* Level structure of the sequential tail (segments q >= blocks): a record's
+ * level is one more than the last level touching its pivot or a neighbour, so
+ * the records of one level touch disjoint vertices and could be replayed
+ * concurrently.  Prints the depth and how parallel the levels are. */
+static void tail_levels(const vsdlss_reduction *r)
+{
+    double tail = 0;
+    for (csi q = r->blocks; q < r->pk_count; q++) tail += (double)r->pk[q].count;
+    if (tail < 1) { puts("# tail: empty"); return; }
+    int *last = calloc((size_t)r->n, sizeof(int)), *lv = malloc((size_t)tail * sizeof(int));
+    if (!last || !lv) { free(last); free(lv); puts("# tail levels: out of memory"); return; }
+    csi k = 0; int maxl = 0;
+    for (csi q = r->blocks; q < r->pk_count; q++) {
+        const vsdlss_pk_seg *g = r->pk + q; csi o = 0;
+        for (csi i = 0; i < g->count; i++) {
+            const csi v = vsdlss_pk_vertex(g, i), d = vsdlss_pk_degree(g, i);
+            int l = last[v];
+            for (csi j = 0; j < d; j++) if (last[g->nb[o + j]] > l) l = last[g->nb[o + j]];
+            l++; last[v] = l; for (csi j = 0; j < d; j++) last[g->nb[o + j]] = l;
+            lv[k++] = l; if (l > maxl) maxl = l; o += d;
+        }
+    }
+    long *sz = calloc((size_t)maxl + 1, sizeof(long));
+    if (!sz) { free(last); free(lv); return; }
+    for (csi i = 0; i < k; i++) sz[lv[i]]++;
+    double big = 0; static const int P[4] = {8, 16, 32, 64}; double steps[4] = {0};
+    for (int l = 1; l <= maxl; l++) {
+        if (sz[l] >= 256) big += (double)sz[l];
+        for (int p = 0; p < 4; p++) steps[p] += (double)((sz[l] + P[p] - 1) / P[p]);
+    }
+    printf("# tail: %.0f records in %d levels (%.0f per level on average), %.1f%% of them in levels of >= 256 | "
+           "ideal speedup of a level-parallel tail: 8 thr %.1fx, 16 thr %.1fx, 32 thr %.1fx, 64 thr %.1fx\n",
+           tail, maxl, tail / maxl, 100 * big / tail, tail / steps[0], tail / steps[1], tail / steps[2], tail / steps[3]);
+    free(last); free(lv); free(sz);
+}
+
 /* A view of the reduction with only the block segments (part 1) or only the
  * tail (part 2) non-empty; the shape checks still pass. */
 static vsdlss_reduction view(const vsdlss_reduction *r, int part, vsdlss_pk_seg *seg, csi *bp)
@@ -101,13 +234,17 @@ static vsdlss_reduction view(const vsdlss_reduction *r, int part, vsdlss_pk_seg 
 #define MAXT 16
 int main(int argc, char **argv)
 {
-    if (argc < 4) { fprintf(stderr, "usage: bench_phase dump.bin|grid:SIDE[:CHAIN] order \"threads\" [reps]\n"); return 1; }
+    if (argc < 4) { fprintf(stderr, "usage: bench_phase dump.bin|grid:SIDE[:CHAIN]|text:DIR order \"threads\" [reps]\n"); return 1; }
     const int order = atoi(argv[2]), reps = argc > 4 ? atoi(argv[4]) : 15;
+    interleave_memory();                     /* before the large allocations */
     vsdlss *A = NULL;
     if (!strncmp(argv[1], "grid:", 5)) {
         csi side = atol(argv[1] + 5), chain = 3; const char *c = strchr(argv[1] + 5, ':');
         if (c) chain = atol(c + 1);
         A = grid_chains(side, chain);
+    } else if (!strncmp(argv[1], "text:", 5)) {
+        double t = now(); A = read_text(argv[1] + 5);
+        if (A) printf("# read %s in %.1f s: n %lld, nnz %lld\n", argv[1] + 5, now() - t, (long long)A->n, (long long)A->p[A->n]);
     } else A = read_dump(argv[1]);
     if (!A) { puts("input failed"); return 1; }
     int threads[MAXT], nth = 0; char buf[256]; strncpy(buf, argv[3], 255); buf[255] = 0;
@@ -135,6 +272,14 @@ int main(int argc, char **argv)
            argv[1], (long long)A->n, (long long)best, (long long)F->count, (long long)n, tf, (long long)r->count,
            (long long)r->blocks, tail_rec, 100 * tail_rec / (double)(r->count ? r->count : 1),
            (long long)(sf ? sf->n : 0), sf ? (double)sf->panel_offset[sf->count] * 8 / 1e6 : 0);
+    for (csi c = 0; c < F->count; c++)        /* every large component, not just the measured one */
+        if (F->component[c].reduction && F->component[c].n >= 100000)
+            printf("# component %lld: n %lld, records %lld (%.1f%% of n), core %lld\n", (long long)c,
+                   (long long)F->component[c].n, (long long)F->component[c].reduction->count,
+                   100.0 * (double)F->component[c].reduction->count / (double)F->component[c].n,
+                   (long long)F->component[c].reduction->core_n);
+    tail_levels(r);
+    fflush(stdout);
 
     vsdlss_pk_seg *seg = malloc((size_t)r->pk_count * sizeof(*seg)); csi *bp = malloc((size_t)(r->blocks + 1) * sizeof(csi));
     double *w0 = malloc((size_t)n * 8), *w = malloc((size_t)n * 8), *ref = malloc((size_t)n * 8);
