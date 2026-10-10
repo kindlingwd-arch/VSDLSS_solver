@@ -1179,6 +1179,10 @@ static void forward_pull_team(const vsdlss_sn_factor *f, csi d, double *x, int t
     }
 }
 
+/* The busy count of a team whose members take turns in single constructs
+ * (the tree top in order): one thread works, the others wait for it. */
+static atomic_int team_single_busy = 1;
+
 static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt, const blas_fwd *bf)
 {
     int bad = 0;
@@ -1190,7 +1194,7 @@ static int forward_pull_par(const vsdlss_sn_factor *f, csi d, double *x, int nt,
 #else
         const int tid = 0, T = 1;
 #endif
-        const int tasks = vsdlss_parallel_set_tasks(1);    /* see solve_tree */
+        atomic_int *const tasks = vsdlss_parallel_set_tasks(&team_single_busy);    /* see solve_tree */
         forward_pull_team(f, d, x, tid, T, &bad, NULL, 0, bf);
         vsdlss_parallel_set_tasks(tasks);
     }
@@ -1261,6 +1265,11 @@ typedef struct {
     atomic_int *left;    /* forward: children in the top still to finish, per top panel */
     double task_work;    /* backward */
     int *bad;            /* shared: atomic updates */
+    /* Threads of the tree-top team now running a branch of their own
+     * (vsdlss_parallel_set_tasks): where the top narrows to fewer branches
+     * than threads -- the trunk -- a panel's kernel may give the free
+     * threads part of its step. */
+    atomic_int *busy;
 } top_ctx;
 
 static inline void top_fail(const top_ctx *g, int e)
@@ -1282,13 +1291,15 @@ static inline int top_failed(const top_ctx *g)
 static void top_forward(const top_ctx *g, csi i)
 {
     const sn_split *sp = g->sp;
+    atomic_fetch_add_explicit(g->busy, 1, memory_order_relaxed);
     for (;;) {
         int e;
-        if (top_failed(g)) return;
-        if ((e = forward_pull(g->f, g->t->order[sp->tpos[i]], g->x, g->bf))) { top_fail(g, e); return; }
+        if (top_failed(g)) break;
+        if ((e = forward_pull(g->f, g->t->order[sp->tpos[i]], g->x, g->bf))) { top_fail(g, e); break; }
         i = sp->tpar[i];
-        if (i < 0 || atomic_fetch_sub_explicit(&g->left[i], 1, memory_order_acq_rel) != 1) return;
+        if (i < 0 || atomic_fetch_sub_explicit(&g->left[i], 1, memory_order_acq_rel) != 1) break;
     }
+    atomic_fetch_sub_explicit(g->busy, 1, memory_order_relaxed);
 }
 
 /* Backward: the split subtree whose root is at postorder position k,
@@ -1307,7 +1318,9 @@ static void backward_subtree(const top_ctx *g, csi k)
 static void backward_batch(const top_ctx *g, csi hi, csi lo)
 {
     const tree_info *t = g->t;
+    atomic_fetch_add_explicit(g->busy, 1, memory_order_relaxed);
     for (csi c = hi; c >= lo && !top_failed(g); c = t->first[t->order[c]] - 1) backward_subtree(g, c);
+    atomic_fetch_sub_explicit(g->busy, 1, memory_order_relaxed);
 }
 
 static void backward_branch(const top_ctx *g, csi k);
@@ -1351,14 +1364,16 @@ static csi backward_kids(const top_ctx *g, csi hi, csi lo)
 static void backward_branch(const top_ctx *g, csi k)
 {
     const tree_info *t = g->t;
+    atomic_fetch_add_explicit(g->busy, 1, memory_order_relaxed);
     while (k >= 0) {
         const csi d = t->order[k];
         int e;
-        if (top_failed(g)) return;
-        if (g->sp->in_sub[d]) { backward_subtree(g, k); return; }
-        if ((e = backward_panel(g->f, d, g->x))) { top_fail(g, e); return; }
+        if (top_failed(g)) break;
+        if (g->sp->in_sub[d]) { backward_subtree(g, k); break; }
+        if ((e = backward_panel(g->f, d, g->x))) { top_fail(g, e); break; }
         k = backward_kids(g, k - 1, t->first[d]);
     }
+    atomic_fetch_sub_explicit(g->busy, 1, memory_order_relaxed);
 }
 
 /* Calls of vsdlss_sn_solve_inplace on the tree schedule: all of them, and
@@ -1421,7 +1436,9 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
     int branches = top_branches_mode();
     if (branches < 0) branches = bf ? 3 : 0;
     if (nt_top < 2) branches = 0;
-    top_ctx g = { f, t, sp, x, bf, NULL, bwd_task_work(), &bad };
+    atomic_int busy;
+    atomic_init(&busy, 0);
+    top_ctx g = { f, t, sp, x, bf, NULL, bwd_task_work(), &bad, &busy };
     atomic_int left_stack[256], *left_heap = NULL;
     if ((branches & 1) && !sp->tpos) branches &= ~1;
     if ((branches & 1) && sp->ntop > 256 &&
@@ -1430,12 +1447,12 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
         const csi ntop = sp->ntop; const int *tkid = sp->tkid;
         g.left = left_heap ? left_heap : left_stack;
         for (csi i = 0; i < ntop; ++i) atomic_init(&g.left[i], tkid[i]);
-        /* Every thread of a tree-top team marks itself as running tasks:
+        /* Every thread of a tree-top team points at the team's busy count:
          * a panel kernel called from one of them may hand part of a large
-         * step to the others as child tasks (vsdlss_parallel_tasks). */
+         * step to the free threads as child tasks (vsdlss_parallel_helpers). */
         VSDLSS_OMP(omp parallel num_threads(nt_top))
         {
-            const int tasks = vsdlss_parallel_set_tasks(1);
+            atomic_int *const tasks = vsdlss_parallel_set_tasks(&busy);
             VSDLSS_OMP(omp single)
             for (csi i = 0; i < ntop; ++i) {
                 if (tkid[i]) continue;                  /* the leaves of the top are ready */
@@ -1478,7 +1495,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
             /* Ranges were cut for plan->T threads; another team size finds
              * its own. */
             const int use = T == plan->T;
-            const int tasks = vsdlss_parallel_set_tasks(1);
+            atomic_int *const tasks = vsdlss_parallel_set_tasks(&team_single_busy);
             csi k = 0;
             for (csi i = 0; i <= nbig; ++i) {
                 const csi kend = i < nbig ? bigk[i] : count;
@@ -1513,7 +1530,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
         /* The roots of the forest are the children of a virtual root. */
         VSDLSS_OMP(omp parallel num_threads(nt_top))
         {
-            const int tasks = vsdlss_parallel_set_tasks(1);
+            atomic_int *const tasks = vsdlss_parallel_set_tasks(&busy);
             VSDLSS_OMP(omp single)
             {
                 const csi last = backward_kids(&g, count - 1, 0);

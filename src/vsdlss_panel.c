@@ -75,10 +75,12 @@ int vsdlss_solve_upd16(void)
  * their order, so the bits are theirs for any block size (BLAS builds: not
  * those of dtpsv).
  *
- * A team: child tasks when the caller's team runs tasks
- * (vsdlss_parallel_tasks), else an own team when vsdlss_parallel_width
- * grants one.  VSDLSS_SOLVE_TRI_WORK: multiply-adds of a block's shared
- * step from which it is split (default 16384). */
+ * A team: child tasks when the caller's team runs tasks, as many as it has
+ * threads free at that moment (vsdlss_parallel_helpers; a busy team is left
+ * alone: its threads would take the pieces late and the caller would wait
+ * for them), else an own team when vsdlss_parallel_width grants one.
+ * VSDLSS_SOLVE_TRI_WORK: multiply-adds of a block's shared step from which
+ * it is split (default 16384). */
 #define TRI_MIN 16
 #ifndef TRI_FWD_BLK
 #define TRI_FWD_BLK 64
@@ -121,12 +123,17 @@ static inline void tri_dots(const double *D, csi w, csi j0, csi j1, csi r0, csi 
 }
 
 /* Pieces a shared step of `work` multiply-adds over `units` items is cut
- * into: one, or the team size when the caller has a team (par). */
+ * into: one; with an own team (par 1) its size; in a task team (par 2) the
+ * caller plus the threads free right now. */
 static inline csi tri_pieces(int par, double work, csi units)
 {
     csi n = 1;
 #ifdef _OPENMP
-    if (par && work >= tri_par_work()) { n = omp_get_num_threads(); if (n > units) n = units; if (n < 1) n = 1; }
+    if (par && work >= tri_par_work()) {
+        n = par == 1 ? omp_get_num_threads() : 1 + vsdlss_parallel_helpers();
+        if (n > units) n = units;
+        if (n < 1) n = 1;
+    }
     if (n > 1) atomic_fetch_add_explicit(&tri_split_count, 1, memory_order_relaxed);
 #else
     (void)par; (void)work; (void)units;
@@ -216,7 +223,7 @@ static void tri_solve(const double *D, csi w, double *x, int back)
     const csi B = tri_blk();
     int par = 0;
 #ifdef _OPENMP
-    if (vsdlss_parallel_tasks()) par = omp_get_num_threads() > 1;
+    if (vsdlss_parallel_tasks()) par = omp_get_num_threads() > 1 ? 2 : 0;
     else {
         const int nt = vsdlss_parallel_width((double)w * (double)w / 2);
         if (nt > 1) {
