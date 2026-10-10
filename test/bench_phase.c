@@ -105,6 +105,24 @@ static vsdlss *grid_chains(csi side, csi chain)
     return A;
 }
 
+/* Synthetic wide-tail integration case, not a substitute for user data. */
+static vsdlss *leaf_core(csi width,csi depth)
+{
+    if(width<5||width>1000000||depth<1||depth>1000)return NULL;
+    csi leaves=width*depth,n=leaves+width,nz=0;
+    vsdlss *A=vsdlss_spalloc(n,n,n+leaves+2*width,1,0);if(!A)return NULL;
+    for(csi j=0;j<n;j++) {
+        A->p[j]=nz;
+        if(j>=leaves) {
+            csi c=j-leaves,nb[4]={(c+1)%width,(c+2)%width,(c+width-1)%width,(c+width-2)%width};
+            for(csi k=0;k<depth;k++){A->i[nz]=k*width+c;A->x[nz++]=-1;}
+            for(int k=1;k<4;k++)for(int h=k;h>0&&nb[h]<nb[h-1];h--){csi t=nb[h];nb[h]=nb[h-1];nb[h-1]=t;}
+            for(int k=0;k<4;k++)if(nb[k]<c){A->i[nz]=leaves+nb[k];A->x[nz++]=-1;}
+        }
+        A->i[nz]=j;A->x[nz++]=j<leaves?1.1:depth+4.1;
+    }
+    A->p[n]=nz;return A;
+}
 static vsdlss *read_dump(const char *path)
 {
     FILE *fp = fopen(path, "rb"); int64_t n, nz;
@@ -232,16 +250,99 @@ static vsdlss_reduction view(const vsdlss_reduction *r, int part, vsdlss_pk_seg 
 }
 
 #define MAXT 16
+static int backward_ab(const vsdlss_reduction *r,const int *threads,int nth,int reps)
+{
+    size_t bytes=(size_t)r->n*sizeof(double);
+    double *b=malloc(bytes),*x=malloc(bytes),*ref=malloc(bytes),t[2][64];
+    if(!b||!x||!ref) {free(b);free(x);free(ref);return 1;}
+    csi scheduled=0;
+    for(csi q=0;q<r->pk_count;q++) if(r->pk[q].levels) scheduled+=r->pk[q].count;
+    printf("# backward A/B: scheduled %lld of %lld records; threads,levels,median_ms,min_ms,max_ms,bitwise_equal\n",(long long)scheduled,(long long)r->count);
+    for(csi i=0;i<r->n;i++) b[i]=sin(0.37*(double)i)+0.2;
+    vsdlss_set_num_threads(1);setenv("VSDLSS_REPLAY_LEVELS","0",1);
+    int bad=0;
+    if(vsdlss_reduce_forward_inplace(r,b,NULL)!=VSDLSS_OK) {bad=1;goto done;}
+    memcpy(ref,b,bytes);
+    if(vsdlss_reduce_backward_inplace(r,NULL,ref)!=VSDLSS_OK) {bad=1;goto done;}
+    double best=0;
+    for(int ti=0;ti<nth;ti++) {
+        vsdlss_set_num_threads(threads[ti]);int equal[2]={1,1};
+        for(int k=-2;k<reps;k++) for(int turn=0;turn<2;turn++) {
+            int mode=turn^((k+2)&1);setenv("VSDLSS_REPLAY_LEVELS",mode?"1":"0",1);
+            memcpy(x,b,bytes);double start=now();
+            vsdlss_status st=vsdlss_reduce_backward_inplace(r,NULL,x);
+            double elapsed=1000*(now()-start);
+            if(st!=VSDLSS_OK) {bad=1;goto done;}
+            equal[mode]&=memcmp(x,ref,bytes)==0;
+            if(k>=0)t[mode][k]=elapsed;
+        }
+        for(int mode=0;mode<2;mode++) {
+            qsort(t[mode],(size_t)reps,sizeof(double),cmpd);
+            printf("# backward_ab,%d,%d,%.6f,%.6f,%.6f,%d\n",threads[ti],mode,t[mode][reps/2],t[mode][0],t[mode][reps-1],equal[mode]);
+            bad|=!equal[mode];
+        }
+        double ratio=t[0][reps/2]/t[1][reps/2];if(ratio>best)best=ratio;
+        printf("# backward_speedup,%d,%.4f\n",threads[ti],ratio);fflush(stdout);
+    }
+    const char *gate=getenv("VSDLSS_REQUIRE_REPLAY_SPEEDUP");
+    if(gate) {
+        double target=strtod(gate,NULL);
+        int pass=isfinite(target)&&target>0&&scheduled>0&&best>=target&&!bad;
+        printf("# backward acceptance: best %.4fx target %.4fx %s\n",best,target,pass?"PASS":"FAIL");
+        bad|=!pass;
+    }
+done:
+    free(b);free(x);free(ref);return bad;
+}
+/* Same factor and RHS, alternate the legacy and level paths. Copying, residual
+ * checks and equality checks are outside CLOCK_MONOTONIC timed intervals. */
+static int solve_ab(const vsdlss *A,vsdlss_m3_factor *F,vsdlss_m3_factor *baseline,const int *threads,int nth,int reps)
+{
+    size_t bytes=(size_t)A->n*sizeof(double);
+    double *b=malloc(bytes),*x=malloc(bytes),*ref=malloc(bytes),t[2][64];
+    if(!b||!x||!ref) {free(b);free(x);free(ref);return 1;}
+    for(csi i=0;i<A->n;i++) b[i]=sin(0.37*(double)i)+0.2;
+    puts("# full solve A/B: original factor layout versus new layout; threads,levels,median_ms,min_ms,max_ms,bitwise_equal,backward_error");
+    int bad=0;
+    for(int ti=0;ti<nth;ti++) {
+        vsdlss_set_num_threads(threads[ti]);
+        setenv("VSDLSS_REPLAY_LEVELS","0",1);
+        if(vsdlss_m3_solve(baseline,b,ref)!=VSDLSS_OK) {bad=1;break;}
+        int equal[2]={1,1};double eta[2]={0,0};
+        for(int k=-2;k<reps;k++) for(int turn=0;turn<2;turn++) {
+            int mode=turn^((k+2)&1);
+            setenv("VSDLSS_REPLAY_LEVELS",mode?"1":"0",1);
+            double start=now();vsdlss_status st=vsdlss_m3_solve(mode?F:baseline,b,x);
+            double elapsed=1000*(now()-start);
+            if(st!=VSDLSS_OK) {bad=1;goto done;}
+            equal[mode]&=memcmp(x,ref,bytes)==0;
+            if(k>=0)t[mode][k]=elapsed;
+            if(k==reps-1 && (vsdlss_backward_error(A,x,b,&eta[mode])!=VSDLSS_OK || !isfinite(eta[mode]) || eta[mode]>1e-10)) {bad=1;goto done;}
+        }
+        for(int mode=0;mode<2;mode++) {
+            qsort(t[mode],(size_t)reps,sizeof(double),cmpd);
+            printf("# solve_ab,%d,%d,%.6f,%.6f,%.6f,%d,%.3e\n",threads[ti],mode,t[mode][reps/2],t[mode][0],t[mode][reps-1],equal[mode],eta[mode]);
+            bad|=!equal[mode];
+        }
+        fflush(stdout);
+    }
+done:
+    free(b);free(x);free(ref);return bad;
+}
 int main(int argc, char **argv)
 {
-    if (argc < 4) { fprintf(stderr, "usage: bench_phase dump.bin|grid:SIDE[:CHAIN]|text:DIR order \"threads\" [reps]\n"); return 1; }
+    if (argc < 4) { fprintf(stderr, "usage: bench_phase dump.bin|grid:SIDE[:CHAIN]|leaf:WIDTH:DEPTH|text:DIR order \"threads\" [reps]\n"); return 1; }
     const int order = atoi(argv[2]), reps = argc > 4 ? atoi(argv[4]) : 15;
+    if(reps<1 || reps>64) {fputs("reps must be 1..64\n",stderr);return 1;}
     interleave_memory();                     /* before the large allocations */
     vsdlss *A = NULL;
     if (!strncmp(argv[1], "grid:", 5)) {
         csi side = atol(argv[1] + 5), chain = 3; const char *c = strchr(argv[1] + 5, ':');
         if (c) chain = atol(c + 1);
         A = grid_chains(side, chain);
+    } else if (!strncmp(argv[1],"leaf:",5)) {
+        const char *c=strchr(argv[1]+5,':');
+        if(c) A=leaf_core(atoll(argv[1]+5),atoll(c+1));
     } else if (!strncmp(argv[1], "text:", 5)) {
         double t = now(); A = read_text(argv[1] + 5);
         if (A) printf("# read %s in %.1f s: n %lld, nnz %lld\n", argv[1] + 5, now() - t, (long long)A->n, (long long)A->p[A->n]);
@@ -249,8 +350,13 @@ int main(int argc, char **argv)
     if (!A) { puts("input failed"); return 1; }
     int threads[MAXT], nth = 0; char buf[256]; strncpy(buf, argv[3], 255); buf[255] = 0;
     for (char *t = strtok(buf, " ,"); t && nth < MAXT; t = strtok(NULL, " ,")) threads[nth++] = atoi(t);
+    if(!nth) return 1;
+    for(int ti=0;ti<nth;ti++) if(threads[ti]<1) return 1;
     int tmax = 1; for (int i = 0; i < nth; i++) if (threads[i] > tmax) tmax = threads[i];
-    vsdlss_set_num_threads(tmax);
+    const char *factor_threads=getenv("VSDLSS_BENCH_FACTOR_THREADS");
+    int ft=factor_threads?atoi(factor_threads):tmax;
+    if(ft<1 || vsdlss_set_num_threads(ft)!=VSDLSS_OK) return 1;
+    printf("# factor_threads=%d\n",ft);
     vsdlss_m3_factor *F = NULL; double t0 = now();
     if (vsdlss_factorize_m3(A, order, &F) != VSDLSS_OK) { puts("factor failed"); return 1; }
     const double tf = now() - t0;
@@ -329,6 +435,14 @@ int main(int argc, char **argv)
         printf("\n");
     }
     printf("# results across thread counts: %s\n", mismatch ? "DIFFERENT" : "bitwise identical");
+    mismatch |= backward_ab(r,threads,nth,reps);
+    vsdlss_m3_factor *baseline=NULL;
+    setenv("VSDLSS_REPLAY_LEVELS","0",1);vsdlss_set_num_threads(ft);
+    double baseline_start=now();
+    if(vsdlss_factorize_m3(A,order,&baseline)!=VSDLSS_OK) {fputs("baseline factor failed\n",stderr);return 1;}
+    printf("# baseline_factor_ms=%.6f (outside solve timers)\n",1000*(now()-baseline_start));
+    mismatch |= solve_ab(A,F,baseline,threads,nth,reps);
+    vsdlss_m3_factor_free(baseline);
     vsdlss_m3_factor_free(F); vsdlss_spfree(A);
     free(seg); free(bp); free(w0); free(w); free(ref); free(c0); free(cx); free(cref);
     return mismatch;

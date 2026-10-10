@@ -20,11 +20,22 @@ typedef struct vsdlss_elim_record {
     double pivot, multiplier[3];
 } vsdlss_elim_record;
 
+typedef struct { uint32_t record, offset; } vsdlss_replay_ref;
+typedef struct { uint32_t begin, end, offset, offset_end, degree; } vsdlss_replay_tile;
+typedef struct vsdlss_replay_levels {
+    csi count, levels;
+    csi *ptr;
+    vsdlss_replay_ref *ref;  /* stable record order within each conflict-free level */
+    csi tiles;
+    vsdlss_replay_tile *tile; /* optional contiguous layout, ptr indexes tiles */
+} vsdlss_replay_levels;
+
 typedef struct vsdlss_pk_seg {
     csi k0, count, nbn;
     uint32_t *head, *nb;
     uint8_t *deg;
     double *piv, *val;
+    vsdlss_replay_levels *levels;
 } vsdlss_pk_seg;
 
 /* Degree and pivot vertex of record i of a packed segment, in either form
@@ -249,6 +260,10 @@ vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *, vsdlss_reduction *
  * use the same work/x vector, untouched between them except at core vertices. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
+/* Optional immutable schedule. Build during factorization; packing must
+ * precede solve-order relabel. Narrow tails stay sequential, OOM is optional. */
+vsdlss_status vsdlss_reduce_build_levels(vsdlss_reduction *);
+vsdlss_status vsdlss_reduce_pack_levels(vsdlss_reduction *);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
 /* Compose an elimination-tree postorder into (q, pinv) for matrix A (the

@@ -375,9 +375,22 @@ static vsdlss_status factor_component(void *vctx, csi component)
         status=vsdlss_sn_factorize_consume(&permuted,&symbolic,&cf->numeric);
         TRACE("core numeric",t0);
     }
+    if(status==VSDLSS_OK && !factor->disk_mode && relabel_on() && cf->gather) {
+        vsdlss_status plan=vsdlss_reduce_build_levels(cf->reduction);
+        if(plan==VSDLSS_OK) plan=vsdlss_reduce_pack_levels(cf->reduction);
+        if(plan!=VSDLSS_OK && plan!=VSDLSS_ERR_OOM) status=plan;
+        TRACE("replay tail packing",t0);
+    }
     if(status==VSDLSS_OK && !factor->disk_mode && relabel_on()) {
         status=relabel_component(cf);
         TRACE("solve-order relabel",t0);
+    }
+    if(status==VSDLSS_OK && !factor->disk_mode) {
+        vsdlss_status plan=vsdlss_reduce_build_levels(cf->reduction);
+        /* This optional acceleration must not make an otherwise usable
+         * factor fail just because its scheduling memory is unavailable. */
+        if(plan!=VSDLSS_OK && plan!=VSDLSS_ERR_OOM) status=plan;
+        TRACE("replay tail schedule",t0);
     }
     /* 32-bit core map once the numbering is final (in memory only). */
     if(status==VSDLSS_OK && !factor->disk_mode && cf->core_map && cf->n<=(csi)UINT32_MAX) {
@@ -438,8 +451,17 @@ static void trace_factor_bytes(const vsdlss_m3_factor *f)
         if(cf->core_map32) maps+=(double)r->core_n*4;
         if(r) {
             if(r->core_vertices) maps+=(double)r->core_n*sizeof(csi);
-            for(csi q=0;q<r->pk_count;q++)
+            for(csi q=0;q<r->pk_count;q++) {
                 replay+=(double)r->pk[q].count*(r->pk[q].head?4+8:1+8)+(double)r->pk[q].nbn*(4+8);
+                const vsdlss_replay_levels *lv=r->pk[q].levels;
+                if(lv) {
+                    double bytes=sizeof(*lv)+(double)(lv->levels+1)*sizeof(csi)+
+                        (lv->ref?(double)lv->count*sizeof(*lv->ref):0)+(double)lv->tiles*sizeof(*lv->tile);
+                    replay+=bytes;
+                    fprintf(stderr,"vsdlss trace: component %lld tail %lld: %lld records, %lld levels, schedule %.1f MiB\n",
+                            (long long)c,(long long)q,(long long)lv->count,(long long)lv->levels,bytes*mb);
+                }
+            }
             if(r->records) replay+=(double)r->count*sizeof(vsdlss_elim_record);
         }
         ws+=(double)(cf->ws_local?cf->n:0)*8+(double)(cf->ws_core?r->core_n:0)*8+

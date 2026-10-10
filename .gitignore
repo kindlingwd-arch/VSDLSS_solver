@@ -56,3 +56,7 @@
 /test_kernels_asan
 /build/
 /bench_components
+/bench_phase
+/bench_replay_levels
+/test_replay_levels
+/test_simd

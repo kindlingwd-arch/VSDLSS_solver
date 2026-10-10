@@ -357,3 +357,15 @@ test_relabel: test/test_relabel.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_inte
 test-relabel: test_relabel
 	./test_relabel
 test: test-relabel
+
+test_replay_levels: test/test_replay_levels.c test/replay_fixture.h test/m3_test_alloc.c $(LIBSRCS) src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_replay_levels.c test/m3_test_alloc.c $(LIBSRCS) $(LDLIBS) \
+	  -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
+
+.PHONY: test-replay-levels
+test-replay-levels: test_replay_levels
+	./test_replay_levels
+test: test-replay-levels
+
+bench_replay_levels: test/bench_replay_levels.c test/replay_fixture.h libvsdlss.a
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_replay_levels.c libvsdlss.a $(LDLIBS)

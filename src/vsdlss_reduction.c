@@ -239,11 +239,17 @@ static int cmp_edge(const void *x, const void *y)
     return (a>b)-(a<b);
 }
 
+static void free_levels(vsdlss_pk_seg *g)
+{
+    if(g->levels) { free(g->levels->ptr); free(g->levels->ref); free(g->levels->tile); free(g->levels); g->levels=NULL; }
+}
+
 void vsdlss_reduction_free(vsdlss_reduction *reduction)
 {
     if(!reduction) return;
     free(reduction->records); free(reduction->core_vertices); free(reduction->block_ptr);
     if(reduction->pk) for(csi q=0;q<reduction->pk_count;q++) {
+        free_levels(reduction->pk+q);
         free(reduction->pk[q].head); free(reduction->pk[q].deg); free(reduction->pk[q].nb); free(reduction->pk[q].piv); free(reduction->pk[q].val);
     }
     free(reduction->pk);
@@ -518,6 +524,237 @@ static int backward_seg(const vsdlss_pk_seg *g, const double *restrict saved, do
 static int pk_blocked(const vsdlss_reduction *r)
 { return r->blocks>=1 && r->pk_count==r->blocks+1 && blocks_valid(r); }
 
+static int levels_on(void)
+{
+    const char *e=getenv("VSDLSS_REPLAY_LEVELS");
+    return !(e && !strcmp(e,"0"));
+}
+
+/* Serial construction only, never inside a solve. Conflicts include the
+ * pivot AND all scatter targets: same-level records have disjoint touches.
+ * Thus each vertex sees exactly the original order of floating operations,
+ * in both directions, without atomics or a floating-point reduction. */
+static vsdlss_status build_segment_levels(const vsdlss_reduction *r,vsdlss_pk_seg *g)
+{
+    uint32_t *last=NULL,*level=NULL; csi *next=NULL;
+    vsdlss_replay_levels *s=NULL; uint32_t depth=0;
+    vsdlss_status st=VSDLSS_ERR_OOM;
+    if(g->levels || g->count<32768 || g->count>UINT32_MAX || g->nbn>UINT32_MAX) return VSDLSS_OK;
+    if(!checked_count(r->n,sizeof(*last)) || !checked_count(g->count,sizeof(*level)) ||
+       !checked_count(g->count,sizeof(vsdlss_replay_ref))) return VSDLSS_ERR_OOM;
+    last=vsdlss_big_calloc((size_t)r->n,sizeof(*last));
+    level=vsdlss_big_malloc((size_t)g->count*sizeof(*level));
+    if(!last||!level) goto done;
+    csi o=0;
+    for(csi i=0;i<g->count;i++) {
+        csi v=vsdlss_pk_vertex(g,i),d=vsdlss_pk_degree(g,i);
+        if(v<0||v>=r->n||d<0||d>3||o>g->nbn-d) {st=VSDLSS_ERR_INVALID;goto done;}
+        uint32_t l=last[v];
+        for(csi j=0;j<d;j++) {
+            uint32_t w=g->nb[o+j];
+            if(w>=(uint64_t)r->n) {st=VSDLSS_ERR_INVALID;goto done;}
+            if(last[w]>l) l=last[w];
+        }
+        if(l==UINT32_MAX) goto done;
+        level[i]=l; l++; last[v]=l;
+        for(csi j=0;j<d;j++) last[g->nb[o+j]]=l;
+        if(l>depth) depth=l;
+        o+=d;
+    }
+    if(o!=g->nbn) {st=VSDLSS_ERR_INVALID;goto done;}
+    free(last); last=NULL;
+    /* Avoid retaining a large schedule for a chain or a star. */
+    if(!depth || g->count/(csi)depth<256) {st=VSDLSS_OK;goto done;}
+    s=calloc(1,sizeof(*s)); if(!s) goto done;
+    s->count=g->count; s->levels=depth;
+    s->ptr=calloc((size_t)depth+1,sizeof(*s->ptr));
+    s->ref=vsdlss_big_malloc((size_t)g->count*sizeof(*s->ref));
+    next=malloc((size_t)depth*sizeof(*next));
+    if(!s->ptr||!s->ref||!next) goto done;
+    for(csi i=0;i<g->count;i++) s->ptr[(size_t)level[i]+1]++;
+    for(csi l=0;l<depth;l++) s->ptr[l+1]+=s->ptr[l];
+    memcpy(next,s->ptr,(size_t)depth*sizeof(*next));
+    for(csi i=0,off=0;i<g->count;i++) {
+        csi at=next[level[i]]++;
+        s->ref[at].record=(uint32_t)i; s->ref[at].offset=(uint32_t)off;
+        off+=vsdlss_pk_degree(g,i);
+    }
+    g->levels=s; s=NULL; st=VSDLSS_OK;
+done:
+    free(last);free(level);free(next);
+    if(s) {free(s->ptr);free(s->ref);free(s->tile);free(s);}
+    return st;
+}
+
+vsdlss_status vsdlss_reduce_build_levels(vsdlss_reduction *r)
+{
+    if(!valid_reduction_shape(r)) return VSDLSS_ERR_INVALID;
+    if(r->records || !r->count || !levels_on() || !vsdlss_parallel_enabled()) return VSDLSS_OK;
+    csi first=pk_blocked(r)?r->blocks:0;
+    for(csi q=first;q<r->pk_count;q++) {
+        vsdlss_status st=build_segment_levels(r,r->pk+q);
+        if(st!=VSDLSS_OK) return st;
+    }
+    return VSDLSS_OK;
+}
+
+/* Reorder commuting records once, before M3's solve-order relabel. This
+ * removes the per-record indirect schedule and gives contiguous static
+ * tiles. Commit each segment only after all allocations/copies succeed;
+ * OOM leaves the original segment and indirect schedule usable. */
+vsdlss_status vsdlss_reduce_pack_levels(vsdlss_reduction *r)
+{
+    if(!valid_reduction_shape(r)) return VSDLSS_ERR_INVALID;
+    const char *e=getenv("VSDLSS_REPLAY_PACK");
+    if(!levels_on() || (e&&!strcmp(e,"0")) || r->n>(csi)PK_VMASK+1) return VSDLSS_OK;
+    for(csi q=0;q<r->pk_count;q++) {
+        vsdlss_pk_seg *g=r->pk+q;vsdlss_replay_levels *s=g->levels;
+        if(!s||s->tile||!s->ref)continue;
+        csi tiles=0;
+        for(csi l=0;l<s->levels;l++) tiles+=(s->ptr[l+1]-s->ptr[l]+255)/256;
+        if(!checked_count(tiles,sizeof(vsdlss_replay_tile))) return VSDLSS_ERR_OOM;
+        uint32_t *head=vsdlss_big_malloc((size_t)g->count*sizeof(*head));
+        uint32_t *nb=vsdlss_big_malloc((size_t)(g->nbn?g->nbn:1)*sizeof(*nb));
+        double *piv=vsdlss_big_malloc((size_t)g->count*sizeof(*piv));
+        double *val=vsdlss_big_malloc((size_t)(g->nbn?g->nbn:1)*sizeof(*val));
+        csi *ptr=malloc((size_t)(s->levels+1)*sizeof(*ptr));
+        vsdlss_replay_tile *tile=malloc((size_t)tiles*sizeof(*tile));
+        if(!head||!nb||!piv||!val||!ptr||!tile) {
+            free(head);free(nb);free(piv);free(val);free(ptr);free(tile);return VSDLSS_ERR_OOM;
+        }
+        csi off=0,t=0;
+        for(csi l=0;l<s->levels;l++) {
+            ptr[l]=t;
+            for(csi begin=s->ptr[l];begin<s->ptr[l+1];begin+=256) {
+                csi end=begin+256<s->ptr[l+1]?begin+256:s->ptr[l+1];
+                tile[t].begin=(uint32_t)begin;tile[t].end=(uint32_t)end;tile[t].offset=(uint32_t)off;
+                tile[t].degree=(uint32_t)vsdlss_pk_degree(g,s->ref[begin].record);
+                for(csi p=begin;p<end;p++) {
+                    vsdlss_replay_ref ref=s->ref[p];csi i=ref.record,d=vsdlss_pk_degree(g,i);
+                    if((uint32_t)d!=tile[t].degree) tile[t].degree=4;
+                    head[p]=(uint32_t)vsdlss_pk_vertex(g,i)|((uint32_t)d<<30);piv[p]=g->piv[i];
+                    for(csi j=0;j<d;j++) {nb[off]=g->nb[ref.offset+j];val[off++]=g->val[ref.offset+j];}
+                }
+                tile[t++].offset_end=(uint32_t)off;
+            }
+        }
+        ptr[s->levels]=t;
+        free(g->head);free(g->deg);free(g->nb);free(g->piv);free(g->val);
+        g->head=head;g->deg=NULL;g->nb=nb;g->piv=piv;g->val=val;
+        free(s->ptr);free(s->ref);s->ptr=ptr;s->ref=NULL;s->tile=tile;s->tiles=tiles;
+    }
+    return VSDLSS_OK;
+}
+
+static inline vsdlss_pk_seg tile_view(const vsdlss_pk_seg *g,vsdlss_replay_tile t)
+{
+    vsdlss_pk_seg v=*g;v.k0+=t.begin;v.count=t.end-t.begin;v.nbn=t.offset_end-t.offset;
+    v.head=g->head?g->head+t.begin:NULL;v.deg=g->deg?g->deg+t.begin:NULL;
+    v.piv=g->piv+t.begin;v.nb=g->nb+t.offset;v.val=g->val+t.offset;v.levels=NULL;
+    return v;
+}
+
+/* Homogeneous relabelled tiles have contiguous pivots and fixed edge stride.
+ * Same-level disjoint touches prove that these iterations may use SIMD;
+ * each record still divides first and subtracts neighbours in original order. */
+static int backward_tile(const vsdlss_pk_seg *g,vsdlss_replay_tile t,const double *saved,double *x)
+{
+    if(g->head || t.degree>3) {
+        vsdlss_pk_seg v=tile_view(g,t);
+        return backward_seg(&v,saved?saved+t.begin:NULL,x);
+    }
+    const csi d=t.degree,begin=t.begin,end=t.end,k0=g->k0;
+    const double *restrict piv=g->piv,*restrict val=g->val;
+    const uint32_t *restrict nb=g->nb;int ok=1;
+    /* Separate constant-degree loops let the compiler unroll the edge work. */
+#define REPLAY_FIXED(D) \
+    VSDLSS_OMP(omp simd reduction(&:ok)) \
+    for(csi i=begin;i<end;i++) { \
+        csi o=(csi)t.offset+(i-begin)*(D); \
+        double v=(saved?saved[i]:x[k0+i])/piv[i]; \
+        for(csi j=0;j<(D);j++) {double update=val[o+j]*x[nb[o+j]];v-=update;} \
+        ok&=isfinite(v)!=0;x[k0+i]=v; \
+    }
+    if(d==0) { REPLAY_FIXED(0) }
+    else if(d==1) { REPLAY_FIXED(1) }
+    else if(d==2) { REPLAY_FIXED(2) }
+    else { REPLAY_FIXED(3) }
+#undef REPLAY_FIXED
+    return ok;
+}
+
+static inline void forward_level_record(const vsdlss_pk_seg *g,vsdlss_replay_ref ref,
+                                       double *restrict work,double *restrict saved)
+{
+    const csi i=ref.record,o=ref.offset,d=vsdlss_pk_degree(g,i),v=vsdlss_pk_vertex(g,i);
+    double s=work[v]; if(saved) saved[i]=s;
+    for(csi j=0;j<d;j++) { double update=g->val[o+j]*s;work[g->nb[o+j]]-=update; }
+}
+static inline int backward_level_record(const vsdlss_pk_seg *g,vsdlss_replay_ref ref,
+                                        const double *restrict saved,double *restrict x)
+{
+    const csi i=ref.record,o=ref.offset,d=vsdlss_pk_degree(g,i),v=vsdlss_pk_vertex(g,i);
+    double value=(saved?saved[i]:x[v])/g->piv[i];
+    for(csi j=0;j<d;j++) {double update=g->val[o+j]*x[g->nb[o+j]];value-=update;}
+    x[v]=value;return isfinite(value)!=0;
+}
+static void forward_tail(const vsdlss_pk_seg *g,double *work,double *saved,int nt)
+{
+    const vsdlss_replay_levels *s=g->levels;
+    if(nt<2||!s||s->count!=g->count||!levels_on()) {forward_seg(g,work,saved);return;}
+    VSDLSS_OMP(omp parallel num_threads(nt))
+    {
+        VSDLSS_OMP(omp master)
+        {vsdlss_parallel_observe();}
+        for(csi l=0;l<s->levels;l++) {
+            csi begin=s->ptr[l],end=s->ptr[l+1];
+            if(s->tile) {
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi p=begin;p<end;p++) {
+                    vsdlss_pk_seg v=tile_view(g,s->tile[p]);
+                    forward_seg(&v,work,saved?saved+s->tile[p].begin:NULL);
+                }
+                continue;
+            }
+            if(end-begin<256) {
+                VSDLSS_OMP(omp single)
+                {for(csi p=begin;p<end;p++) forward_level_record(g,s->ref[p],work,saved);}
+            } else {
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi p=begin;p<end;p++) forward_level_record(g,s->ref[p],work,saved);
+            }
+        }
+    }
+}
+static int backward_tail(const vsdlss_pk_seg *g,const double *saved,double *x,int nt)
+{
+    const vsdlss_replay_levels *s=g->levels; int ok=1;
+    if(nt<2||!s||s->count!=g->count||!levels_on()) return backward_seg(g,saved,x);
+    VSDLSS_OMP(omp parallel num_threads(nt) reduction(&:ok))
+    {
+        VSDLSS_OMP(omp master)
+        {vsdlss_parallel_observe();}
+        for(csi l=s->levels;l>0;l--) {
+            csi begin=s->ptr[l-1],end=s->ptr[l];
+            if(s->tile) {
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi p=begin;p<end;p++) {
+                    ok&=backward_tile(g,s->tile[p],saved,x);
+                }
+                continue;
+            }
+            if(end-begin<256) {
+                VSDLSS_OMP(omp single)
+                {for(csi p=begin;p<end;p++) ok&=backward_level_record(g,s->ref[p],saved,x);}
+            } else {
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi p=begin;p<end;p++) ok&=backward_level_record(g,s->ref[p],saved,x);
+            }
+        }
+    }
+    return ok;
+}
+
 /* In-place forms used by the M3 solve, whose buffers are private: work
  * holds the component RHS and is updated exactly as vsdlss_reduce_rhs updates
  * its internal copy; afterwards work[core_vertices[k]] is the core RHS.
@@ -544,7 +781,7 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
             for(csi b=0;b<r->blocks;b++) forward_seg(pk+b,work,SV(saved,pk[b]));
             q0=r->blocks;
         }
-        for(csi q=q0;q<r->pk_count;q++) forward_seg(pk+q,work,SV(saved,pk[q]));
+        for(csi q=q0;q<r->pk_count;q++) forward_tail(pk+q,work,SV(saved,pk[q]),nt);
         return VSDLSS_OK;
     }
     if(blocks_valid(r)) {
@@ -578,7 +815,7 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
     (void)nt;
     if(!r->records && r->count) {
         const vsdlss_pk_seg *pk=r->pk; int ok=1; csi q0=pk_blocked(r)?r->blocks:0;
-        for(csi q=r->pk_count;q>q0;q--) ok&=backward_seg(pk+q-1,SV(saved,pk[q-1]),x);
+        for(csi q=r->pk_count;q>q0;q--) ok&=backward_tail(pk+q-1,SV(saved,pk[q-1]),x,nt);
         if(q0) {
             int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
             (void)bt;
@@ -637,7 +874,7 @@ static vsdlss_status pack_segment(const vsdlss_reduction *r, const vsdlss_elim_r
 
 static void free_segments(vsdlss_reduction *r)
 {
-    if(r->pk) for(csi q=0;q<r->pk_count;q++) { free(r->pk[q].head); free(r->pk[q].deg); free(r->pk[q].nb); free(r->pk[q].piv); free(r->pk[q].val); }
+    if(r->pk) for(csi q=0;q<r->pk_count;q++) { free_levels(r->pk+q); free(r->pk[q].head); free(r->pk[q].deg); free(r->pk[q].nb); free(r->pk[q].piv); free(r->pk[q].val); }
     free(r->pk); r->pk=NULL; r->pk_count=0;
 }
 
