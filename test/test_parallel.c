@@ -38,8 +38,12 @@ static int panel_tile_boundaries(void)
 
 static int kernels(void)
 {
-    CHECK(vsdlss_get_num_threads()==1);
-    CHECK(vsdlss_set_num_threads(0)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_get_num_threads()==1);        /* default without VSDLSS_NUM_THREADS */
+    CHECK(vsdlss_set_num_threads(-1)==VSDLSS_ERR_INVALID && vsdlss_set_num_threads(1025)==VSDLSS_ERR_INVALID);
+    /* 0 = automatic: the OpenMP default team size (1 without OpenMP) */
+    CHECK(vsdlss_set_num_threads(0)==VSDLSS_OK && vsdlss_get_num_threads()>=1);
+    if(!vsdlss_parallel_enabled()) CHECK(vsdlss_get_num_threads()==1);
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK && vsdlss_get_num_threads()==1);
     if(!vsdlss_parallel_enabled()){
         CHECK(vsdlss_set_num_threads(2)==VSDLSS_ERR_UNSUPPORTED);
         puts("parallel: serial build correctly rejects threads>1");return 0;

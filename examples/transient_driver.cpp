@@ -19,7 +19,8 @@
 //      因子超过物理内存时，换页会让求解慢数倍。
 //   2. 环境：默认 MKL_THREADING_LAYER=SEQUENTIAL（求解器内 BLAS 必须单线程）、
 //      VSDLSS_BLAS_MIN=16；不强制 VSDLSS_BLAS_SOLVE_MIN（库默认值：宽面板走
-//      BLAS 且保留树并行）。线程数默认取 CPU 数，VSDLSS_THREADS 覆盖。
+//      BLAS 且保留树并行）。线程数：VSDLSS_THREADS=n 或 auto；未设时用库的
+//      VSDLSS_NUM_THREADS；都没有时自动（OMP_NUM_THREADS / 进程可用的 CPU）。
 //   3. 计时与诊断：分别报告分解、第一次求解（冷）、后续各步求解（热）及其
 //      中位数；每次求解的缺页次数（major fault > 0 说明在换页）与峰值内存；
 //      VSDLSS_TRACE=1 时库在 stderr 打印每次求解的分阶段耗时。
@@ -45,7 +46,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
+
 #include <utility>
 #include <vector>
 #include <sys/resource.h>
@@ -167,8 +168,11 @@ static Usage usage() { rusage u; getrusage(RUSAGE_SELF, &u); return {u.ru_maxrss
 
 class VsdlssSolver {
 public:
+    // threads: n, 0 = automatic (OMP_NUM_THREADS / CPU affinity), < 0 = the
+    // library default (VSDLSS_NUM_THREADS, else 1).  Per calling thread: set it
+    // on the thread that factors and solves.
     explicit VsdlssSolver(int threads, int order = 6) : threads_(threads), order_(order) {
-        check(vsdlss_set_num_threads(threads_), "vsdlss_set_num_threads");
+        if (threads_ >= 0) check(vsdlss_set_num_threads(threads_), "vsdlss_set_num_threads");
     }
     ~VsdlssSolver() { release(); }
     VsdlssSolver(const VsdlssSolver&) = delete;
@@ -269,8 +273,11 @@ int main(int argc, char** argv) {
         // Before the first call into the library / MKL.
         setDefaultEnv("MKL_THREADING_LAYER", "SEQUENTIAL");
         setDefaultEnv("VSDLSS_BLAS_MIN", "16");
-        const int hw = (int)std::max(1u, std::thread::hardware_concurrency());
-        const int threads = std::max(1, envInt("VSDLSS_THREADS", hw));
+        // VSDLSS_THREADS = n or auto; else VSDLSS_NUM_THREADS (read by the
+        // library) if set; else automatic.
+        int threads = 0;
+        if (const char* e = std::getenv("VSDLSS_THREADS"); e && *e) threads = std::max(0, std::strcmp(e, "auto") ? std::atoi(e) : 0);
+        else if (std::getenv("VSDLSS_NUM_THREADS")) threads = -1;
         const int maxSteps = envInt("STEPS", 40);
         const bool residual = envInt("CHECK_RESIDUAL", 1) != 0;
         const std::string diagPath = argc > 1 ? argv[1] : "diag.txt";
@@ -300,7 +307,7 @@ int main(int argc, char** argv) {
         const auto [err, norm] = compareWithFile("x_vector.txt", solver.gett_rhs(), n);
         std::cout << std::setprecision(6)
                   << "n=" << n << " off_diagonal=" << off << '\n'
-                  << "solver=libvsdlss M3 order=6 threads=" << threads << " max_team=" << solver.observedThreads() << '\n'
+                  << "solver=libvsdlss M3 order=6 threads=" << vsdlss_get_num_threads() << " max_team=" << solver.observedThreads() << '\n'
                   << "env MKL_THREADING_LAYER=" << std::getenv("MKL_THREADING_LAYER")
                   << " VSDLSS_BLAS_SOLVE_MIN=" << (std::getenv("VSDLSS_BLAS_SOLVE_MIN") ? std::getenv("VSDLSS_BLAS_SOLVE_MIN") : "(library default)") << '\n'
                   << "load+setup_ms=" << ms(t0, t1) << '\n'

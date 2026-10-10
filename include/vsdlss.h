@@ -63,7 +63,17 @@ typedef struct vsdlss_order_stats
     csi separator_count;
 } vsdlss_order_stats;
 
-/* Per-calling-thread policy; default 1; never changes global OpenMP settings.
+/* Thread count of the factorizations and solves called from this thread
+ * (per calling thread; never changes global OpenMP settings).
+ *   vsdlss_set_num_threads(n): n threads (1..1024); 0 = automatic, the
+ *     OpenMP default team size, which follows OMP_NUM_THREADS and the
+ *     process's CPU affinity (taskset, container cpusets), capped on Linux
+ *     at the physical cores allowed (hardware threads do not add bandwidth).
+ *   A thread that never calls it uses VSDLSS_NUM_THREADS (a number, or
+ *     "auto" / 0 for automatic), else 1.  The variable is read once.
+ * Results are the same bits for every thread count.  The solve is memory
+ * bandwidth bound: past what the memory system can feed, more threads do
+ * not help; compare a few counts on the target machine.
  * last_team_size is the largest observed team since the last setter call.
  * OpenMP runtime memory is not part of the M4 numeric workspace budget.
  */
