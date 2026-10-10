@@ -276,7 +276,8 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *wo
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
 /* Build the forward plan of a level-scheduled tail (see tail_fwd) once the
  * vertex numbering is final (after the solve-order relabel); a no-op without
- * a schedule.  VSDLSS_ERR_OOM on allocation failure. */
+ * a schedule.  VSDLSS_ERR_OOM on allocation failure, leaving no plan (the
+ * replay is still correct: the plan is optional). */
 vsdlss_status vsdlss_reduce_tail_plan(vsdlss_reduction *);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);

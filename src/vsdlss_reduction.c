@@ -545,6 +545,9 @@ static void forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doub
         const uint32_t *restrict tgt=p->tgt, *restrict src=p->src;
         const double *restrict mul=p->m;
         VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+        {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
         for(csi l=0;l<r->tail_levels;l++) {
             if(saved) {                               /* the pivots' values before this level */
                 VSDLSS_OMP(omp for schedule(static) nowait)
@@ -561,12 +564,17 @@ static void forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doub
                 for(csi u=u0;u<u1;u++) { double update=mul[u]*work[head[src[u]]&PK_VMASK]; work[tgt[u]]-=update; }
             }
         }
+        }
         return;
     }
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+    VSDLSS_OMP(omp master)
+    vsdlss_parallel_observe();
     for(csi l=0;l<r->tail_levels;l++) {
         VSDLSS_OMP(omp for schedule(static))
         for(csi c=lp[l];c<lp[l+1];c++) forward_range(g,cr[c],cr[c+1],cn[c],work,saved);
+    }
     }
 }
 
@@ -577,9 +585,13 @@ static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, cons
     int ok=1;
     (void)nt;
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(&:ok))
+    {
+    VSDLSS_OMP(omp master)
+    vsdlss_parallel_observe();
     for(csi l=r->tail_levels;l>0;l--) {
         VSDLSS_OMP(omp for schedule(static))
         for(csi c=lp[l-1];c<lp[l];c++) ok&=backward_range(g,cr[c],cr[c+1],cn[c+1],saved,x);
+    }
     }
     return ok;
 }
@@ -889,6 +901,13 @@ static csi tail_min(void)
  * vsdlss_reduce_tail_order_grain records per thread (8M nodes, 8 threads:
  * sweep 0.39 -> 0.29 s; 2 threads were slower than serial). */
 csi vsdlss_reduce_tail_order_grain = 1024;
+/* Forget the level schedule (and its plan): the tail replays serially. */
+static void drop_tail_schedule(vsdlss_reduction *r)
+{
+    free(r->tail_level); free(r->tail_chunk_rec); free(r->tail_chunk_nb);
+    r->tail_level=r->tail_chunk_rec=r->tail_chunk_nb=NULL; r->tail_levels=0;
+    tail_plan_free(r->tail_fwd); r->tail_fwd=NULL;
+}
 static int tail_order_on(void)
 {
     static int on=-1;
@@ -1072,12 +1091,12 @@ static vsdlss_status level_tail(vsdlss_reduction *r, vsdlss_elim_record *t, csi 
     r->tail_levels=levels; st=VSDLSS_OK;
     if(order) { *order=at; at=NULL; }
 out:
-    if(st!=VSDLSS_OK || !r->tail_levels) {
-        free(r->tail_level); free(r->tail_chunk_rec); free(r->tail_chunk_nb);
-        r->tail_level=r->tail_chunk_rec=r->tail_chunk_nb=NULL; r->tail_levels=0;
-    }
+    /* The schedule is optional: without its memory the tail is replayed
+     * serially (the records are then in elimination or in level order,
+     * both valid), and the factorization goes on. */
+    if(st!=VSDLSS_OK || !r->tail_levels) drop_tail_schedule(r);
     free(last); free(lv); free(pos); free(dest); free(done); free(at);
-    return st;
+    return VSDLSS_OK;
 }
 
 /* Packs the tail t[order[0..cnt)] into *g (first record index k0) in the
@@ -1433,7 +1452,11 @@ static vsdlss_status reduce_run_impl(vsdlss_reduce_input *in, vsdlss_reduction *
                 if(status!=VSDLSS_OK) goto fail;
             }
             if(direct) {
-                status=order?pack_tail(r,tail,order,more,total,r->pk+blocks):pack_segment(r,tail,more,total,r->pk+blocks);
+                status=order?pack_tail(r,tail,order,more,total,r->pk+blocks):VSDLSS_ERR_OOM;
+                if(status==VSDLSS_ERR_OOM) {         /* no level order: elimination order, serial */
+                    if(order) drop_tail_schedule(r);
+                    status=pack_segment(r,tail,more,total,r->pk+blocks);
+                }
                 free(order); order=NULL;
                 if(status!=VSDLSS_OK) goto fail;
                 free(tail); tail=NULL;
