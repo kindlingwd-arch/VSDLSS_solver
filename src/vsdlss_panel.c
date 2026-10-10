@@ -71,6 +71,14 @@ static csi solve_blas_min(void)
     return (csi)v;
 }
 int vsdlss_panel_solve_uses_blas(void) { return solve_blas_min() > 0; }
+csi vsdlss_panel_solve_blas_min(void) { return solve_blas_min(); }
+/* Diagnostic builds for a BLAS that is not thread safe (see
+ * vsdlss_supernodal_numeric.c): one BLAS call at a time. */
+#ifdef VSDLSS_BLAS_SERIALIZE
+#define VSDLSS_BLAS_GUARD VSDLSS_OMP(omp critical(vsdlss_blas))
+#else
+#define VSDLSS_BLAS_GUARD
+#endif
 #endif
 
 /* Full layout (M4 disk panels): column-major rows-by-width panel, the
@@ -135,3 +143,10 @@ static inline void sn_block_update(const double *as, csi rs, csi ws, const doubl
 vsdlss_status vsdlss_sn_panel_solve(const double *a,csi begin,csi width,
                                     csi ext,const vsdlss_sni *index,double *x,int back)
 { return vsdlss_sn_panel_solve_dispatch(a,begin,width,ext,index,x,back); }
+
+#ifdef VSDLSS_BLAS
+int vsdlss_sn_panel_solve_is_blas(csi width,csi ext)
+{ csi m=solve_blas_min(); return m && width>=m && width+ext<INT_MAX; }
+vsdlss_status vsdlss_sn_panel_blas_forward(const double *a,csi width,csi ext,double *xb,double *t)
+{ return vsdlss_sn_panel_solve_blas_fwd(a,width,ext,xb,t); }
+#endif

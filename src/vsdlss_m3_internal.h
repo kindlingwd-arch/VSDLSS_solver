@@ -273,6 +273,16 @@ vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *
  * or intermediate always leaves a non-finite entry in the result).  Bitwise
  * the same result as vsdlss_sn_solve.  On failure x is partially updated. */
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *, double *x);
+/* Number of vsdlss_sn_solve_inplace calls so far that took the tree-parallel
+ * schedule instead of the serial panel loop (kind 0), and of those, the ones
+ * that ran the forward (1) / backward (2) tree top by branches.
+ * Process-wide; for tests. */
+long vsdlss_sn_tree_solves(int kind);
+/* The tree top of the tree-parallel solve: -1 (default) by branches in both
+ * passes when the solve has BLAS-solved panels, else a bit mask, 1 = forward
+ * by branches, 2 = backward by branches (0: in order).  Same bits in every
+ * mode; VSDLSS_TOP_BRANCHES overrides. */
+extern int vsdlss_top_branches;
 vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *, csi nrhs, double *x, csi ldx);
 vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *, vsdlss **);
 void vsdlss_sn_factor_free(vsdlss_sn_factor *);
@@ -284,6 +294,8 @@ vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
 #ifdef VSDLSS_BLAS
 /* 1 when wide panels are solved with BLAS (VSDLSS_BLAS_SOLVE_MIN > 0). */
 int vsdlss_panel_solve_uses_blas(void);
+/* Width from which the panel solves use BLAS (0: never). */
+csi vsdlss_panel_solve_blas_min(void);
 #endif
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
@@ -294,5 +306,15 @@ int vsdlss_solve_upd16(void);
 vsdlss_status vsdlss_sn_panel_solve(const double *, csi begin, csi width,
                                     csi ext, const vsdlss_sni *index, double *, int back);
 vsdlss_status vsdlss_sn_panel_solve_generic(const double *,csi,csi,csi,const vsdlss_sni *,double *,int);
+#ifdef VSDLSS_BLAS
+/* 1 when vsdlss_sn_panel_solve takes the BLAS path for a panel of this shape. */
+int vsdlss_sn_panel_solve_is_blas(csi width, csi ext);
+/* Forward BLAS step of one packed panel without the scatter: dtpsv on the
+ * diagonal block (xb = the panel's own entries of x), then t = L_ext * x_J
+ * (ext entries).  vsdlss_sn_panel_solve's BLAS forward is exactly this
+ * followed by x[index[r]] -= t[r]; the tree solve stores t instead. */
+vsdlss_status vsdlss_sn_panel_blas_forward(const double *a, csi width, csi ext,
+                                           double *xb, double *t);
+#endif
 
 #endif

@@ -2,7 +2,8 @@
  * strict and relaxed layouts, every ordering, 1/2/4 threads.  Checks the
  * backward error of the M3 facade, bitwise identical factors and solutions
  * across thread counts, and that the relaxed panels contain the strict
- * pattern (explicit zeros are only added, never entries lost). */
+ * pattern (explicit zeros are only added, never entries lost).  Also the
+ * tree-parallel solve on wide (in BLAS builds: BLAS-solved) panels. */
 #include "../src/vsdlss_m3_internal.h"
 #include <string.h>
 
@@ -182,6 +183,68 @@ static int large_powergrid(void)
     free(b);free(x1);free(xt);free(xm);vsdlss_spfree(A);return 0;
 }
 
+/* Tree-parallel solve with wide panels: a 3D grid on the relaxed layout has
+ * panels hundreds of columns wide at the top of the tree, which BLAS builds
+ * solve with dtpsv + dgemv.  At 2, 4 and 8 threads the tree schedule must
+ * actually be taken (BLAS builds used to switch it off) and must give the
+ * 1-thread bits with the tree top in order and by branches, in either pass
+ * (by branches is the default exactly when panels are BLAS-solved). */
+static vsdlss *grid3d(csi k)
+{
+    csi n=k*k*k,p=0;vsdlss *A=vsdlss_spalloc(n,n,4*n,1,0);if(!A)return NULL;
+    for(csi z=0;z<k;z++)for(csi y=0;y<k;y++)for(csi x=0;x<k;x++){
+        csi j=(z*k+y)*k+x;A->p[j]=p;
+        if(x){A->i[p]=j-1;A->x[p++]=-1;} if(y){A->i[p]=j-k;A->x[p++]=-1;}
+        if(z){A->i[p]=j-k*k;A->x[p++]=-1;} A->i[p]=j;A->x[p++]=6.5;
+    }
+    A->p[n]=p;return A;
+}
+static int wide_tree_solve(void)
+{
+    vsdlss *A=grid3d(16);CHECK(A);
+    csi n=A->n;vsdlss *P=NULL;csi *q=NULL,*pinv=NULL;
+    CHECK(vsdlss_order(A,5,&q,&pinv)==VSDLSS_OK);
+    { vsdlss *C=vsdlss_symperm(A,pinv,1);CHECK(C);
+      CHECK(vsdlss_normalize_upper(C,&P)==VSDLSS_OK);vsdlss_spfree(C); }
+    vsdlss_sn_symbolic *s=NULL;vsdlss_sn_factor *f=NULL;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_sn_analyze_relaxed(P,&s)==VSDLSS_OK&&vsdlss_sn_factorize(P,s,&f)==VSDLSS_OK);
+    csi maxw=0;for(csi d=0;d<f->count;d++){csi w=f->column_start[d+1]-f->column_start[d];if(w>maxw)maxw=w;}
+    CHECK(maxw>=64&&f->count>1);
+    int blas=0;
+#ifdef VSDLSS_BLAS
+    blas=vsdlss_panel_solve_uses_blas();
+    if(blas)CHECK(maxw>=vsdlss_panel_solve_blas_min());
+#endif
+    double *b=malloc((size_t)n*8),*x1=malloc((size_t)n*8),*xt=malloc((size_t)n*8);CHECK(b&&x1&&xt);
+    for(csi i=0;i<n;i++)b[i]=sin(0.11*(double)i)+0.2;
+    const int saved=vsdlss_top_branches,env=getenv("VSDLSS_TOP_BRANCHES")!=NULL;
+    for(int nt=1;nt<=8;nt*=2){
+        if(nt>1&&!vsdlss_parallel_enabled())break;
+        CHECK(vsdlss_set_num_threads(nt)==VSDLSS_OK);
+        for(int mode=-1;mode<=3;mode++){            /* default, then every forward/backward combination */
+            const int want=nt==1?0:mode<0?(blas?3:0):mode;
+            long c[3];for(int k=0;k<3;k++)c[k]=vsdlss_sn_tree_solves(k);
+            vsdlss_top_branches=mode;
+            double *x=nt==1&&mode<0?x1:xt;
+            memcpy(x,b,(size_t)n*8);
+            CHECK(vsdlss_sn_solve_inplace(f,x)==VSDLSS_OK);
+            CHECK(vsdlss_sn_tree_solves(0)-c[0]==(nt>1));
+            if(!env)CHECK(vsdlss_sn_tree_solves(1)-c[1]==(want&1)&&vsdlss_sn_tree_solves(2)-c[2]==(want>>1));
+            CHECK(memcmp(x1,x,(size_t)n*8)==0);
+            CHECK(vsdlss_sn_solve(f,b,xt)==VSDLSS_OK&&memcmp(x1,xt,(size_t)n*8)==0);
+        }
+    }
+    vsdlss_top_branches=saved;
+    /* residual of the permuted system */
+    { double *r=malloc((size_t)n*8);CHECK(r);CHECK(vsdlss_spmv_sym_upper(P,x1,r)==VSDLSS_OK);
+      double e=0;for(csi i=0;i<n;i++){double d=fabs(r[i]-b[i]);if(d>e)e=d;}
+      free(r);CHECK(e<1e-10); }
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    free(b);free(x1);free(xt);free(q);free(pinv);
+    vsdlss_sn_factor_free(f);vsdlss_sn_symbolic_free(s);vsdlss_spfree(P);vsdlss_spfree(A);return 0;
+}
+
 int main(int argc,char **argv)
 {
     int only_large=argc>1&&argv[1][0]=='L';
@@ -195,7 +258,8 @@ int main(int argc,char **argv)
         vsdlss_spfree(A);
     }
     CHECK(large_powergrid()==0);
+    CHECK(wide_tree_solve()==0);
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    printf("test_supernodal: random SPD, orders 0-%d, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction: ALL OK\n",MAX_ORDER);
+    printf("test_supernodal: random SPD, orders 0-%d, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction, wide-panel tree solve (top in order / by branches): ALL OK\n",MAX_ORDER);
     return 0;
 }

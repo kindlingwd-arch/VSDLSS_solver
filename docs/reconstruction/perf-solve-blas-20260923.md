@@ -63,6 +63,8 @@ ibmpg3 的极小过孔电阻（6.5e-10 Ω）使条件数升至 1e12，合并近�
 - 分解：源块宽度 ≥ `VSDLSS_BLAS_MIN` 的更新用 `dgemm`，面板宽度达到该值时用 `dpotrf` + `dtrsm`。
 - 求解：面板宽度 ≥ `VSDLSS_BLAS_SOLVE_MIN` 时用 `dtrsv` + `dgemv`；开启后每个分量内部走串行路径
   （树调度的拉取式前代没有与之同舍入的 BLAS 形式）。
+  （更正：2026-10-10 起 BLAS 求解保留树并行，结果仍与串行 BLAS 求解逐位相同，见
+  [blas-tree-solve-20261010](blas-tree-solve-20261010.md)。本文的多线程求解数字是此前测得的。）
 - BLAS 块总按固定的行块边界切分，与线程数无关；在 BLAS 单线程的前提下，1/2/4 线程结果逐位相同，
   `test_supernodal`、`test_parallel`、`test_reduced_dag` 在 BLAS 构建下全部通过。与内置内核结果不逐位相同（差 1e-14 量级）。
 - **BLAS 必须线程安全且在求解器内单线程运行。**Ubuntu 20.04 的串行 OpenBLAS 0.3.8 并发调用会算错；
