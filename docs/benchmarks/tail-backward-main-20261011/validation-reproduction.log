@@ -1,0 +1,62 @@
+wires-1m.bin: OK
+completed default-1 exit=0
+component=0 records=980278 tail=328032 tail_pct=33.463160 levels=123 mean=2666 min_width=1 max_width=11644 core=19722 compact=1 d0=0 d1=0 d2=327995 d3=37 core_edges=336974 bad_dependency=0 backward_only_depth=31 backward_only_ideal_8=7.997659 narrow_records_2=81795 narrow_records_4=143789 narrow_records_8=328032
+GRAIN component=0 threads=4 grain=2048 observed_bwd=1 min_ms=0.812627000 median_ms=0.851884000 max_ms=0.941869000 bitwise_each_sample=1
+GRAIN component=0 threads=4 grain=256 observed_bwd=4 min_ms=0.399410000 median_ms=0.470191000 max_ms=0.642727000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=2048 observed_bwd=1 min_ms=0.975382000 median_ms=1.007053000 max_ms=1.402392000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=256 observed_bwd=8 min_ms=0.472020000 median_ms=0.522524000 max_ms=1.971410000 bitwise_each_sample=1
+SOLVE threads=1 min_ms=26.962420000 median_ms=30.682911000 max_ms=33.232962000 bitwise_each_sample=1
+LEDGER threads=1 mean_gather_ms=4.358293333 mean_red_fwd_ms=2.801036467 mean_core_fwd_ms=6.440215600 mean_core_bwd_ms=10.792805400 mean_red_bwd_ms=3.125626800 mean_writeback_ms=3.234807267 mean_total_ms=30.778514333
+SOLVE threads=2 min_ms=23.799823000 median_ms=25.579589000 max_ms=27.621815000 bitwise_each_sample=1
+LEDGER threads=2 mean_gather_ms=2.366404600 mean_red_fwd_ms=2.212423667 mean_core_fwd_ms=16.890159667 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.222665667 mean_writeback_ms=1.733888333 mean_total_ms=25.449390733
+SOLVE threads=4 min_ms=21.509806000 median_ms=23.692671000 max_ms=29.977467000 bitwise_each_sample=1
+LEDGER threads=4 mean_gather_ms=1.918689333 mean_red_fwd_ms=1.948327133 mean_core_fwd_ms=16.654193400 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.146507733 mean_writeback_ms=1.540880667 mean_total_ms=24.246524467
+SOLVE threads=8 min_ms=24.235713000 median_ms=25.901788000 max_ms=27.619660000 bitwise_each_sample=1
+LEDGER threads=8 mean_gather_ms=1.832731267 mean_red_fwd_ms=2.226231333 mean_core_fwd_ms=18.440488333 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.189201200 mean_writeback_ms=1.377033733 mean_total_ms=26.091483333
+backward_error=6.658523412866e-16
+completed chain-2 exit=0
+component=0 records=980281 tail=8374 tail_pct=0.854245 levels=10 mean=837 min_width=2 max_width=3832 core=19719 compact=1 d0=0 d1=0 d2=8281 d3=93 core_edges=16811 bad_dependency=0 backward_only_depth=3 backward_only_ideal_8=7.990458 narrow_records_2=8374 narrow_records_4=8374 narrow_records_8=8374
+GRAIN component=0 threads=4 grain=2048 observed_bwd=1 min_ms=0.020489000 median_ms=0.021439000 max_ms=0.050532000 bitwise_each_sample=1
+GRAIN component=0 threads=4 grain=256 observed_bwd=3 min_ms=0.098863000 median_ms=0.136741000 max_ms=0.285041000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=2048 observed_bwd=1 min_ms=0.022429000 median_ms=0.023036000 max_ms=0.039636000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=256 observed_bwd=3 min_ms=0.376155000 median_ms=0.476613000 max_ms=0.614775000 bitwise_each_sample=1
+SOLVE threads=1 min_ms=28.956827000 median_ms=31.539687000 max_ms=35.817103000 bitwise_each_sample=1
+LEDGER threads=1 mean_gather_ms=4.115997133 mean_red_fwd_ms=3.929717867 mean_core_fwd_ms=7.088452267 mean_core_bwd_ms=9.318391333 mean_red_bwd_ms=3.841740800 mean_writeback_ms=3.129939667 mean_total_ms=31.449176267
+SOLVE threads=2 min_ms=22.669567000 median_ms=24.281638000 max_ms=25.560550000 bitwise_each_sample=1
+LEDGER threads=2 mean_gather_ms=2.448077600 mean_red_fwd_ms=2.069581867 mean_core_fwd_ms=15.407379333 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.253000000 mean_writeback_ms=1.972352600 mean_total_ms=24.178790667
+SOLVE threads=4 min_ms=19.292842000 median_ms=20.139689000 max_ms=21.624826000 bitwise_each_sample=1
+LEDGER threads=4 mean_gather_ms=1.519557600 mean_red_fwd_ms=1.237447667 mean_core_fwd_ms=14.264840000 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=1.526177333 mean_writeback_ms=1.535545067 mean_total_ms=20.104887600
+SOLVE threads=8 min_ms=20.544809000 median_ms=23.953435000 max_ms=25.016988000 bitwise_each_sample=1
+LEDGER threads=8 mean_gather_ms=1.874693667 mean_red_fwd_ms=1.366753733 mean_core_fwd_ms=16.899515933 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=1.637195400 mean_writeback_ms=1.601289400 mean_total_ms=23.408372733
+backward_error=7.389681449767e-16
+completed chain-3 exit=0
+component=0 records=980281 tail=8374 tail_pct=0.854245 levels=10 mean=837 min_width=2 max_width=3832 core=19719 compact=1 d0=0 d1=0 d2=8281 d3=93 core_edges=16811 bad_dependency=0 backward_only_depth=3 backward_only_ideal_8=7.990458 narrow_records_2=8374 narrow_records_4=8374 narrow_records_8=8374
+GRAIN component=0 threads=4 grain=2048 observed_bwd=1 min_ms=0.016654000 median_ms=0.018726000 max_ms=0.020091000 bitwise_each_sample=1
+GRAIN component=0 threads=4 grain=256 observed_bwd=3 min_ms=0.085508000 median_ms=0.127485000 max_ms=0.189068000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=2048 observed_bwd=1 min_ms=0.017913000 median_ms=0.019417000 max_ms=0.169784000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=256 observed_bwd=3 min_ms=0.264800000 median_ms=0.367253000 max_ms=0.551663000 bitwise_each_sample=1
+SOLVE threads=1 min_ms=29.266657000 median_ms=31.924012000 max_ms=34.081582000 bitwise_each_sample=1
+LEDGER threads=1 mean_gather_ms=4.103251800 mean_red_fwd_ms=3.632015267 mean_core_fwd_ms=7.461296733 mean_core_bwd_ms=9.304862267 mean_red_bwd_ms=3.791496467 mean_writeback_ms=3.448214733 mean_total_ms=31.767409267
+SOLVE threads=2 min_ms=21.496789000 median_ms=22.512758000 max_ms=23.880753000 bitwise_each_sample=1
+LEDGER threads=2 mean_gather_ms=2.225487000 mean_red_fwd_ms=1.846923400 mean_core_fwd_ms=14.591893000 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.014198067 mean_writeback_ms=1.888029000 mean_total_ms=22.587963267
+SOLVE threads=4 min_ms=19.151810000 median_ms=20.212254000 max_ms=22.526176000 bitwise_each_sample=1
+LEDGER threads=4 mean_gather_ms=1.537517133 mean_red_fwd_ms=1.302756667 mean_core_fwd_ms=14.492435733 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=1.588134267 mean_writeback_ms=1.514736400 mean_total_ms=20.458594800
+SOLVE threads=8 min_ms=20.831941000 median_ms=22.317011000 max_ms=23.929424000 bitwise_each_sample=1
+LEDGER threads=8 mean_gather_ms=1.802448867 mean_red_fwd_ms=1.318276267 mean_core_fwd_ms=16.136238733 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=1.644292867 mean_writeback_ms=1.459632733 mean_total_ms=22.387628933
+backward_error=7.389681449767e-16
+completed default-4 exit=0
+component=0 records=980278 tail=328032 tail_pct=33.463160 levels=123 mean=2666 min_width=1 max_width=11644 core=19722 compact=1 d0=0 d1=0 d2=327995 d3=37 core_edges=336974 bad_dependency=0 backward_only_depth=31 backward_only_ideal_8=7.997659 narrow_records_2=81795 narrow_records_4=143789 narrow_records_8=328032
+GRAIN component=0 threads=4 grain=2048 observed_bwd=1 min_ms=0.758144000 median_ms=0.811544000 max_ms=1.422316000 bitwise_each_sample=1
+GRAIN component=0 threads=4 grain=256 observed_bwd=4 min_ms=0.379678000 median_ms=0.445977000 max_ms=0.835112000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=2048 observed_bwd=1 min_ms=0.867724000 median_ms=0.964846000 max_ms=1.361912000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=256 observed_bwd=8 min_ms=0.461436000 median_ms=0.537359000 max_ms=0.940581000 bitwise_each_sample=1
+SOLVE threads=1 min_ms=25.434396000 median_ms=28.145753000 max_ms=30.951975000 bitwise_each_sample=1
+LEDGER threads=1 mean_gather_ms=3.797790000 mean_red_fwd_ms=2.596500667 mean_core_fwd_ms=6.048696667 mean_core_bwd_ms=10.065130800 mean_red_bwd_ms=3.022831800 mean_writeback_ms=2.713527133 mean_total_ms=28.269604733
+SOLVE threads=2 min_ms=23.247557000 median_ms=25.609871000 max_ms=31.361577000 bitwise_each_sample=1
+LEDGER threads=2 mean_gather_ms=2.549960333 mean_red_fwd_ms=2.279786933 mean_core_fwd_ms=17.011465267 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.428245667 mean_writeback_ms=2.044311400 mean_total_ms=26.339979133
+SOLVE threads=4 min_ms=26.103613000 median_ms=28.993184000 max_ms=32.424583000 bitwise_each_sample=1
+LEDGER threads=4 mean_gather_ms=2.400638400 mean_red_fwd_ms=2.432253400 mean_core_fwd_ms=19.540763467 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.614461933 mean_writeback_ms=1.935406933 mean_total_ms=28.952986133
+SOLVE threads=8 min_ms=27.299194000 median_ms=28.329391000 max_ms=30.490054000 bitwise_each_sample=1
+LEDGER threads=8 mean_gather_ms=2.071732600 mean_red_fwd_ms=2.609889333 mean_core_fwd_ms=19.715787267 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.562497867 mean_writeback_ms=1.566430467 mean_total_ms=28.558151333
+backward_error=6.658523412866e-16
+Results: /tmp/vsdlss-tail-doc-pr-20261011

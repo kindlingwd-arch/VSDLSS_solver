@@ -1,0 +1,82 @@
+./test_solver
+test_solver: ALL OK
+./test_io
+test_io: ALL OK
+python3 test/test_text_dump.py
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.419s
+
+OK
+./test_ordering
+test_ordering: ALL OK
+./test_mld
+test_mld: ALL OK
+./test_m3
+tail levels: identical solutions with and without the level schedule
+tail order: same level order and plan at 1 and 4 threads; scheduled replay = serial (saved, no plan, 1/2/4 threads, non-finite); allocation failures clean or serial
+tombstones: identical solutions for every threshold; 1.3M-vertex star reduced in 0.27 s
+allocation failure sweeps: factorize=143 solve=3
+m3 component, reduction, RHS, symbolic, and numeric tests passed
+./test_m4
+test_m4: ALL OK (8 KiB budget, all orderings, reconstruction, 3 RHS, I/O faults)
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_m4_panels test/test_m4_panels.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_m4_panels
+dense numeric block reads: width1=300 width8=6
+test_m4_panels: ALL OK
+python3 test/test_m5.py
+test_m5: gate/replay checks passed; original compatibility NOT verified
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_amd test/test_amd.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_amd
+test_amd: permutation, determinism, fill and accuracy OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_kernels test/test_kernels.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_kernels
+test_kernels: GEMM/solve kernels bitwise match the element-at-a-time reference, blocked POTRF reproduces L, at 1/2/4 threads
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_parallel test/test_parallel.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_parallel
+test_parallel: ALL OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_supernodal test/test_supernodal.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_supernodal
+test_supernodal: random SPD, orders 0-6, strict/relaxed, 1/2/4 threads, power-grid reorder/blocked reduction, wide-panel tree solve (top in order / by branches): ALL OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_small test/test_small.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_small
+small: all widths, directions, ext 0..64, strided indices, faults bitwise OK
+small: packed panels bitwise equal to full panels (all dispatch paths, faults)
+width generic_ms specialized_ms speedup (50000 calls, ext=16)
+1 17.202 1.400 12.28
+2 16.317 1.566 10.42
+3 18.564 2.171 8.55
+4 19.667 4.359 4.51
+5 21.351 2.645 8.07
+6 18.292 3.203 5.71
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_reduced_dag test/test_reduced_dag.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_reduced_dag
+serial numeric_ms=0.513 supernodes=184
+DAG threads=2 numeric_ms=0.541 supernodes=184
+DAG threads=4 numeric_ms=5.152 supernodes=184
+reduced M4 and single-component DAG: ALL OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -o test_simd test/test_simd.c src/vsdlss_simd.c
+./test_simd
+test_simd: kernels bitwise equal to the scalar loops (2000 random cases)
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_solve_kv test/test_solve_kv.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_solve_kv
+test_solve_kv: kv2 bitwise, kv3 within rounding, in-place packed solve: passed
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_relabel test/test_relabel.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_relabel
+  grid2 threads 1: 1 of 18 components relabelled, bitwise equal
+  grid3 threads 1: 1 of 1 components relabelled, bitwise equal
+  grid2 threads 4: 1 of 18 components relabelled, bitwise equal
+  grid3 threads 4: 1 of 1 components relabelled, bitwise equal
+test_relabel: solve-order relabel bitwise identical: passed
+python3 test/gen_sparse.py test_sparse 10
+wrote test_sparse.hdr/.matd/.matf/.matt/.mato/.rhs (n=10, o=9)
+expected solution x = ones
+./vsdlss_solver test_sparse
+VSDLSS in-memory: n=10 order=0 backward_error=6.661e-17
+load_ms=9.573194 prepare_ms=0.000170 factor_ms=0.010617 solve_ms=0.000465 factor_solve_ms=0.011082
+threads_requested=8 max_team_used=1
+./vsdlss_solver --disk-budget 8192 test_sparse
+VSDLSS M4 disk: n=10 order=0 backward_error=6.661e-17
+load_ms=6.395112 prepare_ms=0.000130 factor_ms=0.146358 solve_ms=0.031812 factor_solve_ms=0.178170
+disk_format=2 blocks=9 multi_column_blocks=1 max_columns=2 workspace=1152 block_reads=35 block_writes=26
+threads_requested=8 max_team_used=1

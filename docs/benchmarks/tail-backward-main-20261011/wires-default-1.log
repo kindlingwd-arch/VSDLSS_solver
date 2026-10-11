@@ -1,0 +1,199 @@
+factor_s=5.035509 n=1000000 components=1 chain=0 grain=2048
+component=0 records=980278 tail=328032 tail_pct=33.463160 levels=123 mean=2666 min_width=1 max_width=11644 core=19722 compact=1 d0=0 d1=0 d2=327995 d3=37 core_edges=336974 bad_dependency=0 backward_only_depth=31 backward_only_ideal_8=7.997659 narrow_records_2=81795 narrow_records_4=143789 narrow_records_8=328032
+sample component=0 threads=1 k=0 fwd_ms=0.990340000 bwd_ms=0.930889000
+sample component=0 threads=1 k=1 fwd_ms=0.927516000 bwd_ms=0.871049000
+sample component=0 threads=1 k=2 fwd_ms=1.670415000 bwd_ms=1.016823000
+sample component=0 threads=1 k=3 fwd_ms=0.945761000 bwd_ms=0.903140000
+sample component=0 threads=1 k=4 fwd_ms=0.848271000 bwd_ms=0.970742000
+sample component=0 threads=1 k=5 fwd_ms=0.856550000 bwd_ms=0.864505000
+sample component=0 threads=1 k=6 fwd_ms=0.815327000 bwd_ms=0.840712000
+sample component=0 threads=1 k=7 fwd_ms=1.106798000 bwd_ms=1.031274000
+sample component=0 threads=1 k=8 fwd_ms=0.918951000 bwd_ms=0.938869000
+sample component=0 threads=1 k=9 fwd_ms=0.849899000 bwd_ms=0.777949000
+sample component=0 threads=1 k=10 fwd_ms=0.772560000 bwd_ms=0.798971000
+sample component=0 threads=1 k=11 fwd_ms=2.414535000 bwd_ms=1.066464000
+sample component=0 threads=1 k=12 fwd_ms=0.901059000 bwd_ms=0.835096000
+sample component=0 threads=1 k=13 fwd_ms=0.796825000 bwd_ms=0.794122000
+sample component=0 threads=1 k=14 fwd_ms=0.804011000 bwd_ms=0.786502000
+TAIL component=0 threads=1 observed_fwd=1 observed_bwd=1 fwd_min_ms=0.772560000 fwd_median_ms=0.901059000 fwd_max_ms=2.414535000 bwd_min_ms=0.777949000 bwd_median_ms=0.871049000 bwd_max_ms=1.066464000 bitwise_each_sample=1
+sample component=0 threads=2 k=0 fwd_ms=0.826865000 bwd_ms=0.784475000
+sample component=0 threads=2 k=1 fwd_ms=0.780865000 bwd_ms=0.784904000
+sample component=0 threads=2 k=2 fwd_ms=0.733701000 bwd_ms=0.815629000
+sample component=0 threads=2 k=3 fwd_ms=0.774471000 bwd_ms=1.781952000
+sample component=0 threads=2 k=4 fwd_ms=0.867243000 bwd_ms=0.864677000
+sample component=0 threads=2 k=5 fwd_ms=0.814640000 bwd_ms=0.783285000
+sample component=0 threads=2 k=6 fwd_ms=0.808902000 bwd_ms=0.757203000
+sample component=0 threads=2 k=7 fwd_ms=0.811402000 bwd_ms=0.818177000
+sample component=0 threads=2 k=8 fwd_ms=1.092241000 bwd_ms=1.832369000
+sample component=0 threads=2 k=9 fwd_ms=0.898094000 bwd_ms=0.920119000
+sample component=0 threads=2 k=10 fwd_ms=0.900918000 bwd_ms=0.841904000
+sample component=0 threads=2 k=11 fwd_ms=0.865839000 bwd_ms=0.978362000
+sample component=0 threads=2 k=12 fwd_ms=0.866340000 bwd_ms=0.865271000
+sample component=0 threads=2 k=13 fwd_ms=1.062241000 bwd_ms=0.993956000
+sample component=0 threads=2 k=14 fwd_ms=0.878872000 bwd_ms=0.872954000
+TAIL component=0 threads=2 observed_fwd=1 observed_bwd=1 fwd_min_ms=0.733701000 fwd_median_ms=0.865839000 fwd_max_ms=1.092241000 bwd_min_ms=0.757203000 bwd_median_ms=0.864677000 bwd_max_ms=1.832369000 bitwise_each_sample=1
+sample component=0 threads=4 k=0 fwd_ms=1.009857000 bwd_ms=1.688245000
+sample component=0 threads=4 k=1 fwd_ms=0.917106000 bwd_ms=0.950476000
+sample component=0 threads=4 k=2 fwd_ms=0.825757000 bwd_ms=0.813378000
+sample component=0 threads=4 k=3 fwd_ms=0.827552000 bwd_ms=0.838562000
+sample component=0 threads=4 k=4 fwd_ms=0.867793000 bwd_ms=0.959203000
+sample component=0 threads=4 k=5 fwd_ms=1.972763000 bwd_ms=1.164564000
+sample component=0 threads=4 k=6 fwd_ms=0.946232000 bwd_ms=0.849107000
+sample component=0 threads=4 k=7 fwd_ms=0.874965000 bwd_ms=0.804215000
+sample component=0 threads=4 k=8 fwd_ms=0.807119000 bwd_ms=0.827414000
+sample component=0 threads=4 k=9 fwd_ms=0.767868000 bwd_ms=1.176081000
+sample component=0 threads=4 k=10 fwd_ms=1.145430000 bwd_ms=1.028850000
+sample component=0 threads=4 k=11 fwd_ms=1.087166000 bwd_ms=1.048046000
+sample component=0 threads=4 k=12 fwd_ms=0.987319000 bwd_ms=0.984560000
+sample component=0 threads=4 k=13 fwd_ms=0.966099000 bwd_ms=0.897159000
+sample component=0 threads=4 k=14 fwd_ms=1.111492000 bwd_ms=0.964087000
+TAIL component=0 threads=4 observed_fwd=1 observed_bwd=1 fwd_min_ms=0.767868000 fwd_median_ms=0.946232000 fwd_max_ms=1.972763000 bwd_min_ms=0.804215000 bwd_median_ms=0.959203000 bwd_max_ms=1.688245000 bitwise_each_sample=1
+sample component=0 threads=8 k=0 fwd_ms=0.946415000 bwd_ms=1.099942000
+sample component=0 threads=8 k=1 fwd_ms=1.564345000 bwd_ms=1.050789000
+sample component=0 threads=8 k=2 fwd_ms=1.503503000 bwd_ms=1.045842000
+sample component=0 threads=8 k=3 fwd_ms=0.989765000 bwd_ms=0.943806000
+sample component=0 threads=8 k=4 fwd_ms=1.026079000 bwd_ms=0.936907000
+sample component=0 threads=8 k=5 fwd_ms=1.630668000 bwd_ms=1.038329000
+sample component=0 threads=8 k=6 fwd_ms=0.974974000 bwd_ms=0.918803000
+sample component=0 threads=8 k=7 fwd_ms=0.882326000 bwd_ms=0.848650000
+sample component=0 threads=8 k=8 fwd_ms=0.863328000 bwd_ms=1.269254000
+sample component=0 threads=8 k=9 fwd_ms=1.133836000 bwd_ms=1.798684000
+sample component=0 threads=8 k=10 fwd_ms=1.104653000 bwd_ms=1.305903000
+sample component=0 threads=8 k=11 fwd_ms=0.943878000 bwd_ms=0.927858000
+sample component=0 threads=8 k=12 fwd_ms=0.925284000 bwd_ms=0.927234000
+sample component=0 threads=8 k=13 fwd_ms=1.043000000 bwd_ms=1.076478000
+sample component=0 threads=8 k=14 fwd_ms=1.129365000 bwd_ms=1.135872000
+TAIL component=0 threads=8 observed_fwd=1 observed_bwd=1 fwd_min_ms=0.863328000 fwd_median_ms=1.026079000 fwd_max_ms=1.630668000 bwd_min_ms=0.848650000 bwd_median_ms=1.045842000 bwd_max_ms=1.798684000 bitwise_each_sample=1
+grain_sample component=0 threads=4 grain=2048 k=0 bwd_ms=0.898922000
+grain_sample component=0 threads=4 grain=256 k=0 bwd_ms=0.820705000
+grain_sample component=0 threads=4 grain=256 k=1 bwd_ms=0.584410000
+grain_sample component=0 threads=4 grain=2048 k=1 bwd_ms=0.831647000
+grain_sample component=0 threads=4 grain=2048 k=2 bwd_ms=1.693087000
+grain_sample component=0 threads=4 grain=256 k=2 bwd_ms=0.502315000
+grain_sample component=0 threads=4 grain=256 k=3 bwd_ms=0.574772000
+grain_sample component=0 threads=4 grain=2048 k=3 bwd_ms=0.876572000
+grain_sample component=0 threads=4 grain=2048 k=4 bwd_ms=0.830001000
+grain_sample component=0 threads=4 grain=256 k=4 bwd_ms=1.246111000
+grain_sample component=0 threads=4 grain=256 k=5 bwd_ms=0.857261000
+grain_sample component=0 threads=4 grain=2048 k=5 bwd_ms=1.069252000
+grain_sample component=0 threads=4 grain=2048 k=6 bwd_ms=0.933288000
+grain_sample component=0 threads=4 grain=256 k=6 bwd_ms=0.746325000
+grain_sample component=0 threads=4 grain=256 k=7 bwd_ms=1.389315000
+grain_sample component=0 threads=4 grain=2048 k=7 bwd_ms=0.878586000
+grain_sample component=0 threads=4 grain=2048 k=8 bwd_ms=0.844496000
+grain_sample component=0 threads=4 grain=256 k=8 bwd_ms=0.419302000
+grain_sample component=0 threads=4 grain=256 k=9 bwd_ms=0.393824000
+grain_sample component=0 threads=4 grain=2048 k=9 bwd_ms=0.767712000
+grain_sample component=0 threads=4 grain=2048 k=10 bwd_ms=0.938059000
+grain_sample component=0 threads=4 grain=256 k=10 bwd_ms=0.798353000
+grain_sample component=0 threads=4 grain=256 k=11 bwd_ms=0.417125000
+grain_sample component=0 threads=4 grain=2048 k=11 bwd_ms=0.786659000
+grain_sample component=0 threads=4 grain=2048 k=12 bwd_ms=0.785439000
+grain_sample component=0 threads=4 grain=256 k=12 bwd_ms=0.536609000
+grain_sample component=0 threads=4 grain=256 k=13 bwd_ms=0.730715000
+grain_sample component=0 threads=4 grain=2048 k=13 bwd_ms=1.308384000
+grain_sample component=0 threads=4 grain=2048 k=14 bwd_ms=0.864113000
+grain_sample component=0 threads=4 grain=256 k=14 bwd_ms=0.531502000
+GRAIN component=0 threads=4 grain=2048 observed_bwd=1 min_ms=0.767712000 median_ms=0.876572000 max_ms=1.693087000 bitwise_each_sample=1
+GRAIN component=0 threads=4 grain=256 observed_bwd=4 min_ms=0.393824000 median_ms=0.584410000 max_ms=1.389315000 bitwise_each_sample=1
+grain_sample component=0 threads=8 grain=2048 k=0 bwd_ms=1.285479000
+grain_sample component=0 threads=8 grain=256 k=0 bwd_ms=0.592225000
+grain_sample component=0 threads=8 grain=256 k=1 bwd_ms=0.493380000
+grain_sample component=0 threads=8 grain=2048 k=1 bwd_ms=1.216222000
+grain_sample component=0 threads=8 grain=2048 k=2 bwd_ms=0.932070000
+grain_sample component=0 threads=8 grain=256 k=2 bwd_ms=0.599096000
+grain_sample component=0 threads=8 grain=256 k=3 bwd_ms=0.538800000
+grain_sample component=0 threads=8 grain=2048 k=3 bwd_ms=0.888633000
+grain_sample component=0 threads=8 grain=2048 k=4 bwd_ms=0.928353000
+grain_sample component=0 threads=8 grain=256 k=4 bwd_ms=0.531908000
+grain_sample component=0 threads=8 grain=256 k=5 bwd_ms=0.563456000
+grain_sample component=0 threads=8 grain=2048 k=5 bwd_ms=0.813218000
+grain_sample component=0 threads=8 grain=2048 k=6 bwd_ms=0.794980000
+grain_sample component=0 threads=8 grain=256 k=6 bwd_ms=0.757487000
+grain_sample component=0 threads=8 grain=256 k=7 bwd_ms=0.622449000
+grain_sample component=0 threads=8 grain=2048 k=7 bwd_ms=0.885000000
+grain_sample component=0 threads=8 grain=2048 k=8 bwd_ms=0.887960000
+grain_sample component=0 threads=8 grain=256 k=8 bwd_ms=0.491246000
+grain_sample component=0 threads=8 grain=256 k=9 bwd_ms=0.586885000
+grain_sample component=0 threads=8 grain=2048 k=9 bwd_ms=0.949616000
+grain_sample component=0 threads=8 grain=2048 k=10 bwd_ms=0.918184000
+grain_sample component=0 threads=8 grain=256 k=10 bwd_ms=0.530725000
+grain_sample component=0 threads=8 grain=256 k=11 bwd_ms=0.511920000
+grain_sample component=0 threads=8 grain=2048 k=11 bwd_ms=1.421240000
+grain_sample component=0 threads=8 grain=2048 k=12 bwd_ms=0.904401000
+grain_sample component=0 threads=8 grain=256 k=12 bwd_ms=0.573824000
+grain_sample component=0 threads=8 grain=256 k=13 bwd_ms=0.528265000
+grain_sample component=0 threads=8 grain=2048 k=13 bwd_ms=1.078663000
+grain_sample component=0 threads=8 grain=2048 k=14 bwd_ms=0.920395000
+grain_sample component=0 threads=8 grain=256 k=14 bwd_ms=0.556644000
+GRAIN component=0 threads=8 grain=2048 observed_bwd=1 min_ms=0.794980000 median_ms=0.920395000 max_ms=1.421240000 bitwise_each_sample=1
+GRAIN component=0 threads=8 grain=256 observed_bwd=8 min_ms=0.491246000 median_ms=0.556644000 max_ms=0.757487000 bitwise_each_sample=1
+solve_sample threads=1 k=0 ms=35.854602000
+solve_sample threads=1 k=1 ms=42.050193000
+solve_sample threads=1 k=2 ms=40.025236000
+solve_sample threads=1 k=3 ms=40.120824000
+solve_sample threads=1 k=4 ms=35.395627000
+solve_sample threads=1 k=5 ms=35.584399000
+solve_sample threads=1 k=6 ms=34.658425000
+solve_sample threads=1 k=7 ms=33.900394000
+solve_sample threads=1 k=8 ms=34.557425000
+solve_sample threads=1 k=9 ms=34.836338000
+solve_sample threads=1 k=10 ms=33.673392000
+solve_sample threads=1 k=11 ms=32.300045000
+solve_sample threads=1 k=12 ms=32.721957000
+solve_sample threads=1 k=13 ms=31.310040000
+solve_sample threads=1 k=14 ms=37.824224000
+SOLVE threads=1 min_ms=31.310040000 median_ms=34.836338000 max_ms=42.050193000 bitwise_each_sample=1
+LEDGER threads=1 mean_gather_ms=5.247049400 mean_red_fwd_ms=3.017231200 mean_core_fwd_ms=7.061129600 mean_core_bwd_ms=12.283075733 mean_red_bwd_ms=3.628131933 mean_writeback_ms=4.380908067 mean_total_ms=35.653158400
+solve_sample threads=2 k=0 ms=25.066589000
+solve_sample threads=2 k=1 ms=27.090116000
+solve_sample threads=2 k=2 ms=29.484616000
+solve_sample threads=2 k=3 ms=26.127793000
+solve_sample threads=2 k=4 ms=25.802780000
+solve_sample threads=2 k=5 ms=28.176294000
+solve_sample threads=2 k=6 ms=26.349352000
+solve_sample threads=2 k=7 ms=27.276185000
+solve_sample threads=2 k=8 ms=27.990071000
+solve_sample threads=2 k=9 ms=25.100023000
+solve_sample threads=2 k=10 ms=26.987877000
+solve_sample threads=2 k=11 ms=28.000727000
+solve_sample threads=2 k=12 ms=25.693908000
+solve_sample threads=2 k=13 ms=27.373104000
+solve_sample threads=2 k=14 ms=24.456895000
+SOLVE threads=2 min_ms=24.456895000 median_ms=26.987877000 max_ms=29.484616000 bitwise_each_sample=1
+LEDGER threads=2 mean_gather_ms=2.457474467 mean_red_fwd_ms=2.504895800 mean_core_fwd_ms=17.445065267 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.404574000 mean_writeback_ms=1.892869467 mean_total_ms=26.730909000
+solve_sample threads=4 k=0 ms=25.469810000
+solve_sample threads=4 k=1 ms=25.327448000
+solve_sample threads=4 k=2 ms=24.147651000
+solve_sample threads=4 k=3 ms=25.090521000
+solve_sample threads=4 k=4 ms=23.640290000
+solve_sample threads=4 k=5 ms=22.290816000
+solve_sample threads=4 k=6 ms=23.016457000
+solve_sample threads=4 k=7 ms=26.102761000
+solve_sample threads=4 k=8 ms=22.738040000
+solve_sample threads=4 k=9 ms=24.108073000
+solve_sample threads=4 k=10 ms=23.968633000
+solve_sample threads=4 k=11 ms=25.210683000
+solve_sample threads=4 k=12 ms=48.859470000
+solve_sample threads=4 k=13 ms=23.508925000
+solve_sample threads=4 k=14 ms=24.639187000
+SOLVE threads=4 min_ms=22.290816000 median_ms=24.147651000 max_ms=48.859470000 bitwise_each_sample=1
+LEDGER threads=4 mean_gather_ms=1.944309400 mean_red_fwd_ms=2.159706733 mean_core_fwd_ms=18.474239667 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.003948533 mean_writeback_ms=1.266328067 mean_total_ms=25.873672600
+solve_sample threads=8 k=0 ms=25.898204000
+solve_sample threads=8 k=1 ms=25.020924000
+solve_sample threads=8 k=2 ms=25.088534000
+solve_sample threads=8 k=3 ms=28.623320000
+solve_sample threads=8 k=4 ms=25.328925000
+solve_sample threads=8 k=5 ms=27.819099000
+solve_sample threads=8 k=6 ms=24.365870000
+solve_sample threads=8 k=7 ms=24.863033000
+solve_sample threads=8 k=8 ms=26.247095000
+solve_sample threads=8 k=9 ms=23.564318000
+solve_sample threads=8 k=10 ms=23.945153000
+solve_sample threads=8 k=11 ms=24.583550000
+solve_sample threads=8 k=12 ms=27.774818000
+solve_sample threads=8 k=13 ms=22.840434000
+solve_sample threads=8 k=14 ms=26.156428000
+SOLVE threads=8 min_ms=22.840434000 median_ms=25.088534000 max_ms=28.623320000 bitwise_each_sample=1
+LEDGER threads=8 mean_gather_ms=1.775604067 mean_red_fwd_ms=2.138542200 mean_core_fwd_ms=17.856508400 mean_core_bwd_ms=0.000000000 mean_red_bwd_ms=2.180649333 mean_writeback_ms=1.495387267 mean_total_ms=25.473648467
+backward_error=6.658523412866e-16

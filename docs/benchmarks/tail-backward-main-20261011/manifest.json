@@ -1,0 +1,83 @@
+{
+  "baseline": "85792d29b4fe91c87d8cb16e919666b0d8f578e4",
+  "date": "2026-10-11",
+  "production_changes": false,
+  "original_process_order": [
+    "wires-default-1.log",
+    "wires-chain-2.log",
+    "wires-chain-3.log",
+    "wires-default-4.log"
+  ],
+  "repetitions": 15,
+  "warmups": 2,
+  "timing_unit": "ms",
+  "inputs": [
+    {
+      "name": "wires-1m.bin",
+      "n": 1000000,
+      "sha256": "be612edbc86d656b69608836a8e9abdd8cac9951ae6ebb5052cfd58a0f1611f6",
+      "included": false,
+      "regenerable": true
+    },
+    {
+      "name": "far.bin",
+      "n": 4000000,
+      "sha256": "c457b9b56fb64822593ee5f4f21d7713833a395518742b55b24baf22f786e9d0",
+      "included": false,
+      "regenerable": false
+    }
+  ],
+  "logs": [
+    {
+      "file": "default-a.log",
+      "sha256": "dcf621cbcaf0647e72b429bddddda90c6f7002fb0de351f109c7c135863c2ff9",
+      "performance_valid": false,
+      "reason": "structure and numeric evidence only; compilation overlapped timing"
+    },
+    {
+      "file": "wires-default-1.log",
+      "sha256": "dd844d0dd0bed2ddc375cd792593646e88026afa0b1adbb59beb0090deeb88fc",
+      "performance_valid": true,
+      "reason": "original ABBA process; per-sample numeric validation"
+    },
+    {
+      "file": "wires-chain-2.log",
+      "sha256": "5a2c89d8dce5075e191b823c13ebf87b53f5374a6e877a08d5a9bde8334a756a",
+      "performance_valid": true,
+      "reason": "original ABBA process; per-sample numeric validation"
+    },
+    {
+      "file": "wires-chain-3.log",
+      "sha256": "ec8671e776d7c21f72674d913e28bb180de5ad5f9497a9dfb09f8e42baed2ca9",
+      "performance_valid": true,
+      "reason": "original ABBA process; per-sample numeric validation"
+    },
+    {
+      "file": "wires-default-4.log",
+      "sha256": "951f2ee1197458b1c18bfc2d3163b21314d9399c8baeff6d8a67e213df67c0c0",
+      "performance_valid": true,
+      "reason": "original ABBA process; per-sample numeric validation"
+    }
+  ],
+  "aggregation": "Report ranges are ranges of process medians. Averaging two process medians does not produce a pooled sample median.",
+  "validation_logs": [
+    {
+      "file": "validation-reproduction.log",
+      "sha256": "80fb46b0e78f542be65620114c05f78db145283ac6223a2fa7d3dcc28ea57f11",
+      "exit_code": 0,
+      "purpose": "PR verification; not part of original benchmark aggregates"
+    },
+    {
+      "file": "validation-full-suite.log",
+      "sha256": "9d761dad9ab34096ad05d86475cbac644d49fa95b7ab9266597d6d15e0e37b76",
+      "exit_code": 0,
+      "purpose": "PR verification; not part of original benchmark aggregates"
+    },
+    {
+      "file": "validation-initial-full-suite.log",
+      "sha256": "d520187a0b13485878e3ab46eec445deb5ce8136fe3cfd2bbacad3b8c14e4bba",
+      "exit_code": 2,
+      "purpose": "PR verification; not part of original benchmark aggregates"
+    }
+  ]
+}

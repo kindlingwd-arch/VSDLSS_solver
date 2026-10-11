@@ -1,0 +1,131 @@
+factor_s=413.981442 n=4000000 components=1 chain=0 grain=2048
+component=0 records=3920800 tail=3534501 tail_pct=90.147444 levels=396 mean=8925 min_width=2 max_width=46778 core=79200 compact=1 d0=0 d1=0 d2=3534257 d3=244 core_edges=3570683 bad_dependency=0 backward_only_depth=90 backward_only_ideal_8=7.999305 narrow_records_2=169526 narrow_records_4=351820 narrow_records_8=825381
+sample component=0 threads=1 k=0 fwd_ms=10.546391000 bwd_ms=11.191058000
+sample component=0 threads=1 k=1 fwd_ms=10.668028000 bwd_ms=11.269240000
+sample component=0 threads=1 k=2 fwd_ms=12.856489000 bwd_ms=14.798920000
+sample component=0 threads=1 k=3 fwd_ms=12.984754000 bwd_ms=11.178686000
+sample component=0 threads=1 k=4 fwd_ms=12.054954000 bwd_ms=14.153418000
+sample component=0 threads=1 k=5 fwd_ms=12.492915000 bwd_ms=14.069284000
+sample component=0 threads=1 k=6 fwd_ms=12.320752000 bwd_ms=11.314241000
+sample component=0 threads=1 k=7 fwd_ms=9.959624000 bwd_ms=11.715894000
+sample component=0 threads=1 k=8 fwd_ms=11.756095000 bwd_ms=15.322905000
+sample component=0 threads=1 k=9 fwd_ms=12.768038000 bwd_ms=14.491912000
+sample component=0 threads=1 k=10 fwd_ms=12.763467000 bwd_ms=14.970131000
+sample component=0 threads=1 k=11 fwd_ms=12.769465000 bwd_ms=14.459451000
+sample component=0 threads=1 k=12 fwd_ms=12.392352000 bwd_ms=13.281545000
+sample component=0 threads=1 k=13 fwd_ms=11.918439000 bwd_ms=12.550841000
+sample component=0 threads=1 k=14 fwd_ms=11.473915000 bwd_ms=11.443683000
+TAIL component=0 threads=1 observed_fwd=1 observed_bwd=1 fwd_min_ms=9.959624000 fwd_median_ms=12.320752000 fwd_max_ms=12.984754000 bwd_min_ms=11.178686000 bwd_median_ms=13.281545000 bwd_max_ms=15.322905000 bitwise_each_sample=1
+sample component=0 threads=2 k=0 fwd_ms=9.169722000 bwd_ms=9.975719000
+sample component=0 threads=2 k=1 fwd_ms=9.053988000 bwd_ms=9.576528000
+sample component=0 threads=2 k=2 fwd_ms=9.484230000 bwd_ms=10.760845000
+sample component=0 threads=2 k=3 fwd_ms=9.807731000 bwd_ms=8.638646000
+sample component=0 threads=2 k=4 fwd_ms=9.057183000 bwd_ms=10.336054000
+sample component=0 threads=2 k=5 fwd_ms=9.817530000 bwd_ms=10.918890000
+sample component=0 threads=2 k=6 fwd_ms=9.816277000 bwd_ms=9.814402000
+sample component=0 threads=2 k=7 fwd_ms=9.187175000 bwd_ms=10.768052000
+sample component=0 threads=2 k=8 fwd_ms=9.654207000 bwd_ms=11.270334000
+sample component=0 threads=2 k=9 fwd_ms=9.880157000 bwd_ms=10.873351000
+sample component=0 threads=2 k=10 fwd_ms=9.053644000 bwd_ms=9.296607000
+sample component=0 threads=2 k=11 fwd_ms=11.574660000 bwd_ms=10.451942000
+sample component=0 threads=2 k=12 fwd_ms=10.722793000 bwd_ms=13.611095000
+sample component=0 threads=2 k=13 fwd_ms=9.708815000 bwd_ms=10.809073000
+sample component=0 threads=2 k=14 fwd_ms=9.697487000 bwd_ms=10.429515000
+TAIL component=0 threads=2 observed_fwd=2 observed_bwd=2 fwd_min_ms=9.053644000 fwd_median_ms=9.697487000 fwd_max_ms=11.574660000 bwd_min_ms=8.638646000 bwd_median_ms=10.451942000 bwd_max_ms=13.611095000 bitwise_each_sample=1
+sample component=0 threads=4 k=0 fwd_ms=7.212017000 bwd_ms=10.596323000
+sample component=0 threads=4 k=1 fwd_ms=8.525862000 bwd_ms=7.736567000
+sample component=0 threads=4 k=2 fwd_ms=7.257445000 bwd_ms=8.860650000
+sample component=0 threads=4 k=3 fwd_ms=7.737210000 bwd_ms=8.668331000
+sample component=0 threads=4 k=4 fwd_ms=7.651202000 bwd_ms=7.983881000
+sample component=0 threads=4 k=5 fwd_ms=7.354995000 bwd_ms=7.486632000
+sample component=0 threads=4 k=6 fwd_ms=7.065123000 bwd_ms=10.738587000
+sample component=0 threads=4 k=7 fwd_ms=9.759667000 bwd_ms=9.499786000
+sample component=0 threads=4 k=8 fwd_ms=7.665583000 bwd_ms=10.033360000
+sample component=0 threads=4 k=9 fwd_ms=9.071853000 bwd_ms=10.118133000
+sample component=0 threads=4 k=10 fwd_ms=7.802304000 bwd_ms=11.167045000
+sample component=0 threads=4 k=11 fwd_ms=9.096025000 bwd_ms=10.861536000
+sample component=0 threads=4 k=12 fwd_ms=8.528454000 bwd_ms=7.343760000
+sample component=0 threads=4 k=13 fwd_ms=7.775960000 bwd_ms=7.917171000
+sample component=0 threads=4 k=14 fwd_ms=7.792306000 bwd_ms=8.521872000
+TAIL component=0 threads=4 observed_fwd=4 observed_bwd=4 fwd_min_ms=7.065123000 fwd_median_ms=7.775960000 fwd_max_ms=9.759667000 bwd_min_ms=7.343760000 bwd_median_ms=8.860650000 bwd_max_ms=11.167045000 bitwise_each_sample=1
+sample component=0 threads=8 k=0 fwd_ms=8.172566000 bwd_ms=7.629668000
+sample component=0 threads=8 k=1 fwd_ms=7.393244000 bwd_ms=10.546125000
+sample component=0 threads=8 k=2 fwd_ms=8.609541000 bwd_ms=7.684262000
+sample component=0 threads=8 k=3 fwd_ms=8.188635000 bwd_ms=11.528352000
+sample component=0 threads=8 k=4 fwd_ms=9.595429000 bwd_ms=12.585877000
+sample component=0 threads=8 k=5 fwd_ms=8.443129000 bwd_ms=9.968764000
+sample component=0 threads=8 k=6 fwd_ms=7.965634000 bwd_ms=8.012735000
+sample component=0 threads=8 k=7 fwd_ms=8.013242000 bwd_ms=10.504619000
+sample component=0 threads=8 k=8 fwd_ms=8.452191000 bwd_ms=10.518208000
+sample component=0 threads=8 k=9 fwd_ms=10.421122000 bwd_ms=10.880696000
+sample component=0 threads=8 k=10 fwd_ms=8.645200000 bwd_ms=8.988833000
+sample component=0 threads=8 k=11 fwd_ms=7.331715000 bwd_ms=9.209443000
+sample component=0 threads=8 k=12 fwd_ms=7.440686000 bwd_ms=7.475333000
+sample component=0 threads=8 k=13 fwd_ms=7.045297000 bwd_ms=7.939499000
+sample component=0 threads=8 k=14 fwd_ms=7.601357000 bwd_ms=10.178075000
+TAIL component=0 threads=8 observed_fwd=4 observed_bwd=4 fwd_min_ms=7.045297000 fwd_median_ms=8.172566000 fwd_max_ms=10.421122000 bwd_min_ms=7.475333000 bwd_median_ms=9.968764000 bwd_max_ms=12.585877000 bitwise_each_sample=1
+solve_sample threads=1 k=0 ms=345.042592000
+solve_sample threads=1 k=1 ms=376.097095000
+solve_sample threads=1 k=2 ms=362.865928000
+solve_sample threads=1 k=3 ms=349.019428000
+solve_sample threads=1 k=4 ms=354.625416000
+solve_sample threads=1 k=5 ms=322.585327000
+solve_sample threads=1 k=6 ms=355.684134000
+solve_sample threads=1 k=7 ms=380.200590000
+solve_sample threads=1 k=8 ms=356.694047000
+solve_sample threads=1 k=9 ms=359.059540000
+solve_sample threads=1 k=10 ms=420.174216000
+solve_sample threads=1 k=11 ms=441.720773000
+solve_sample threads=1 k=12 ms=500.441635000
+solve_sample threads=1 k=13 ms=404.719579000
+solve_sample threads=1 k=14 ms=365.842561000
+SOLVE threads=1 min_ms=322.585327000 median_ms=362.865928000 max_ms=500.441635000 bitwise_each_sample=1
+solve_sample threads=2 k=0 ms=326.571233000
+solve_sample threads=2 k=1 ms=310.965388000
+solve_sample threads=2 k=2 ms=344.093782000
+solve_sample threads=2 k=3 ms=309.463776000
+solve_sample threads=2 k=4 ms=283.367941000
+solve_sample threads=2 k=5 ms=296.829123000
+solve_sample threads=2 k=6 ms=294.984313000
+solve_sample threads=2 k=7 ms=291.573286000
+solve_sample threads=2 k=8 ms=298.051051000
+solve_sample threads=2 k=9 ms=289.355134000
+solve_sample threads=2 k=10 ms=292.141686000
+solve_sample threads=2 k=11 ms=280.668992000
+solve_sample threads=2 k=12 ms=299.485754000
+solve_sample threads=2 k=13 ms=291.473146000
+solve_sample threads=2 k=14 ms=301.647256000
+SOLVE threads=2 min_ms=280.668992000 median_ms=296.829123000 max_ms=344.093782000 bitwise_each_sample=1
+solve_sample threads=4 k=0 ms=334.129841000
+solve_sample threads=4 k=1 ms=356.268115000
+solve_sample threads=4 k=2 ms=334.471072000
+solve_sample threads=4 k=3 ms=304.386071000
+solve_sample threads=4 k=4 ms=336.511079000
+solve_sample threads=4 k=5 ms=324.834251000
+solve_sample threads=4 k=6 ms=329.635629000
+solve_sample threads=4 k=7 ms=305.488626000
+solve_sample threads=4 k=8 ms=301.069369000
+solve_sample threads=4 k=9 ms=297.030643000
+solve_sample threads=4 k=10 ms=289.579853000
+solve_sample threads=4 k=11 ms=323.838056000
+solve_sample threads=4 k=12 ms=324.478437000
+solve_sample threads=4 k=13 ms=282.721982000
+solve_sample threads=4 k=14 ms=307.569038000
+SOLVE threads=4 min_ms=282.721982000 median_ms=323.838056000 max_ms=356.268115000 bitwise_each_sample=1
+solve_sample threads=8 k=0 ms=341.310071000
+solve_sample threads=8 k=1 ms=357.098996000
+solve_sample threads=8 k=2 ms=315.976546000
+solve_sample threads=8 k=3 ms=395.853334000
+solve_sample threads=8 k=4 ms=312.449926000
+solve_sample threads=8 k=5 ms=299.487611000
+solve_sample threads=8 k=6 ms=338.518887000
+solve_sample threads=8 k=7 ms=347.040857000
+solve_sample threads=8 k=8 ms=310.654757000
+solve_sample threads=8 k=9 ms=331.865026000
+solve_sample threads=8 k=10 ms=303.871363000
+solve_sample threads=8 k=11 ms=307.465399000
+solve_sample threads=8 k=12 ms=341.491085000
+solve_sample threads=8 k=13 ms=336.661440000
+solve_sample threads=8 k=14 ms=362.857981000
+SOLVE threads=8 min_ms=299.487611000 median_ms=336.661440000 max_ms=395.853334000 bitwise_each_sample=1
+backward_error=6.815034367846e-15

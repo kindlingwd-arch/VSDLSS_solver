@@ -1,0 +1,132 @@
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/main.o src/main.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss.o src/vsdlss.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_status.o src/vsdlss_status.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_matrix.o src/vsdlss_matrix.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_graph.o src/vsdlss_graph.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_min_degree.o src/vsdlss_min_degree.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_amd.o src/vsdlss_amd.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_mld_graph.o src/vsdlss_mld_graph.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_mld_partition.o src/vsdlss_mld_partition.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_mld.o src/vsdlss_mld.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_ordering.o src/vsdlss_ordering.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_factor.o src/vsdlss_factor.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_io.o src/vsdlss_io.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_text_io.o src/vsdlss_text_io.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_components.o src/vsdlss_components.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_reduction.o src/vsdlss_reduction.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_supernodal_symbolic.o src/vsdlss_supernodal_symbolic.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_supernodal_numeric.o src/vsdlss_supernodal_numeric.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_sn_reorder.o src/vsdlss_sn_reorder.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_m3.o src/vsdlss_m3.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_m4.o src/vsdlss_m4.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_panel.o src/vsdlss_panel.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_m4_panel.o src/vsdlss_m4_panel.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_parallel.o src/vsdlss_parallel.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_dense.o src/vsdlss_dense.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_simd.o src/vsdlss_simd.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/vsdlss_ledger.o src/vsdlss_ledger.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o vsdlss_solve src/main.o src/vsdlss.o src/vsdlss_status.o src/vsdlss_matrix.o src/vsdlss_graph.o src/vsdlss_min_degree.o src/vsdlss_amd.o src/vsdlss_mld_graph.o src/vsdlss_mld_partition.o src/vsdlss_mld.o src/vsdlss_ordering.o src/vsdlss_factor.o src/vsdlss_io.o src/vsdlss_text_io.o src/vsdlss_components.o src/vsdlss_reduction.o src/vsdlss_supernodal_symbolic.o src/vsdlss_supernodal_numeric.o src/vsdlss_sn_reorder.o src/vsdlss_m3.o src/vsdlss_m4.o src/vsdlss_panel.o src/vsdlss_m4_panel.o src/vsdlss_parallel.o src/vsdlss_dense.o src/vsdlss_simd.o src/vsdlss_ledger.o -lm build/metis/libmetis.a
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -c -o src/main_vsdlss.o src/main_vsdlss.c
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o vsdlss_solver src/main_vsdlss.o src/vsdlss.o src/vsdlss_status.o src/vsdlss_matrix.o src/vsdlss_graph.o src/vsdlss_min_degree.o src/vsdlss_amd.o src/vsdlss_mld_graph.o src/vsdlss_mld_partition.o src/vsdlss_mld.o src/vsdlss_ordering.o src/vsdlss_factor.o src/vsdlss_io.o src/vsdlss_text_io.o src/vsdlss_components.o src/vsdlss_reduction.o src/vsdlss_supernodal_symbolic.o src/vsdlss_supernodal_numeric.o src/vsdlss_sn_reorder.o src/vsdlss_m3.o src/vsdlss_m4.o src/vsdlss_panel.o src/vsdlss_m4_panel.o src/vsdlss_parallel.o src/vsdlss_dense.o src/vsdlss_simd.o src/vsdlss_ledger.o -lm build/metis/libmetis.a
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_solver test/test_solver.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_solver
+test_solver: ALL OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_io test/test_io.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+test/test_io.c: In function ‘test_load_modes_and_corruption’:
+test/test_io.c:24:25: warning: ‘%s’ directive output may be truncated writing 4 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+   24 |     snprintf(out,cap,"%s%s",job,ext);
+      |                         ^~
+......
+   51 |     path_of(path,sizeof path,job,".rhs"); CHECK(unlink(path)==0);
+      |                                  ~~~~~~
+In file included from /usr/include/stdio.h:867,
+                 from include/vsdlss.h:4,
+                 from test/test_io.c:2:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:67:10: note: ‘__builtin___snprintf_chk’ output between 5 and 516 bytes into a destination of size 512
+   67 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   68 |        __bos (__s), __fmt, __va_arg_pack ());
+      |        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test/test_io.c:24:25: warning: ‘%s’ directive output may be truncated writing 4 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+   24 |     snprintf(out,cap,"%s%s",job,ext);
+      |                         ^~
+......
+   56 |     { double short_rhs=7; path_of(path,sizeof path,job,".rhs"); CHECK(write_file(path,&short_rhs,sizeof short_rhs)); }
+      |                                                        ~~~~~~
+In file included from /usr/include/stdio.h:867,
+                 from include/vsdlss.h:4,
+                 from test/test_io.c:2:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:67:10: note: ‘__builtin___snprintf_chk’ output between 5 and 516 bytes into a destination of size 512
+   67 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   68 |        __bos (__s), __fmt, __va_arg_pack ());
+      |        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test/test_io.c:24:25: warning: ‘%s’ directive output may be truncated writing 5 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+   24 |     snprintf(out,cap,"%s%s",job,ext);
+      |                         ^~
+......
+   58 |     { int32_t bad=3; path_of(path,sizeof path,job,".matf"); CHECK(write_file(path,&bad,sizeof bad)); }
+      |                                                   ~~~~~~~
+In file included from /usr/include/stdio.h:867,
+                 from include/vsdlss.h:4,
+                 from test/test_io.c:2:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:67:10: note: ‘__builtin___snprintf_chk’ output between 6 and 517 bytes into a destination of size 512
+   67 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   68 |        __bos (__s), __fmt, __va_arg_pack ());
+      |        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test/test_io.c:24:25: warning: ‘%s’ directive output may be truncated writing 4 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+   24 |     snprintf(out,cap,"%s%s",job,ext);
+      |                         ^~
+......
+   64 |         path_of(path,sizeof path,job,".hdr");
+      |                                      ~~~~~~
+In file included from /usr/include/stdio.h:867,
+                 from include/vsdlss.h:4,
+                 from test/test_io.c:2:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:67:10: note: ‘__builtin___snprintf_chk’ output between 5 and 516 bytes into a destination of size 512
+   67 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   68 |        __bos (__s), __fmt, __va_arg_pack ());
+      |        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test/test_io.c:24:25: warning: ‘%s’ directive output may be truncated writing likely 4 or more bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+   24 |     snprintf(out,cap,"%s%s",job,ext);
+      |                         ^~
+test/test_io.c:24:22: note: assuming directive output of 4 bytes
+   24 |     snprintf(out,cap,"%s%s",job,ext);
+      |                      ^~~~~~
+In file included from /usr/include/stdio.h:867,
+                 from include/vsdlss.h:4,
+                 from test/test_io.c:2:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:67:10: note: ‘__builtin___snprintf_chk’ output 1 or more bytes (assuming 516) into a destination of size 512
+   67 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   68 |        __bos (__s), __fmt, __va_arg_pack ());
+      |        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+./test_io
+test_io: ALL OK
+python3 test/test_text_dump.py
+...
+----------------------------------------------------------------------
+Ran 3 tests in 0.937s
+
+OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_ordering test/test_ordering.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_ordering
+test_ordering: ALL OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_mld test/test_mld.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_mld
+test_mld: ALL OK
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_m3 test/test_m3.c test/m3_test_alloc.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a \
+  -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
+./test_m3
+tail levels: identical solutions with and without the level schedule
+tail order: same level order and plan at 1 and 4 threads; scheduled replay = serial (saved, no plan, 1/2/4 threads, non-finite); allocation failures clean or serial
+tombstones: identical solutions for every threshold; 1.3M-vertex star reduced in 0.24 s
+allocation failure sweeps: factorize=143 solve=3
+m3 component, reduction, RHS, symbolic, and numeric tests passed
+cc -O2 -Wall -Wextra -Iinclude -std=c11 -fopenmp -DVSDLSS_METIS -Ithird_party/metis-5.1.0/include -DVSDLSS_METIS_THREADSAFE -o test_m4 test/test_m4.c src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c src/vsdlss_graph.c src/vsdlss_min_degree.c src/vsdlss_amd.c src/vsdlss_mld_graph.c src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c -lm build/metis/libmetis.a
+./test_m4
+FAIL 84: ftruncate(fileno(f->file),10)==0
+FAIL 138: failures()==0
+make: *** [Makefile:148: test-m4] Error 1

@@ -1,0 +1,4 @@
+# Preserve the byte-for-byte evidence hashes across Windows/Linux checkouts.
+*.log -text
+*.csv text eol=lf
+*.json text eol=lf
