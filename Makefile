@@ -138,6 +138,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
+	rm -f bench_tail_solve
 	rm -rf build/metis
 	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_tail bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
@@ -293,6 +294,10 @@ bench_core: test/bench_core.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal
 # tail-dominated network, thread sweep, bitwise check (no input files).
 bench_tail: test/bench_tail.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_tail.c $(LIBSRCS) $(LDLIBS)
+
+# Actual M3 solve; GNU ld wrappers record the tail's own team, separately from core.
+bench_tail_solve: test/bench_tail_solve.c test/bench_tail.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h src/vsdlss_simd.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -Wl,--wrap=vsdlss_reduce_forward_inplace -Wl,--wrap=vsdlss_reduce_backward_inplace -o $@ test/bench_tail_solve.c $(LIBSRCS) $(LDLIBS)
 
 # Solve phases of one component in isolation (replay blocks/tail, core),
 # thread sweep; input a PG_DUMP file or grid:SIDE[:CHAIN].

@@ -1,0 +1,19 @@
+# pg_profile n=2000000 edges=2110394 nnz_upper=4110394 nnz_full=6220788 max_degree=10 lattice=456x479 gen=0.3s
+# degree  target:   d1=224000 d2=1335000 d3=437236 d4=3751 d5=10 d6+=3
+# degree  achieved: d1=224000 d2=1335000 d3=437236 d4=3751 d5=10 d6+=3 (d0=0)
+# rss after build: 174 MB
+# factor: order=6 threads=8 time=1.40s components=1 core_n=135049 (6.75%) core_nnzL=5.4M peak_rss=377 MB page_faults=44996
+@@ threads=1
+SOLVE threads=1 min=0.036766000 med=0.040289983 max=0.058893992 bitwise_same=1
+@@ threads=2
+SOLVE threads=2 min=0.025907528 med=0.027912181 max=0.031063523 bitwise_same=1
+@@ threads=4
+SOLVE threads=4 min=0.020755691 med=0.021656069 max=0.023114626 bitwise_same=1
+@@ threads=8
+SOLVE threads=8 min=0.019705216 med=0.021671817 max=0.025253493 bitwise_same=1
+# xhash=f5cc992637f756ad
+# backward_error=1.542163e-17
+INTERNAL threads=1 min=0.021189091 med=0.024362555 max=0.029240865 bitwise_same_as_solve=1
+INTERNAL threads=2 min=0.015247637 med=0.018054131 max=0.019241411 bitwise_same_as_solve=1
+INTERNAL threads=4 min=0.012711396 med=0.013768847 max=0.016888514 bitwise_same_as_solve=1
+INTERNAL threads=8 min=0.012848411 med=0.014636112 max=0.015832824 bitwise_same_as_solve=1

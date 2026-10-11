@@ -274,23 +274,27 @@ int main(int argc,char **argv)
     for(csi i=0;i<n;i++)b[i]=uni(-1e-3,0);
     const char *tl=getenv("SOLVE_THREADS"); if(!tl)tl="1 2 4 8 16";
     const char *re=getenv("SOLVE_REPS"); int reps=re?atoi(re):15;
+    if(reps<1 || reps>256){fputs("SOLVE_REPS must be 1..256\n",stderr);return 2;}
+    if(vsdlss_set_num_threads(1)!=VSDLSS_OK || vsdlss_m3_solve(f,b,x0)!=VSDLSS_OK){puts("reference solve failed");return 1;}
     int first=1; char buf[256]; strncpy(buf,tl,255); buf[255]=0;
     for(char *tok=strtok(buf," ");tok;tok=strtok(NULL," ")){
         int t=atoi(tok); if(vsdlss_set_num_threads(t)!=VSDLSS_OK){puts("bad threads");return 1;}
         for(int w=0;w<2;w++) if(vsdlss_m3_solve(f,b,x)!=VSDLSS_OK){puts("solve failed");return 1;}
         fprintf(stderr,"@@ threads=%d\n",t);
         double ts[256]; if(reps>256)reps=256;
-        for(int r=0;r<reps;r++){double t0=now(); if(vsdlss_m3_solve(f,b,x)!=VSDLSS_OK){puts("solve failed");return 1;} ts[r]=now()-t0;}
+        for(int r=0;r<reps;r++){double t0=now(); if(vsdlss_m3_solve(f,b,x)!=VSDLSS_OK){puts("solve failed");return 1;} ts[r]=now()-t0;
+            if(memcmp(x0,x,(size_t)n*8)){puts("solve differs from 1-thread reference");return 1;}}
         for(int i=1;i<reps;i++){double v=ts[i];int j=i;while(j>0&&ts[j-1]>v){ts[j]=ts[j-1];j--;}ts[j]=v;}
         if(first){memcpy(x0,x,(size_t)n*sizeof(double));first=0;}
         int same=!memcmp(x0,x,(size_t)n*sizeof(double));
-        printf("SOLVE threads=%d min=%.4f med=%.4f max=%.4f bitwise_same=%d\n",t,ts[0],ts[reps/2],ts[reps-1],same);
+        printf("SOLVE threads=%d min=%.9f med=%.9f max=%.9f bitwise_same=%d\n",t,ts[0],ts[reps/2],ts[reps-1],same);
         fflush(stdout); fflush(stderr);
     }
     { uint64_t h=1469598103934665603ULL; const unsigned char *p=(const unsigned char*)x;
       for(size_t i=0;i<(size_t)n*8;i++){h^=p[i];h*=1099511628211ULL;}
       printf("# xhash=%016llx\n",(unsigned long long)h); }
-    double eta;vsdlss_backward_error(A,x,b,&eta); printf("# backward_error=%.2e\n",eta);
+    double eta;if(vsdlss_backward_error(A,x,b,&eta)!=VSDLSS_OK || !isfinite(eta) || eta>1e-10){puts("backward error check failed");return 1;}
+    printf("# backward_error=%.6e\n",eta);
     /* Internal-order solves: permute once outside the timing, then compare
      * the result mapped back against the regular solve bitwise. */
     {
@@ -302,10 +306,11 @@ int main(int argc,char **argv)
             int t=atoi(tok); vsdlss_set_num_threads(t);
             for(int w=0;w<2;w++) if(vsdlss_m3_solve_internal(f,bi,xi)!=VSDLSS_OK){puts("internal solve failed");return 1;}
             double ts[256];
-            for(int r=0;r<reps;r++){double t0=now(); vsdlss_m3_solve_internal(f,bi,xi); ts[r]=now()-t0;}
+            for(int r=0;r<reps;r++){double t0=now(); if(vsdlss_m3_solve_internal(f,bi,xi)!=VSDLSS_OK){puts("internal solve failed");return 1;} ts[r]=now()-t0;
+                for(csi p=0;p<n;p++) if(memcmp(&xi[p],&x0[perm[p]],8)){puts("internal solve differs from reference");return 1;}}
             for(int i=1;i<reps;i++){double v=ts[i];int j=i;while(j>0&&ts[j-1]>v){ts[j]=ts[j-1];j--;}ts[j]=v;}
             int same=1; for(csi p=0;p<n;p++) if(memcmp(&xi[p],&x0[perm[p]],8)){same=0;break;}
-            printf("INTERNAL threads=%d min=%.4f med=%.4f max=%.4f bitwise_same_as_solve=%d\n",t,ts[0],ts[reps/2],ts[reps-1],same);
+            printf("INTERNAL threads=%d min=%.9f med=%.9f max=%.9f bitwise_same_as_solve=%d\n",t,ts[0],ts[reps/2],ts[reps-1],same);
             fflush(stdout);
         }
         free(perm);free(bi);free(xi);

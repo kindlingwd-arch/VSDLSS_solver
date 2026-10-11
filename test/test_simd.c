@@ -7,15 +7,55 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
+
 
 #define CHECK(e) do{if(!(e)){fprintf(stderr,"FAIL simd %d: %s\n",__LINE__,#e);return 1;}}while(0)
 static uint64_t s=0x243F6A8885A308D3ULL;
 static uint64_t rnd(void){s^=s<<13;s^=s>>7;s^=s<<17;return s;}
 static double uni(void){return (double)(rnd()>>11)*(1.0/9007199254740992.0)*2-1;}
 
+/* Catches wrong AoS deinterleave, reordered subtractions, incomplete final
+ * vectors, changed rounding, overwritten input, and missed nonfinite lanes.
+ * The oracle is the existing arithmetic contract, not a SIMD helper. */
+static int test_replay_fixed(void)
+{
+    enum {N=256, M=65};
+    uint32_t nb[3*M]; double mul[3*M], piv[M], rhs[M], x[N], ref[N];
+    for(int d=0;d<=3;d++) for(int n=0;n<=M;n++) for(int saved=0;saved<2;saved++) {
+        for(int i=0;i<N;i++) x[i]=ref[i]=uni()*3;
+        for(int i=0;i<M;i++) { piv[i]=0.1+fabs(uni()); rhs[i]=uni(); }
+        for(int i=0;i<3*M;i++) { nb[i]=128+(uint32_t)(rnd()%128); mul[i]=uni(); }
+        for(int i=0;i<n;i++) {
+            double v=(saved?rhs[i]:ref[16+i])/piv[i];
+            for(int j=0;j<d;j++) { double u=mul[d*i+j]*ref[nb[d*i+j]]; v-=u; }
+            ref[16+i]=v;
+        }
+        CHECK(vsdlss_simd_replay_fixed(n,d,nb,mul,piv,saved?rhs:x+16,x+16,x)==0);
+        CHECK(memcmp(x,ref,sizeof x)==0);
+    }
+    /* Hand-computed chain: 20/2 - 3*2 - 4*1 = 0, not (20-6-4)/2. */
+    for(int i=0;i<N;i++) x[i]=0;
+    x[128]=2; x[129]=1;
+    for(int i=0;i<5;i++) { rhs[i]=20; piv[i]=2; nb[2*i]=128; nb[2*i+1]=129; mul[2*i]=3; mul[2*i+1]=4; }
+    CHECK(vsdlss_simd_replay_fixed(5,2,nb,mul,piv,rhs,x+16,x)==0);
+    for(int i=0;i<5;i++) CHECK(x[16+i]==0);
+    for(int lane=0;lane<5;lane++) for(int kind=0;kind<3;kind++) {
+        for(int i=0;i<5;i++) { rhs[i]=1; piv[i]=1; }
+        rhs[lane]=kind==0?INFINITY:kind==1?NAN:DBL_MAX;
+        if(kind==2) piv[lane]=0.5;
+        CHECK(vsdlss_simd_replay_fixed(5,0,nb,mul,piv,rhs,x+16,x)==1);
+    }
+    for(int i=0;i<5;i++) { rhs[i]=-0.0; piv[i]=1; }
+    CHECK(vsdlss_simd_replay_fixed(5,0,nb,mul,piv,rhs,x+16,x)==0);
+    for(int i=0;i<5;i++) CHECK(signbit(x[16+i]));
+    return 0;
+}
+
 int main(void)
 {
     if(!vsdlss_simd_enabled()){puts("test_simd: AVX2 unavailable or VSDLSS_SIMD=0, skipped");return 0;}
+    CHECK(test_replay_fixed()==0);
     enum{N=4096};
     double *x=malloc(N*8),*y=malloc(N*8),*a=malloc(N*64*8),*xs=malloc(64*8),*v=malloc(8*8),*w=malloc(8*8);
     int32_t *R=malloc(N*sizeof(int32_t));

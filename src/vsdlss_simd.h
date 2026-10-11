@@ -8,6 +8,16 @@
  * The kernels give bitwise the results of the scalar loops they replace. */
 int vsdlss_simd_enabled(void);
 
+/* n independent, relabelled records of one level and one degree (0..3).
+ * Edge i,j is nb[degree*i+j], mul[degree*i+j]; out[i] = rhs[i]/piv[i]
+ * followed by ascending-j product/subtraction. rhs may equal out; neighbours
+ * in x must not overlap out; nb entries must be <= INT32_MAX (the packed
+ * reduction already limits n to 2^30). Returns 1 if any result is nonfinite.
+ * Call only when vsdlss_simd_enabled(), never on a serial dependency chain. */
+int vsdlss_simd_replay_fixed(csi n, int degree, const uint32_t *nb,
+    const double *mul, const double *piv, const double *rhs, double *out,
+    const double *x);
+
 /* Source-block update of the forward solve, rows R[r0..r1) (ascending):
  *   for j in [0, ws): for r: x[R[r]] -= as[j*rs + r] * xs[j]
  * with each x[R[r]] updated in ascending j.  The rows must not include an

@@ -500,6 +500,7 @@ static void trace_factor_bytes(const vsdlss_m3_factor *f)
             if(r->tail_levels) {                    /* level schedule of the tail, forward plan */
                 const csi chunks=r->tail_level[r->tail_levels];
                 double bytes=(double)(r->tail_levels+1)*sizeof(csi)+(double)(chunks+1)*2*sizeof(csi);
+                if(r->tail_chunk_degree) bytes+=(double)chunks;
                 if(r->tail_fwd) bytes+=(double)r->pk[r->blocks].nbn*16+(double)(r->tail_levels+1)*sizeof(csi);
                 replay+=bytes;
                 fprintf(stderr,"vsdlss trace: component %lld: tail %lld records, %lld levels, schedule %.1f MiB%s\n",

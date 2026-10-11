@@ -1,5 +1,6 @@
 #include "vsdlss_m3_internal.h"
 #include "vsdlss_parallel.h"
+#include "vsdlss_simd.h"
 
 #include <stdatomic.h>
 
@@ -247,6 +248,7 @@ void vsdlss_reduction_free(vsdlss_reduction *reduction)
     if(!reduction) return;
     free(reduction->records); free(reduction->core_vertices); free(reduction->block_ptr);
     free(reduction->tail_level); free(reduction->tail_chunk_rec); free(reduction->tail_chunk_nb);
+    free(reduction->tail_chunk_degree);
     tail_plan_free(reduction->tail_fwd);
     if(reduction->pk) for(csi q=0;q<reduction->pk_count;q++) {
         free(reduction->pk[q].head); free(reduction->pk[q].deg); free(reduction->pk[q].nb); free(reduction->pk[q].piv); free(reduction->pk[q].val);
@@ -571,9 +573,16 @@ static void forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doub
     {
     VSDLSS_OMP(omp master)
     vsdlss_parallel_observe();
+#ifdef _OPENMP
+    const int id=omp_get_thread_num(), nth=omp_get_num_threads();
+#else
+    const int id=0, nth=1;
+#endif
     for(csi l=0;l<r->tail_levels;l++) {
-        VSDLSS_OMP(omp for schedule(static))
-        for(csi c=lp[l];c<lp[l+1];c++) forward_range(g,cr[c],cr[c+1],cn[c],work,saved);
+        const csi first=lp[l], m=lp[l+1]-first;
+        const csi c0=first+m*id/nth, c1=first+m*(id+1)/nth;
+        if(c0<c1) forward_range(g,cr[c0],cr[c1],cn[c0],work,saved);
+        VSDLSS_OMP(omp barrier)
     }
     }
 }
@@ -583,14 +592,40 @@ static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, cons
 {
     const csi *lp=r->tail_level, *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
     int ok=1;
+    const int simd=!g->head && r->tail_chunk_degree && vsdlss_simd_enabled();
     (void)nt;
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(&:ok))
     {
     VSDLSS_OMP(omp master)
     vsdlss_parallel_observe();
+#ifdef _OPENMP
+    const int id=omp_get_thread_num(), nth=omp_get_num_threads();
+#else
+    const int id=0, nth=1;
+#endif
     for(csi l=r->tail_levels;l>0;l--) {
-        VSDLSS_OMP(omp for schedule(static))
-        for(csi c=lp[l-1];c<lp[l];c++) ok&=backward_range(g,cr[c],cr[c+1],cn[c+1],saved,x);
+        const csi first=lp[l-1], m=lp[l]-first;
+        const csi c0=first+m*id/nth, c1=first+m*(id+1)/nth;
+        if(!simd) {
+            if(c0<c1) ok&=backward_range(g,cr[c0],cr[c1],cn[c1],saved,x);
+        } else {
+            /* Adjacent equal-degree chunks form one SIMD range. Mixed
+             * chunks remain scalar. Every range lies entirely in this
+             * conflict-free level; output addresses are contiguous. */
+            for(csi c=c0;c<c1;) {
+                const int d=r->tail_chunk_degree[c]; csi end=c+1;
+                while(end<c1 && r->tail_chunk_degree[end]==d) end++;
+                if(d>3) ok&=backward_range(g,cr[c],cr[end],cn[end],saved,x);
+                else {
+                    const csi i=cr[c], n=cr[end]-i;
+                    double *out=x+g->k0+i;
+                    ok&=!vsdlss_simd_replay_fixed(n,d,g->nb+cn[c],g->val+cn[c],
+                        g->piv+i,saved?saved+i:out,out,x);
+                }
+                c=end;
+            }
+        }
+        VSDLSS_OMP(omp barrier)
     }
     }
     return ok;
@@ -906,6 +941,7 @@ csi vsdlss_reduce_tail_order_grain = 1024;
 static void drop_tail_schedule(vsdlss_reduction *r)
 {
     free(r->tail_level); free(r->tail_chunk_rec); free(r->tail_chunk_nb);
+    free(r->tail_chunk_degree); r->tail_chunk_degree=NULL;
     r->tail_level=r->tail_chunk_rec=r->tail_chunk_nb=NULL; r->tail_levels=0;
     tail_plan_free(r->tail_fwd); r->tail_fwd=NULL;
 }
@@ -1076,6 +1112,8 @@ static vsdlss_status level_tail(vsdlss_reduction *r, vsdlss_elim_record *t, csi 
     r->tail_chunk_rec=(csi *)malloc((size_t)(chunks+1)*sizeof(csi));
     r->tail_chunk_nb=(csi *)malloc((size_t)(chunks+1)*sizeof(csi));
     if(!r->tail_chunk_rec||!r->tail_chunk_nb) goto out;
+    /* Optional SIMD classification; failure keeps a coalesced scalar path. */
+    r->tail_chunk_degree=(uint8_t *)malloc((size_t)chunks);
     {
         csi i=0, o=0, c=0;
         for(csi l=1;l<=levels;l++) {
@@ -1083,8 +1121,10 @@ static vsdlss_status level_tail(vsdlss_reduction *r, vsdlss_elim_record *t, csi 
             r->tail_level[l-1]=c;
             while(i<end) {
                 const csi stop=end-i>TAIL_CHUNK?i+TAIL_CHUNK:end;
+                const csi degree=t[at?at[i]:i].degree; int uniform=1;
                 r->tail_chunk_rec[c]=i; r->tail_chunk_nb[c]=o; c++;
-                for(;i<stop;i++) o+=t[at?at[i]:i].degree;
+                for(;i<stop;i++) { const csi d=t[at?at[i]:i].degree; o+=d; uniform&=d==degree; }
+                if(r->tail_chunk_degree) r->tail_chunk_degree[c-1]=(uint8_t)(uniform?degree:4);
             }
         }
         r->tail_level[levels]=c; r->tail_chunk_rec[c]=cnt; r->tail_chunk_nb[c]=o;

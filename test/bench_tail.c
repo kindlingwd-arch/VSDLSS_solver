@@ -36,6 +36,10 @@
 
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+static void original_order(double *out,const double *w,const csi *id,csi n)
+{ for(csi i=0;i<n;i++) out[i]=w[id?id[i]:i]; }
+static int checked(vsdlss_status st,const char *phase)
+{ if(st==VSDLSS_OK) return 1; fprintf(stderr,"%s: %s\n",phase,vsdlss_status_string(st)); return 0; }
 static uint64_t s_rng = 88172645463325252ULL;
 static uint64_t rnd(void) { s_rng ^= s_rng << 13; s_rng ^= s_rng >> 7; s_rng ^= s_rng << 17; return s_rng; }
 
@@ -161,6 +165,9 @@ int main(int argc, char **argv)
     const char *tl = argc > 2 ? argv[2] : "1 2 4 8";
     const int reps = argc > 3 ? atoi(argv[3]) : 9;
     const int lmin = argc > 4 ? atoi(argv[4]) : 20, lmax = argc > 5 ? atoi(argv[5]) : 200;
+    if(n<100 || n>1000000000 || reps<1 || reps>64 || lmin<1 || lmax<lmin || strlen(tl)>=256) {
+        fputs("invalid n/reps/wire length/thread list (reps must be 1..64)\n",stderr); return 2;
+    }
     interleave_memory();
     double t0 = now();
     vsdlss *A = build(n, lmin, lmax);
@@ -170,9 +177,15 @@ int main(int argc, char **argv)
     double ts, tp;
     { const char *e = getenv("BENCH_RELABEL"); if (e) relabel_on = atoi(e); }
     int rt = 1;                    /* the reduction runs with the largest thread count tested */
-    { char tb[256]; snprintf(tb, sizeof tb, "%s", tl);
-      for (char *s = strtok(tb, " ,"); s; s = strtok(NULL, " ,")) if (atoi(s) > rt) rt = atoi(s); }
-    vsdlss_set_num_threads(rt);
+    { char tb[256]; snprintf(tb, sizeof tb, "%s", tl); int first=1;
+      for (char *s = strtok(tb, " ,"); s; s = strtok(NULL, " ,")) {
+          char *end; const long t=strtol(s,&end,10);
+          if(*end || t<1 || t>1024 || (first && t!=1)) { fputs("threads must start with 1 and be in 1..1024\n",stderr); return 2; }
+          first=0; if(t>rt) rt=(int)t;
+      }
+      if(first) { fputs("empty thread list\n",stderr); return 2; }
+    }
+    if(!checked(vsdlss_set_num_threads(rt),"set threads")) return 2;
     printf("# reduction with %d threads\n", rt);
     csi *ids_s = NULL, *ids_p = NULL;
     vsdlss_reduction *rs = reduce(A, 0, &ts, &ids_s), *rp = reduce(A, 1, &tp, &ids_p);
@@ -188,41 +201,66 @@ int main(int argc, char **argv)
     if (!rp->tail_levels) puts("# NOTE: no level schedule was built (tail too small or too deep)");
     printf("# solve-order relabel: %s (BENCH_RELABEL=0/1)\n", relabel_on ? "on, as in the M3 solve" : "off");
     double *w0 = malloc((size_t)n * 8), *w = malloc((size_t)n * 8), *ref = malloc((size_t)n * 8), *out = malloc((size_t)n * 8);
+    double *ref_f = malloc((size_t)n * 8);
     double *in[2] = {malloc((size_t)n * 8), malloc((size_t)n * 8)};
-    if (!w0 || !w || !ref || !out || !in[0] || !in[1]) return 1;
+    if (!w0 || !w || !ref || !ref_f || !out || !in[0] || !in[1]) return 1;
     for (csi i = 0; i < n; i++) w0[i] = sin(0.37 * (double)i) + 0.2;
     const csi *ids[2] = {ids_s, ids_p};     /* the input in each reduction's numbering */
     for (int c = 0; c < 2; c++) for (csi i = 0; i < n; i++) in[c][ids[c] ? ids[c][i] : i] = w0[i];
     char buf[256]; snprintf(buf, sizeof buf, "%s", tl);
+    vsdlss_set_num_threads(1); memcpy(w,in[0],(size_t)n*8);
+    if(!checked(vsdlss_reduce_forward_inplace(rs,w,NULL),"reference forward")) return 1;
+    original_order(ref_f,w,ids[0],n);
+    if(!checked(vsdlss_reduce_backward_inplace(rs,NULL,w),"reference backward")) return 1;
+    original_order(ref,w,ids[0],n);
     int first = 1, mismatch = 0;
     double base_f = 0, base_b = 0;
-    printf("# times in ms, median of %d; speedup is against the serial tail at 1 thread\n", reps);
+    printf("# replay ONLY (no core solve), times in ms, median of %d; alternating variants, two warmups, every output checked\n", reps);
+    puts("csv,variant,requested,observed_fwd,observed_bwd,fwd_min_ms,fwd_median_ms,fwd_max_ms,bwd_min_ms,bwd_median_ms,bwd_max_ms,replay_median_ms");
     for (char *tok = strtok(buf, " ,"); tok; tok = strtok(NULL, " ,")) {
         const int T = atoi(tok);
-        vsdlss_set_num_threads(T);
         double med[2][2];
-        for (int which = 0; which < 2; which++) {
+        double tf[2][64], tb[2][64], total[2][64]; int teams[2][2]={{1,1},{1,1}};
+        for(int k=-2;k<reps;k++) for(int turn=0;turn<2;turn++) {
+            const int which=turn ^ ((k+2)&1);
             const vsdlss_reduction *r = which ? rp : rs;
-            double tf[64], tb[64]; const int R = reps < 64 ? reps : 64;
-            for (int k = -1; k < R; k++) {
-                memcpy(w, in[which], (size_t)n * 8);
-                double s = now(); vsdlss_reduce_forward_inplace(r, w, NULL); double f = now() - s;
-                s = now(); vsdlss_reduce_backward_inplace(r, NULL, w); double b = now() - s;
-                if (k >= 0) { tf[k] = f; tb[k] = b; }
-            }
-            qsort(tf, (size_t)R, 8, cmpd); qsort(tb, (size_t)R, 8, cmpd);
-            med[which][0] = tf[R / 2]; med[which][1] = tb[R / 2];
-            for (csi i = 0; i < n; i++) out[i] = w[ids[which] ? ids[which][i] : i];   /* original numbering */
-            if (first && !which) memcpy(ref, out, (size_t)n * 8);
-            else if (memcmp(ref, out, (size_t)n * 8)) mismatch = 1;
+            memcpy(w,in[which],(size_t)n*8);
+            if(!checked(vsdlss_set_num_threads(T),"set forward threads")) return 1;
+            const double s=now(); const vsdlss_status fs=vsdlss_reduce_forward_inplace(r,w,NULL); const double f=now()-s;
+            teams[which][0]=vsdlss_parallel_last_team_size();
+            if(!checked(fs,"forward")) return 1;
+            if(!checked(vsdlss_set_num_threads(T),"set backward threads")) return 1;
+            const double t=now(); const vsdlss_status bs=vsdlss_reduce_backward_inplace(r,NULL,w); const double b=now()-t;
+            teams[which][1]=vsdlss_parallel_last_team_size();
+            if(!checked(bs,"backward")) return 1;
+            original_order(out,w,ids[which],n);
+            if(memcmp(ref,out,(size_t)n*8)) mismatch=1;
+            /* Verify forward independently AFTER the timed pair. Reading
+             * and permuting the full vector between its two timed passes
+             * would change the backward cache state differently per layout. */
+            memcpy(w,in[which],(size_t)n*8);
+            if(!checked(vsdlss_reduce_forward_inplace(r,w,NULL),"untimed forward check")) return 1;
+            original_order(out,w,ids[which],n);
+            if(memcmp(ref_f,out,(size_t)n*8)) mismatch=1;
+            if(mismatch) { fprintf(stderr,"DIFFERENT: T=%d variant=%d repetition=%d\n",T,which,k); return 1; }
+            if(k>=0) { tf[which][k]=f; tb[which][k]=b; total[which][k]=f+b; }
+        }
+        for(int which=0;which<2;which++) {
+            qsort(tf[which],(size_t)reps,sizeof(double),cmpd); qsort(tb[which],(size_t)reps,sizeof(double),cmpd);
+            qsort(total[which],(size_t)reps,sizeof(double),cmpd);
+            med[which][0]=tf[which][reps/2]; med[which][1]=tb[which][reps/2];
+            printf("csv,%s,%d,%d,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                which?"schedule":"serial",T,teams[which][0],teams[which][1],
+                tf[which][0]*1e3,med[which][0]*1e3,tf[which][reps-1]*1e3,
+                tb[which][0]*1e3,med[which][1]*1e3,tb[which][reps-1]*1e3,total[which][reps/2]*1e3);
         }
         if (first) { base_f = med[0][0]; base_b = med[0][1]; first = 0; }
-        printf("T=%-3d | serial tail: fwd %8.2f bwd %8.2f | level schedule: fwd %8.2f bwd %8.2f | speedup fwd %5.2fx bwd %5.2fx\n",
+        printf("T=%-3d | serial tail: fwd %.6f bwd %.6f | level schedule: fwd %.6f bwd %.6f | speedup fwd %.3fx bwd %.3fx | 8x target: %s\n",
                T, 1e3 * med[0][0], 1e3 * med[0][1], 1e3 * med[1][0], 1e3 * med[1][1],
-               base_f / med[1][0], base_b / med[1][1]);
+               base_f / med[1][0], base_b / med[1][1],base_b/med[1][1]>=8?"PASS":"FAIL");
         fflush(stdout);
     }
     printf("# results: %s\n", mismatch ? "DIFFERENT (bug)" : "bitwise identical across schedules and thread counts");
-    vsdlss_reduction_free(rs); vsdlss_reduction_free(rp); free(w0); free(w); free(ref); free(out); free(in[0]); free(in[1]); free(ids_s); free(ids_p);
+    vsdlss_reduction_free(rs); vsdlss_reduction_free(rp); free(w0); free(w); free(ref); free(ref_f); free(out); free(in[0]); free(in[1]); free(ids_s); free(ids_p);
     return mismatch;
 }

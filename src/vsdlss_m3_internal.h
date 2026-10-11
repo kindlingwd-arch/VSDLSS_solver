@@ -75,6 +75,9 @@ typedef struct vsdlss_reduction {
      * neighbours start at tail_chunk_nb[c] (offsets within the tail). */
     csi tail_levels;
     csi *tail_level, *tail_chunk_rec, *tail_chunk_nb;
+    /* Optional: homogeneous chunk degree (0..3), 4 when mixed. One byte
+     * per 32 records, independent of the final vertex relabel. */
+    uint8_t *tail_chunk_degree;
     /* Forward plan of the scheduled tail (vsdlss_reduce_tail_plan): each
      * level's updates sorted by target, so the threads of a level write
      * disjoint contiguous ranges of the vector.  NULL: none. */

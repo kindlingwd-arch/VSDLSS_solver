@@ -1,0 +1,8 @@
+grain=2048 simd=1
+factor_s=47.131029 components=1
+component=0 tail=1313839 levels=293 records_per_level=4484 core=39771 relabel=1
+SOLVE threads=1 observed_tail_fwd=1 observed_tail_bwd=1 min_ms=97.623945 median_ms=104.155880 max_ms=125.547925 bitwise_same=1
+SOLVE threads=2 observed_tail_fwd=2 observed_tail_bwd=2 min_ms=83.500681 median_ms=92.892733 max_ms=100.257960 bitwise_same=1
+SOLVE threads=4 observed_tail_fwd=2 observed_tail_bwd=2 min_ms=82.907944 median_ms=93.279464 max_ms=166.940346 bitwise_same=1
+SOLVE threads=8 observed_tail_fwd=2 observed_tail_bwd=2 min_ms=77.787793 median_ms=83.997104 max_ms=93.506993 bitwise_same=1
+xhash=10ffc859acde4ddf backward_error=1.136327683e-15

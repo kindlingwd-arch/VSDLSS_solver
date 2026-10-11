@@ -1,0 +1,6 @@
+tail levels: identical solutions with and without the level schedule
+tail order: same level order and plan at 1 and 4 threads; scheduled replay = serial (saved, no plan, 1/2/4 threads, non-finite); allocation failures clean or serial
+compact tail: degrees 0..3/mixed, tiny final level, saved/no saved, optional metadata, same bits
+tombstones: identical solutions for every threshold; 1.3M-vertex star reduced in 0.26 s
+allocation failure sweeps: factorize=143 solve=3
+m3 component, reduction, RHS, symbolic, and numeric tests passed

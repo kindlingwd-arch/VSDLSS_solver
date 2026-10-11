@@ -13,6 +13,8 @@
 #include "vsdlss_simd.h"
 
 #include <stdlib.h>
+#include <math.h>
+#include <float.h>
 
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #include <immintrin.h>
@@ -31,6 +33,52 @@ int vsdlss_simd_enabled(void)
 
 /* v <- v - c * s, lane-wise (product rounded, then difference). */
 #define SUBMUL(v, c, s) _mm256_sub_pd((v), _mm256_mul_pd((c), (s)))
+
+/* Degree-two wires dominate the tail. Deinterleave four AoS edge pairs in
+ * registers; no copied coefficients or per-record neighbour pointers.
+ * No contraction: every lane follows the scalar rounding chain. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("fp-contract=off")))
+#endif
+SIMD_FN int vsdlss_simd_replay_fixed(csi n, int degree, const uint32_t *nb,
+    const double *mul, const double *piv, const double *rhs, double *out,
+    const double *x)
+{
+    csi i=0; int bad=0;
+    const __m256d sign=_mm256_set1_pd(-0.0), limit=_mm256_set1_pd(DBL_MAX);
+    for(;i+4<=n;i+=4) {
+        const csi o=i*degree;
+        __m256d v=_mm256_div_pd(_mm256_loadu_pd(rhs+i),_mm256_loadu_pd(piv+i));
+        if(degree==2) {
+            const __m256d a=_mm256_loadu_pd(mul+o), b=_mm256_loadu_pd(mul+o+4);
+            const __m256d m0=_mm256_permute4x64_pd(_mm256_unpacklo_pd(a,b),0xd8);
+            const __m256d m1=_mm256_permute4x64_pd(_mm256_unpackhi_pd(a,b),0xd8);
+            const __m256i ix=_mm256_loadu_si256((const __m256i *)(nb+o));
+            const __m256i split=_mm256_permutevar8x32_epi32(ix,_mm256_setr_epi32(0,2,4,6,1,3,5,7));
+            v=SUBMUL(v,m0,_mm256_i32gather_pd(x,_mm256_castsi256_si128(split),8));
+            v=SUBMUL(v,m1,_mm256_i32gather_pd(x,_mm256_extracti128_si256(split,1),8));
+        } else if(degree==1) {
+            v=SUBMUL(v,_mm256_loadu_pd(mul+o),
+                _mm256_i32gather_pd(x,_mm_loadu_si128((const __m128i *)(nb+o)),8));
+        } else if(degree==3) {
+            for(int j=0;j<3;j++) {
+                const __m128i ix=_mm_setr_epi32((int)nb[o+j],(int)nb[o+3+j],(int)nb[o+6+j],(int)nb[o+9+j]);
+                const __m256d m=_mm256_setr_pd(mul[o+j],mul[o+3+j],mul[o+6+j],mul[o+9+j]);
+                v=SUBMUL(v,m,_mm256_i32gather_pd(x,ix,8));
+            }
+        }
+        /* Ordered <= rejects both infinities and NaNs; integer masks also
+         * preserve signed zeros and avoid changing any computed value. */
+        bad|=_mm256_movemask_pd(_mm256_cmp_pd(_mm256_andnot_pd(sign,v),limit,_CMP_LE_OQ))!=15;
+        _mm256_storeu_pd(out+i,v);
+    }
+    for(;i<n;i++) {
+        double v=rhs[i]/piv[i];
+        for(int j=0;j<degree;j++) { double u=mul[i*degree+j]*x[nb[i*degree+j]]; v-=u; }
+        bad|=!isfinite(v); out[i]=v;
+    }
+    return bad;
+}
 
 SIMD_FN void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
                                       const int32_t *R, csi r0, csi r1, double *x)
@@ -327,6 +375,9 @@ SIMD_FN void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const dou
 
 #else   /* no x86 GCC-compatible compiler: scalar paths only */
 int vsdlss_simd_enabled(void) { return 0; }
+int vsdlss_simd_replay_fixed(csi n, int degree, const uint32_t *nb,
+    const double *mul, const double *piv, const double *rhs, double *out, const double *x)
+{ (void)n; (void)degree; (void)nb; (void)mul; (void)piv; (void)rhs; (void)out; (void)x; abort(); }
 void vsdlss_simd_block_update64(const double *as, csi rs, csi ws, const double *xs,
                                 const csi *R, csi r0, csi r1, double *x)
 { (void)as; (void)rs; (void)ws; (void)xs; (void)R; (void)r0; (void)r1; (void)x; abort(); }

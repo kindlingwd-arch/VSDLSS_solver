@@ -1,0 +1,5 @@
+  grid2 threads 1: 1 of 18 components relabelled, bitwise equal
+  grid3 threads 1: 1 of 1 components relabelled, bitwise equal
+  grid2 threads 4: 1 of 18 components relabelled, bitwise equal
+  grid3 threads 4: 1 of 1 components relabelled, bitwise equal
+test_relabel: solve-order relabel bitwise identical: passed

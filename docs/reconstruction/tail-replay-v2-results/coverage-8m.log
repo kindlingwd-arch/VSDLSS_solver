@@ -1,0 +1,7 @@
+# schedule: reduce 5.10 s, relabel 0.17 s, plan 0.23 s
+n=8000000 levels=46 head_null=1
+degree=0 chunks=0 records=0
+degree=1 chunks=0 records=0
+degree=2 chunks=244968 records=7838699
+degree=3 chunks=21 records=416
+degree=4 chunks=36 records=983

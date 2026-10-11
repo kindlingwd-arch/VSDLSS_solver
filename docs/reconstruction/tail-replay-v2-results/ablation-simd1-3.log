@@ -1,0 +1,19 @@
+# numa: off (VSDLSS_INTERLEAVE=1 to interleave)
+# graph: n 2000000, nnz 4057449 (grid 2% + wires of 20..200 nodes, random numbering), built in 0.6 s
+# reduction with 8 threads
+# serial tail: reduce 0.85 s, relabel 0.01 s, plan 0.00 s
+# schedule: reduce 1.00 s, relabel 0.02 s, plan 0.03 s
+# reduction: records 1960222 (98.0% of n), core 39778, blocks 31, tail 1958156 (99.9%) | level schedule: 43 levels, 45539 records per level | reduce 0.9 s serial tail, 1.0 s with schedule
+# solve-order relabel: on, as in the M3 solve (BENCH_RELABEL=0/1)
+# replay ONLY (no core solve), times in ms, median of 21; alternating variants, two warmups, every output checked
+csv,variant,requested,observed_fwd,observed_bwd,fwd_min_ms,fwd_median_ms,fwd_max_ms,bwd_min_ms,bwd_median_ms,bwd_max_ms,replay_median_ms
+csv,serial,1,1,1,13.008401,16.964706,21.280925,16.959468,18.449119,22.243763,36.225511
+csv,schedule,1,1,1,9.899476,11.604120,13.427074,11.137819,12.744222,14.007787,23.942090
+T=1   | serial tail: fwd 16.964706 bwd 18.449119 | level schedule: fwd 11.604120 bwd 12.744222 | speedup fwd 1.462x bwd 1.448x | 8x target: FAIL
+csv,serial,4,1,1,13.741154,17.418513,33.308312,16.585597,18.981255,31.034167,35.863463
+csv,schedule,4,4,4,3.993952,4.552174,8.016280,2.891365,3.710025,8.416368,8.387452
+T=4   | serial tail: fwd 17.418513 bwd 18.981255 | level schedule: fwd 4.552174 bwd 3.710025 | speedup fwd 3.727x bwd 4.973x | 8x target: FAIL
+csv,serial,8,1,1,14.622440,17.592804,28.318457,17.969302,20.677582,26.850257,38.646704
+csv,schedule,8,8,8,4.205900,5.099602,6.793182,3.944209,5.103237,5.944250,10.266736
+T=8   | serial tail: fwd 17.592804 bwd 20.677582 | level schedule: fwd 5.099602 bwd 5.103237 | speedup fwd 3.327x bwd 3.615x | 8x target: FAIL
+# results: bitwise identical across schedules and thread counts

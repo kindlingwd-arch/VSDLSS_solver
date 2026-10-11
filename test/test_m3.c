@@ -301,17 +301,19 @@ static int test_reduction_rhs_nonempty_core_and_transactions(void)
     vsdlss_reduction_free(r);
 
     { vsdlss_elim_record record={0,1,{1,0,0},1,{2,0,0}};
-      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
+      vsdlss_reduction fake={0};
+      fake.n=2; fake.count=1; fake.core_n=1; fake.records=&record; fake.core_vertices=(csi[]){1};
       double huge[]={DBL_MAX,DBL_MAX}, outcore[]={8}, outsaved[]={9};
       CHECK(vsdlss_reduce_rhs(&fake,huge,outcore,outsaved)==VSDLSS_ERR_NONFINITE);
       CHECK(outcore[0]==8 && outsaved[0]==9); }
-    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
+    { vsdlss_reduction no_elimination={0};
+      no_elimination.n=2; no_elimination.core_n=2; no_elimination.core_vertices=(csi[]){0,1};
       double rhs[]={3,4}, core_only[2], recovered[2];
       CHECK(vsdlss_reduce_rhs(&no_elimination,rhs,core_only,NULL)==VSDLSS_OK);
       CHECK(core_only[0]==3 && core_only[1]==4);
       CHECK(vsdlss_reduce_recover(&no_elimination,NULL,core_only,recovered)==VSDLSS_OK);
       CHECK(recovered[0]==3 && recovered[1]==4); }
-    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
+    { vsdlss_reduction empty={0};
       CHECK(vsdlss_reduce_rhs(&empty,NULL,NULL,NULL)==VSDLSS_OK);
       CHECK(vsdlss_reduce_recover(&empty,NULL,NULL,NULL)==VSDLSS_OK); }
     return 0;
@@ -1149,6 +1151,60 @@ static int test_reduction_tail_order_threads(void)
     return 0;
 }
 
+/* Compact scheduled replay: alternating degree-0..3/mixed chunks and a
+ * three-record final level (including empty thread ranges). Catches SIMD
+ * running across a level or the wrong saved/edge offset, and proves the
+ * optional classification can be absent without losing a valid solve. */
+static int test_reduction_tail_compact(void)
+{
+    const csi count=65539, n=4*count, chunks=2049;
+    const size_t bytes=(size_t)n*sizeof(double);
+    vsdlss_pk_seg seg[2]={{0},{.count=count,.nbn=3*count}};
+    vsdlss_pk_seg *g=seg+1;
+    g->deg=malloc((size_t)count); g->piv=malloc((size_t)count*8);
+    g->nb=malloc((size_t)3*count*4); g->val=malloc((size_t)3*count*8);
+    csi *cr=malloc((size_t)(chunks+1)*sizeof(csi)), *cn=malloc((size_t)(chunks+1)*sizeof(csi));
+    uint8_t *degree=malloc((size_t)chunks);
+    double *input=malloc(bytes), *expect=malloc(bytes), *work=malloc(bytes), *saved=malloc((size_t)count*8);
+    CHECK(g->deg&&g->piv&&g->nb&&g->val&&cr&&cn&&degree&&input&&expect&&work&&saved);
+    csi o=0;
+    for(csi c=0;c<chunks;c++) {
+        const csi stop=(c+1)*32<count?(c+1)*32:count;
+        cr[c]=c*32; cn[c]=o; degree[c]=(uint8_t)(c%5);
+        for(csi i=cr[c];i<stop;i++) {
+            const int d=c%5==4?(int)(i%4):(int)(c%5);
+            g->deg[i]=(uint8_t)d; g->piv[i]=1.25+0.01*(double)(i%23);
+            for(int j=0;j<d;j++) { g->nb[o]=(uint32_t)(count+3*i+j); g->val[o++]=0.125*(j+1); }
+        }
+    }
+    cr[chunks]=count; cn[chunks]=o; g->nbn=o;
+    for(csi i=0;i<n;i++) input[i]=sin(0.31*(double)i)+0.2;
+    memcpy(expect,input,bytes); o=g->nbn;
+    for(csi i=count;i>0;) {
+        i--; o-=g->deg[i]; double v=input[i]/g->piv[i];
+        for(csi j=0;j<g->deg[i];j++) { double u=g->val[o+j]*input[g->nb[o+j]]; v-=u; }
+        expect[i]=v; saved[i]=input[i];
+    }
+    vsdlss_reduction r={.n=n,.count=count,.core_n=n-count,.blocks=1,.block_ptr=(csi[]){0,0},
+        .pk_count=2,.pk=seg,.tail_levels=2,.tail_level=(csi[]){0,2048,2049},
+        .tail_chunk_rec=cr,.tail_chunk_nb=cn,.tail_chunk_degree=degree};
+    for(int classified=0;classified<2;classified++) for(int s=0;s<2;s++) for(int t=1;t<=4;t*=2) {
+        if(!vsdlss_parallel_enabled()&&t>1) continue;
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        r.tail_chunk_degree=classified?degree:NULL;
+        memcpy(work,input,bytes);
+        CHECK(vsdlss_reduce_backward_inplace(&r,s?saved:NULL,work)==VSDLSS_OK);
+        CHECK(memcmp(work,expect,bytes)==0);
+        if(t>1) CHECK(vsdlss_parallel_last_team_size()>1);
+        if(!s) { work[65538]=INFINITY; CHECK(vsdlss_reduce_backward_inplace(&r,NULL,work)==VSDLSS_ERR_NONFINITE); }
+    }
+    free(g->deg); free(g->piv); free(g->nb); free(g->val); free(cr); free(cn); free(degree);
+    free(input); free(expect); free(work); free(saved);
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    puts("compact tail: degrees 0..3/mixed, tiny final level, saved/no saved, optional metadata, same bits");
+    return 0;
+}
+
 /* Lazily deleted adjacency entries: the same solution bits whatever the
  * tombstone threshold (1: almost every removal, huge: never), at 1 and 4
  * threads with the blocked parallel pass; and a large star factors in
@@ -1196,6 +1252,7 @@ int main(void)
 {
     CHECK(test_reduction_tail_levels()==0);
     CHECK(test_reduction_tail_order_threads()==0);
+    CHECK(test_reduction_tail_compact()==0);
     CHECK(test_reduction_tombstones()==0);
     CHECK(test_interleaved_components_and_extract()==0);
     CHECK(test_packed_reduction_matches_records()==0);

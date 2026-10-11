@@ -1,0 +1,22 @@
+# numa: off (VSDLSS_INTERLEAVE=1 to interleave)
+# graph: n 8000000, nnz 16174668 (grid 2% + wires of 20..1000 nodes, random numbering), built in 2.6 s
+# reduction with 8 threads
+# serial tail: reduce 4.48 s, relabel 0.11 s, plan 0.00 s
+# schedule: reduce 5.33 s, relabel 0.17 s, plan 0.23 s
+# reduction: records 7840658 (98.0% of n), core 159342, blocks 123, tail 7840098 (100.0%) | level schedule: 46 levels, 170437 records per level | reduce 4.6 s serial tail, 5.7 s with schedule
+# solve-order relabel: on, as in the M3 solve (BENCH_RELABEL=0/1)
+# replay ONLY (no core solve), times in ms, median of 21; alternating variants, two warmups, every output checked
+csv,variant,requested,observed_fwd,observed_bwd,fwd_min_ms,fwd_median_ms,fwd_max_ms,bwd_min_ms,bwd_median_ms,bwd_max_ms,replay_median_ms
+csv,serial,1,1,1,114.813780,121.703200,191.197267,112.859251,115.229279,171.955446,239.878566
+csv,schedule,1,1,1,64.534176,73.396685,125.258040,68.350835,76.483534,109.299274,146.532852
+T=1   | serial tail: fwd 121.703200 bwd 115.229279 | level schedule: fwd 73.396685 bwd 76.483534 | speedup fwd 1.658x bwd 1.507x | 8x target: FAIL
+csv,serial,2,1,1,115.721366,133.742646,167.975883,112.214230,124.228332,155.164255,260.372813
+csv,schedule,2,2,2,36.355258,38.444859,50.894075,33.164918,37.105620,57.334566,76.634205
+T=2   | serial tail: fwd 133.742646 bwd 124.228332 | level schedule: fwd 38.444859 bwd 37.105620 | speedup fwd 3.166x bwd 3.105x | 8x target: FAIL
+csv,serial,4,1,1,117.856409,131.921379,170.140720,112.805605,122.715153,153.575014,260.480713
+csv,schedule,4,4,4,28.169696,33.261476,52.535585,26.670488,31.212173,42.771269,65.638647
+T=4   | serial tail: fwd 131.921379 bwd 122.715153 | level schedule: fwd 33.261476 bwd 31.212173 | speedup fwd 3.659x bwd 3.692x | 8x target: FAIL
+csv,serial,8,1,1,122.731374,142.868059,179.505108,119.137260,134.216080,170.889525,270.190777
+csv,schedule,8,8,8,32.690782,36.790870,42.917046,30.788131,36.637337,45.720031,71.554400
+T=8   | serial tail: fwd 142.868059 bwd 134.216080 | level schedule: fwd 36.790870 bwd 36.637337 | speedup fwd 3.308x bwd 3.145x | 8x target: FAIL
+# results: bitwise identical across schedules and thread counts
