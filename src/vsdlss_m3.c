@@ -501,10 +501,17 @@ static void trace_factor_bytes(const vsdlss_m3_factor *f)
                 const csi chunks=r->tail_level[r->tail_levels];
                 double bytes=(double)(r->tail_levels+1)*sizeof(csi)+(double)(chunks+1)*2*sizeof(csi);
                 if(r->tail_fwd) bytes+=(double)r->pk[r->blocks].nbn*16+(double)(r->tail_levels+1)*sizeof(csi);
+                if(r->tail_core_bit) bytes+=(double)r->pk[r->blocks].nbn/8+(double)(chunks+1)*sizeof(csi)
+                                         +(double)r->tail_core_slots*4+(double)r->tail_core_groups*(4+sizeof(csi));
                 replay+=bytes;
-                fprintf(stderr,"vsdlss trace: component %lld: tail %lld records, %lld levels, schedule %.1f MiB%s\n",
-                        (long long)c,(long long)r->pk[r->blocks].count,(long long)r->tail_levels,bytes*mb,
-                        r->tail_fwd?"":" (no forward plan)");
+                fprintf(stderr,"vsdlss trace: component %lld: tail %lld records, %lld %s, %lld chunks, schedule %.1f MiB%s",
+                        (long long)c,(long long)r->pk[r->blocks].count,(long long)r->tail_levels,
+                        r->tail_windows?"windows":"levels",(long long)chunks,bytes*mb,
+                        r->tail_fwd||r->tail_windows?"":" (no forward plan)");
+                if(r->tail_core_bit) fprintf(stderr,", deferred core updates %lld of %lld (%lld core vertices)",
+                                             (long long)r->tail_core_slots,(long long)r->pk[r->blocks].nbn,
+                                             (long long)r->tail_core_groups);
+                fprintf(stderr,"\n");
             }
         }
         ws+=(double)(cf->ws_local?cf->n:0)*8+(double)(cf->ws_core?r->core_n:0)*8+

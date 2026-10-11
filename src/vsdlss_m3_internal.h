@@ -79,6 +79,23 @@ typedef struct vsdlss_reduction {
      * level's updates sorted by target, so the threads of a level write
      * disjoint contiguous ranges of the vector.  NULL: none. */
     struct vsdlss_tail_plan *tail_fwd;
+    /* The tail schedule is by windows (VSDLSS_TAIL_WINDOWS): each "level" is a
+     * window of consecutive levels and its chunks are connected components
+     * of the window (records of different chunks share no tail vertex), each
+     * replayed in order by one thread.  No forward plan.  Core vertices do
+     * not link records unless that keeps components small: the forward
+     * replay defers the tail's updates of the other core vertices (bit u of
+     * tail_core_bit set for update u) to a buffer, the k-th such update of
+     * chunk c to buf[tail_core_slot[tail_chunk_core[c] + k]], and then core
+     * group g subtracts buf[tail_core_ptr[g] .. tail_core_ptr[g+1]) (in
+     * elimination order) from the vertex nb[tail_core_upd[g]] of the tail
+     * segment, as the serial replay does. */
+    int tail_windows;
+    uint64_t *tail_core_bit;
+    csi *tail_chunk_core, *tail_core_ptr, tail_core_groups, tail_core_slots;
+    uint32_t *tail_core_slot, *tail_core_upd;
+    double *tail_core_buf;       /* the deferred updates (one solve at a time: tail_core_busy) */
+    int tail_core_busy;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -242,6 +259,7 @@ extern csi vsdlss_reduce_tomb_min; /* tests: shortest adjacency list removed laz
 extern csi vsdlss_reduce_tail_min; /* smallest sequential tail given a level schedule (tests: lower it) */
 extern csi vsdlss_reduce_tail_grain; /* records per thread per level of the scheduled tail (tests: lower it) */
 extern csi vsdlss_reduce_tail_order_grain; /* same, for building the level order (tests: lower it) */
+extern csi vsdlss_reduce_tail_windows; /* window schedule K (default 64), 0 = levels (tests: set it) */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */

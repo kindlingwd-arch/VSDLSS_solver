@@ -247,6 +247,8 @@ void vsdlss_reduction_free(vsdlss_reduction *reduction)
     if(!reduction) return;
     free(reduction->records); free(reduction->core_vertices); free(reduction->block_ptr);
     free(reduction->tail_level); free(reduction->tail_chunk_rec); free(reduction->tail_chunk_nb);
+    free(reduction->tail_core_bit); free(reduction->tail_chunk_core); free(reduction->tail_core_ptr);
+    free(reduction->tail_core_slot); free(reduction->tail_core_upd); free(reduction->tail_core_buf);
     tail_plan_free(reduction->tail_fwd);
     if(reduction->pk) for(csi q=0;q<reduction->pk_count;q++) {
         free(reduction->pk[q].head); free(reduction->pk[q].deg); free(reduction->pk[q].nb); free(reduction->pk[q].piv); free(reduction->pk[q].val);
@@ -308,6 +310,7 @@ static const vsdlss_elim_record *prev_record(const vsdlss_reduction *r, csi k, p
 vsdlss_status vsdlss_reduce_rhs(const vsdlss_reduction *r, const double *b,
                                 double *core_rhs, double *saved)
 {
+    if(r && r->tail_core_bit) return VSDLSS_ERR_UNSUPPORTED;   /* window tail: in-place replays only */
     double *work=NULL, *next_core=NULL, *next_saved=NULL;
     csi k,j; vsdlss_status status=VSDLSS_OK;
     if(!valid_reduction_shape(r) || (!b && r->n) || (!core_rhs && r->core_n) ||
@@ -357,6 +360,7 @@ vsdlss_status vsdlss_reduce_recover(const vsdlss_reduction *r,
                                     const double *saved,
                                     const double *core_solution, double *x)
 {
+    if(r && r->tail_core_bit) return VSDLSS_ERR_UNSUPPORTED;
     double *next_x=NULL, *saved_copy=NULL, *core_copy=NULL;
     csi k,j; vsdlss_status status=VSDLSS_OK;
     if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count) ||
@@ -489,6 +493,26 @@ static inline void forward_range(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
 static void forward_seg(const vsdlss_pk_seg *g, double *restrict work, double *restrict saved)
 { forward_range(g,0,g->count,0,work,saved); }
 
+/* forward_range of a window schedule's chunk: the k-th update with bit u
+ * set (a deferred core vertex) goes to buf[slot[k]] instead of to work. */
+static inline void forward_range_defer(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
+                                       double *restrict work, double *restrict saved,
+                                       const uint64_t *restrict bit, const uint32_t *restrict slot,
+                                       double *restrict buf)
+{
+    const uint32_t *restrict nb=g->nb;
+    const double *restrict val=g->val;
+    for(csi i=i0;i<i1;i++) {
+        const csi d=vsdlss_pk_degree(g,i);
+        const double s=work[vsdlss_pk_vertex(g,i)];
+        if(saved) saved[i]=s;
+        for(csi j=0;j<d;j++,o++) {
+            double update=val[o]*s;
+            if((bit[o>>6]>>(o&63))&1) buf[*slot++]=update; else work[nb[o]]-=update;
+        }
+    }
+}
+
 /* Records [i0, i1) backwards; o is the neighbour offset of record i1.
  * Returns 0 when a recovered value is not finite. */
 static inline int backward_range(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
@@ -531,12 +555,41 @@ static int backward_seg(const vsdlss_pk_seg *g, const double *restrict saved, do
 /* The level-scheduled tail (segment g; see vsdlss_reduction): levels in
  * order, the chunks of a level concurrently.  Every entry sees the
  * operations of the serial replay in the same order. */
-static void forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, double *work,
-                         double *saved, int nt)
+static int forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, double *work,
+                        double *saved, int nt)
 {
     const csi *lp=r->tail_level, *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
     const struct vsdlss_tail_plan *p=r->tail_fwd;
     (void)nt;
+    if(r->tail_windows) {                         /* components: each in order by one thread */
+        /* the core updates go to buf, then to the core in elimination order */
+        /* the factor's buffer (touched once), or a private one while another
+         * solve on the same factor holds it */
+        vsdlss_reduction *rw=(vsdlss_reduction *)r;
+        double *buf=NULL; int own=0;
+        if(rw->tail_core_buf && !__atomic_exchange_n(&rw->tail_core_busy,1,__ATOMIC_ACQUIRE)) { buf=rw->tail_core_buf; own=1; }
+        else buf=(double *)malloc((size_t)(r->tail_core_slots?r->tail_core_slots:1)*sizeof(double));
+        if(!buf) return 1;
+        const uint64_t *bit=r->tail_core_bit; const csi *cc=r->tail_chunk_core;
+        VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+        {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        for(csi l=0;l<r->tail_levels;l++) {
+            VSDLSS_OMP(omp for schedule(dynamic,1))
+            for(csi c=lp[l];c<lp[l+1];c++) forward_range_defer(g,cr[c],cr[c+1],cn[c],work,saved,bit,r->tail_core_slot+cc[c],buf);
+        }
+        const csi *gp=r->tail_core_ptr; const uint32_t *gu=r->tail_core_upd;
+        VSDLSS_OMP(omp for schedule(static))
+        for(csi k=0;k<r->tail_core_groups;k++) {
+            const csi v=g->nb[gu[k]]; double a=work[v];
+            for(csi q=gp[k];q<gp[k+1];q++) a-=buf[q];
+            work[v]=a;
+        }
+        }
+        if(own) __atomic_store_n(&rw->tail_core_busy,0,__ATOMIC_RELEASE); else free(buf);
+        return 0;
+    }
     if(p) {
         /* By target: thread ranges of a level's updates write disjoint,
          * contiguous parts of work, and read pivots of this level, which no
@@ -565,7 +618,7 @@ static void forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doub
             }
         }
         }
-        return;
+        return 0;
     }
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
     {
@@ -576,6 +629,7 @@ static void forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doub
         for(csi c=lp[l];c<lp[l+1];c++) forward_range(g,cr[c],cr[c+1],cn[c],work,saved);
     }
     }
+    return 0;
 }
 
 static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, const double *saved,
@@ -584,6 +638,18 @@ static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, cons
     const csi *lp=r->tail_level, *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
     int ok=1;
     (void)nt;
+    if(r->tail_windows) {
+        VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(&:ok))
+        {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        for(csi l=r->tail_levels;l>0;l--) {
+            VSDLSS_OMP(omp for schedule(dynamic,1))
+            for(csi c=lp[l-1];c<lp[l];c++) ok&=backward_range(g,cr[c],cr[c+1],cn[c+1],saved,x);
+        }
+        }
+        return ok;
+    }
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(&:ok))
     {
     VSDLSS_OMP(omp master)
@@ -650,8 +716,11 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
             for(csi b=0;b<r->blocks;b++) forward_seg(pk+b,work,SV(saved,pk[b]));
             q0=r->blocks;
         }
+        if(q0 && r->tail_windows && pk[q0].count==r->tail_chunk_rec[r->tail_level[r->tail_levels]])
+            /* windows: always (the core updates are deferred) */
+            return forward_tail(r,pk+q0,work,SV(saved,pk[q0]),tail_scheduled(r,q0,nt)>1?tail_scheduled(r,q0,nt):1)?VSDLSS_ERR_OOM:VSDLSS_OK;
         const int tt=tail_scheduled(r,q0,nt);
-        if(tt) { forward_tail(r,pk+q0,work,SV(saved,pk[q0]),tt); return VSDLSS_OK; }
+        if(tt) return forward_tail(r,pk+q0,work,SV(saved,pk[q0]),tt)?VSDLSS_ERR_OOM:VSDLSS_OK;
         for(csi q=q0;q<r->pk_count;q++) forward_seg(pk+q,work,SV(saved,pk[q]));
         return VSDLSS_OK;
     }
@@ -902,12 +971,15 @@ static csi tail_min(void)
  * vsdlss_reduce_tail_order_grain records per thread (8M nodes, 8 threads:
  * sweep 0.39 -> 0.29 s; 2 threads were slower than serial). */
 csi vsdlss_reduce_tail_order_grain = 1024;
+static void tail_defer_free(vsdlss_reduction *r);
 /* Forget the level schedule (and its plan): the tail replays serially. */
 static void drop_tail_schedule(vsdlss_reduction *r)
 {
     free(r->tail_level); free(r->tail_chunk_rec); free(r->tail_chunk_nb);
     r->tail_level=r->tail_chunk_rec=r->tail_chunk_nb=NULL; r->tail_levels=0;
     tail_plan_free(r->tail_fwd); r->tail_fwd=NULL;
+    r->tail_windows=0;
+    tail_defer_free(r);
 }
 static int tail_order_on(void)
 {
@@ -1026,6 +1098,381 @@ static int tail_order(const vsdlss_elim_record *t, csi cnt, csi n, const uint16_
     return 1;
 }
 
+/* Window schedule of the tail (packed reductions; VSDLSS_TAIL_WINDOWS=K,
+ * default 64, 0 = the level schedule).  Instead of one barrier per level,
+ * consecutive levels form a window as long as its largest connected
+ * component holds at most 1/K of its records; the components share no tail
+ * vertex, so each is replayed in order by one thread and the components run
+ * concurrently.  Core vertices do not link records: the forward replay
+ * defers the tail's updates of a core vertex shared by several components
+ * and applies them afterwards in elimination order (tail_defer_build);
+ * core vertices whose records fit in one component without exceeding the
+ * cap are merged into it instead.  Every vertex sees the operations of the
+ * serial replay in the same order, so the replays give the same bits.
+ * Usually the whole tail is one window, built in parallel without levels
+ * (tail_one_window, records in elimination order within a component);
+ * otherwise windows are grown level by level (tail_windows, every core
+ * vertex deferred).  Components are stored contiguously (with the
+ * solve-order relabel their vertices are too, which keeps a thread's
+ * accesses within its part of the network), consecutive small ones packed
+ * into chunks of at least TAIL_WIN_MIN records.  61M-node EMIR case, 32
+ * threads: tail replay fwd / bwd 69 / 78 ms -> 21 / 19 ms; whole solve
+ * 310 -> 170 ms; one window, 1.9% of the updates deferred.
+ * tail_windows: pos[l] is the start of level l (pos[levels+1] = cnt); sets
+ * dest[] and the window / chunk boundaries; returns 0 to fall back to
+ * levels. */
+#define TAIL_WIN_MIN 64
+csi vsdlss_reduce_tail_windows = 64;
+static csi tail_win_k(void)
+{
+    static csi env=-2;
+    if(env==-2) { const char *e=getenv("VSDLSS_TAIL_WINDOWS"); env=e&&*e?(csi)atoll(e):-1; }
+    return env>=0?env:vsdlss_reduce_tail_windows>0?vsdlss_reduce_tail_windows:0;
+}
+typedef struct { uint32_t par, sz, stamp, cid; } uf_node;   /* one cache line access per vertex */
+static uint32_t uf_find(uf_node *u, uint32_t v)
+{
+    while(u[v].par!=v) { u[v].par=u[u[v].par].par; v=u[v].par; }
+    return v;
+}
+/* The whole tail as one window, built in parallel when its components are
+ * small enough (the common case once core vertices do not link records):
+ * lock-free union-find over all records, sizes by atomic counts; then the
+ * components and chunks in the same order as the greedy builder makes them
+ * for a single window (first record in level order), so the result does not
+ * depend on the thread count.  Core vertices whose records fit in one
+ * component are merged in (no deferral).  ord: records in level order.
+ * Returns 1 with the outputs set, 0 to fall back to the greedy builder
+ * (several windows; every core vertex deferred). */
+static uint32_t pf_find(uint32_t *par, uint32_t v)
+{
+    for(;;) {
+        uint32_t p=__atomic_load_n(par+v,__ATOMIC_RELAXED);
+        if(p==v) return v;
+        uint32_t gp=__atomic_load_n(par+p,__ATOMIC_RELAXED);
+        if(gp!=p) __atomic_compare_exchange_n(par+v,&p,gp,1,__ATOMIC_RELAXED,__ATOMIC_RELAXED);
+        v=gp;
+    }
+}
+static void pf_union(uint32_t *par, uint32_t a, uint32_t b)
+{
+    for(;;) {
+        a=pf_find(par,a); b=pf_find(par,b);
+        if(a==b) return;
+        if(a<b) { uint32_t x=a; a=b; b=x; }                     /* link the larger root below */
+        uint32_t expect=a;
+        if(__atomic_compare_exchange_n(par+a,&expect,b,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) return;
+    }
+}
+static int tail_one_window(const vsdlss_elim_record *t, csi cnt, csi n, const csi *ord, csi K,
+                           const unsigned char *istail, unsigned char *deferv, csi *dest, csi *cnts, csi *cb, csi *nc_out)
+{
+    int nt=vsdlss_parallel_width((double)cnt*32), big=0; (void)nt;   /* any thread count: same result */
+    if(cnt>=(csi)0x7fffffff) return 0;
+    uint32_t *par=(uint32_t *)vsdlss_big_malloc((size_t)n*sizeof(uint32_t));
+    uint32_t *sz=(uint32_t *)vsdlss_big_calloc((size_t)n,sizeof(uint32_t));
+    uint32_t *root=(uint32_t *)vsdlss_big_malloc((size_t)cnt*sizeof(uint32_t));
+    uint32_t *cid=(uint32_t *)vsdlss_big_malloc((size_t)n*sizeof(uint32_t));
+    int ok=0;
+    if(!par||!sz||!root||!cid) goto out;
+    VSDLSS_OMP(omp parallel num_threads(nt) reduction(|:big))
+    {
+        VSDLSS_OMP(omp for schedule(static))
+        for(csi v=0;v<n;v++) { par[v]=(uint32_t)v; cid[v]=UINT32_MAX; }
+        VSDLSS_OMP(omp for schedule(static))
+        for(csi i=0;i<cnt;i++) {
+            const vsdlss_elim_record *e=t+i;
+            for(csi d=0;d<e->degree;d++)
+                if(istail[e->neighbor[d]]) pf_union(par,(uint32_t)e->vertex,(uint32_t)e->neighbor[d]);
+        }
+        VSDLSS_OMP(omp for schedule(static))
+        for(csi i=0;i<cnt;i++) {
+            const uint32_t r=pf_find(par,(uint32_t)t[i].vertex);
+            root[i]=r;
+            if((csi)__atomic_add_fetch(sz+r,1,__ATOMIC_RELAXED)*K>cnt) big=1;
+        }
+    }
+    if(big) goto out;                                 /* more than one window: greedy */
+    {
+        /* Core vertices whose updating records can join one component
+         * without exceeding the cap need no deferral: their records' updates
+         * stay in order within the component.  The records of each core
+         * vertex (wp/wr, by vertex) are collected in parallel; vertices whose
+         * records already share a component are settled in parallel; the
+         * others are merged or kept deferred in ascending vertex order
+         * (sequential, so the result does not depend on the thread count). */
+        const csi cap=cnt/K;
+        uint32_t *wp=(uint32_t *)vsdlss_big_calloc((size_t)n+1,sizeof(uint32_t));
+        if(!wp) goto out;
+        VSDLSS_OMP(omp parallel for num_threads(nt) schedule(static))
+        for(csi i=0;i<cnt;i++) for(csi d=0;d<t[i].degree;d++) {
+            const csi v=t[i].neighbor[d];
+            if(deferv[v]) __atomic_add_fetch(wp+v+1,1,__ATOMIC_RELAXED);
+        }
+        for(csi v=0;v<n;v++) wp[v+1]+=wp[v];
+        const csi S=wp[n];
+        uint32_t *wr=(uint32_t *)vsdlss_big_malloc((size_t)(S?S:1)*sizeof(uint32_t));
+        if(!wr) { free(wp); goto out; }
+        VSDLSS_OMP(omp parallel for num_threads(nt) schedule(static))
+        for(csi i=0;i<cnt;i++) for(csi d=0;d<t[i].degree;d++) {
+            const csi v=t[i].neighbor[d];
+            if(deferv[v]) wr[__atomic_fetch_add(wp+v,1,__ATOMIC_RELAXED)]=(uint32_t)i;
+        }
+        /* now wp[v] is the end of v's records, wp[v-1] (0 for v = 0) the start */
+#define WBEG(v) ((v)?wp[(v)-1]:0)
+        VSDLSS_OMP(omp parallel for num_threads(nt) schedule(dynamic,4096))
+        for(csi v=0;v<n;v++) {
+            if(!deferv[v]) continue;
+            const uint32_t b0=WBEG(v), b1=wp[v];
+            if(b0==b1) { deferv[v]=0; continue; }          /* no tail record updates v */
+            const uint32_t r0=root[wr[b0]];
+            uint32_t k=b0+1;
+            while(k<b1 && root[wr[k]]==r0) k++;
+            if(k==b1) deferv[v]=0;                    /* one component already: direct */
+        }
+        const uint32_t HB=0x80000000u;                /* mark: root already counted */
+        for(csi v=0;v<n;v++) {
+            if(!deferv[v]) continue;
+            const uint32_t b0=WBEG(v), b1=wp[v];
+            const uint32_t r0=pf_find(par,(uint32_t)t[wr[b0]].vertex);
+            int one=1; csi total=0;
+            for(uint32_t q=b0;q<b1;q++) {
+                const uint32_t r1=pf_find(par,(uint32_t)t[wr[q]].vertex);
+                if(r1!=r0) one=0;
+                if(!(sz[r1]&HB)) { total+=sz[r1]; sz[r1]|=HB; }
+            }
+            for(uint32_t q=b0;q<b1;q++) sz[pf_find(par,(uint32_t)t[wr[q]].vertex)]&=~HB;
+            if(!one) {
+                if(total>cap) continue;                   /* stays deferred */
+                for(uint32_t q=b0;q<b1;q++) {
+                    const uint32_t r1=pf_find(par,(uint32_t)t[wr[q]].vertex);
+                    if(r1!=r0) { par[r1]=r0; sz[r0]+=sz[r1]; }
+                }
+            }
+            deferv[v]=0;                                  /* within one component: direct */
+        }
+#undef WBEG
+        free(wp); free(wr);
+        VSDLSS_OMP(omp parallel num_threads(nt))
+        {
+            VSDLSS_OMP(omp for schedule(static))
+            for(csi v=0;v<n;v++) cid[v]=UINT32_MAX;
+            VSDLSS_OMP(omp for schedule(static))
+            for(csi i=0;i<cnt;i++) root[i]=pf_find(par,(uint32_t)t[i].vertex);
+        }
+    }
+    csi ncw=0;
+    for(csi j=0;j<cnt;j++) {                           /* components by first record, level order */
+        const uint32_t r=root[ord?ord[j]:j];
+        if(cid[r]==UINT32_MAX) { cid[r]=(uint32_t)ncw; cnts[ncw++]=0; }
+        cnts[cid[r]]++;
+    }
+    csi off=0, run=0, nc=0;
+    for(csi c=0;c<ncw;c++) {
+        if(run==0) cb[nc++]=off;
+        const csi z=cnts[c]; cnts[c]=off; off+=z; run+=z;
+        if(run>=TAIL_WIN_MIN) run=0;
+    }
+    for(csi j=0;j<cnt;j++) { const csi i=ord?ord[j]:j; dest[i]=cnts[cid[root[i]]]++; }
+    *nc_out=nc; ok=1;
+out:
+    free(par); free(sz); free(root); free(cid);
+    return ok;
+}
+
+static int tail_windows(const vsdlss_elim_record *t, csi cnt, csi n, const uint16_t *lv, csi levels,
+                        const csi *pos, csi K, const unsigned char *istail, unsigned char *deferv, int try_one,
+                        csi *dest, csi **wb_out, csi *nw_out, csi **cb_out)
+{
+    if(K<1 || n>=(csi)UINT32_MAX || cnt>=(csi)UINT32_MAX) return 0;
+    csi *ord=(csi *)vsdlss_big_malloc((size_t)cnt*sizeof(csi));
+    csi *fill=(csi *)malloc((size_t)(levels+2)*sizeof(csi));
+    csi *cnts=(csi *)vsdlss_big_malloc((size_t)cnt*sizeof(csi));
+    csi *wb=(csi *)malloc((size_t)(levels+1)*sizeof(csi));
+    csi *cb=(csi *)vsdlss_big_malloc((size_t)(cnt+1)*sizeof(csi));
+    uf_node *u=NULL;
+    int ok=0;
+    if(!ord||!fill||!cnts||!wb||!cb) goto out;
+    memcpy(fill,pos,(size_t)(levels+2)*sizeof(csi));
+    for(csi i=0;i<cnt;i++) ord[fill[lv[i]]++]=i;                    /* by level, stable */
+    {
+        csi nc1=0;
+        if(try_one && tail_one_window(t,cnt,n,ord,K,istail,deferv,dest,cnts,cb,&nc1)) {
+            wb[0]=0; wb[1]=nc1; cb[nc1]=cnt;
+            *wb_out=wb; *nw_out=1; *cb_out=cb; wb=cb=NULL; ok=1;
+            goto out;
+        }
+    }
+    u=(uf_node *)vsdlss_big_calloc((size_t)n,sizeof(uf_node));
+    if(!u) goto out;
+    uint32_t W=0;
+    csi nw=0, nc=0;
+#define TOUCH(v) do { if(u[v].stamp!=W) { u[v].stamp=W; u[v].par=(uint32_t)(v); u[v].sz=0; u[v].cid=UINT32_MAX; } } while(0)
+    for(csi a=1;a<=levels;) {
+        csi b=a, total=0; uint32_t maxc=0;
+        W++;
+        for(;b<=levels;b++) {
+            for(csi j=pos[b];j<pos[b+1];j++) {
+                const vsdlss_elim_record *e=t+ord[j];
+                TOUCH(e->vertex);
+                uint32_t r0=uf_find(u,(uint32_t)e->vertex);
+                for(csi d=0;d<e->degree;d++) {
+                    if(!istail[e->neighbor[d]]) continue;          /* core: deferred, no link */
+                    TOUCH(e->neighbor[d]);
+                    uint32_t r1=uf_find(u,(uint32_t)e->neighbor[d]);
+                    if(r1==r0) continue;
+                    if(u[r0].sz<u[r1].sz) { uint32_t x=r0; r0=r1; r1=x; }
+                    u[r1].par=r0; u[r0].sz+=u[r1].sz;
+                }
+                if(++u[r0].sz>maxc) maxc=u[r0].sz;
+            }
+            total+=pos[b+1]-pos[b];
+            if(b>a && (csi)maxc*K>total) {                  /* too coarse: the window ends before b */
+                W++;
+                for(csi j=pos[a];j<pos[b];j++) {
+                    const vsdlss_elim_record *e=t+ord[j];
+                    TOUCH(e->vertex);
+                    uint32_t r0=uf_find(u,(uint32_t)e->vertex);
+                    for(csi d=0;d<e->degree;d++) {
+                        if(!istail[e->neighbor[d]]) continue;
+                        TOUCH(e->neighbor[d]);
+                        uint32_t r1=uf_find(u,(uint32_t)e->neighbor[d]);
+                        if(r1==r0) continue;
+                        if(u[r0].sz<u[r1].sz) { uint32_t x=r0; r0=r1; r1=x; }
+                        u[r1].par=r0; u[r0].sz+=u[r1].sz;
+                    }
+                    u[r0].sz++;
+                }
+                break;
+            }
+        }
+        /* window = levels [a, b): components in order of first record */
+        const csi s=pos[a], e=pos[b];
+        csi ncw=0;
+        for(csi j=s;j<e;j++) {
+            const uint32_t r=uf_find(u,(uint32_t)t[ord[j]].vertex);
+            if(u[r].cid==UINT32_MAX) { u[r].cid=(uint32_t)ncw; cnts[ncw++]=0; }
+            cnts[u[r].cid]++;
+        }
+        wb[nw++]=nc;
+        csi off=s, run=0;
+        for(csi c=0;c<ncw;c++) {                               /* chunk starts; cnts -> offsets */
+            if(run==0) cb[nc++]=off;
+            const csi z=cnts[c]; cnts[c]=off; off+=z; run+=z;
+            if(run>=TAIL_WIN_MIN) run=0;
+        }
+        for(csi j=s;j<e;j++) {
+            const csi i=ord[j];
+            dest[i]=cnts[u[uf_find(u,(uint32_t)t[i].vertex)].cid]++;
+        }
+        a=b;
+    }
+#undef TOUCH
+    wb[nw]=nc; cb[nc]=cnt;
+    *wb_out=wb; *nw_out=nw; *cb_out=cb; wb=cb=NULL; ok=1;
+out:
+    free(ord); free(fill); free(cnts); free(wb); free(cb);
+    free(u);
+    return ok;
+}
+
+static void tail_defer_free(vsdlss_reduction *r)
+{
+    free(r->tail_core_bit); free(r->tail_chunk_core); free(r->tail_core_ptr);
+    free(r->tail_core_slot); free(r->tail_core_upd); free(r->tail_core_buf); r->tail_core_buf=NULL;
+    r->tail_core_bit=NULL; r->tail_chunk_core=r->tail_core_ptr=NULL;
+    r->tail_core_slot=r->tail_core_upd=NULL; r->tail_core_groups=r->tail_core_slots=0;
+}
+/* The deferred core updates of a window schedule (see vsdlss_reduction):
+ * the records t[at[p]] at positions p, chunk table already set.  Slots follow
+ * the replay's traversal (positions ascending, neighbours in order); a core
+ * vertex's slots are listed in elimination order (t's order).  Returns 0
+ * when out of memory. */
+static int cmp_key_slot(const void *x, const void *y)
+{
+    const uint64_t a=((const uint64_t *)x)[0], b=((const uint64_t *)y)[0];
+    return (a>b)-(a<b);
+}
+static int tail_defer_build(vsdlss_reduction *r, const vsdlss_elim_record *t, csi cnt, const csi *at,
+                            const unsigned char *deferv)
+{
+    const csi nc=r->tail_level[r->tail_levels], nbn=r->tail_chunk_nb[nc], n=r->n;
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
+    if(nbn>=(csi)UINT32_MAX || cnt>=((csi)1<<40)) return 0;
+    int nt=vsdlss_parallel_width((double)cnt*16); (void)nt;
+    uint64_t *list=NULL;           /* per traversal slot k: {i<<2 | d, k}, then sorted by i, d */
+    uint32_t *gmap=NULL;
+    csi *fill=NULL;
+    r->tail_chunk_core=(csi *)malloc((size_t)(nc+1)*sizeof(csi));
+    r->tail_core_bit=(uint64_t *)vsdlss_big_calloc((size_t)(nbn/64+1),sizeof(uint64_t));
+    if(!r->tail_chunk_core||!r->tail_core_bit) goto fail;
+    csi *cc=r->tail_chunk_core;
+    /* slots in traversal order: chunks ascending, a chunk's base by prefix */
+    cc[0]=0;
+    VSDLSS_OMP(omp parallel for num_threads(nt) schedule(dynamic,64))
+    for(csi c=0;c<nc;c++) {
+        csi s=0;
+        for(csi p=cr[c];p<cr[c+1];p++) {
+            const vsdlss_elim_record *e=t+at[p];
+            for(csi d=0;d<e->degree;d++) s+=deferv[e->neighbor[d]]!=0;
+        }
+        cc[c+1]=s;
+    }
+    for(csi c=0;c<nc;c++) cc[c+1]+=cc[c];
+    const csi S=cc[nc];
+    r->tail_core_ptr=(csi *)malloc((size_t)(S+2)*sizeof(csi));
+    r->tail_core_slot=(uint32_t *)vsdlss_big_malloc((size_t)(S?S:1)*sizeof(uint32_t));
+    r->tail_core_upd=(uint32_t *)vsdlss_big_malloc((size_t)(S?S:1)*sizeof(uint32_t));
+    list=(uint64_t *)vsdlss_big_malloc((size_t)(S?S:1)*2*sizeof(uint64_t));
+    if(!r->tail_core_ptr||!r->tail_core_slot||!r->tail_core_upd||!list) goto fail;
+    r->tail_core_ptr[0]=0;
+    if(S) {
+        VSDLSS_OMP(omp parallel for num_threads(nt) schedule(dynamic,64))
+        for(csi c=0;c<nc;c++) {
+            csi s=cc[c], o=cn[c];
+            for(csi p=cr[c];p<cr[c+1];p++) {
+                const csi i=at[p]; const vsdlss_elim_record *e=t+i;
+                for(csi d=0;d<e->degree;d++)
+                    if(deferv[e->neighbor[d]]) {
+                        __atomic_fetch_or(r->tail_core_bit+((o+d)>>6),(uint64_t)1<<((o+d)&63),__ATOMIC_RELAXED);
+                        list[2*s]=((uint64_t)i<<2)|(uint64_t)d; list[2*s+1]=(uint64_t)s|((uint64_t)(o+d)<<32);
+                        s++;
+                    }
+                o+=e->degree;
+            }
+        }
+        qsort(list,(size_t)S,2*sizeof(uint64_t),cmp_key_slot);   /* elimination order */
+        gmap=(uint32_t *)vsdlss_big_malloc((size_t)n*sizeof(uint32_t));
+        if(!gmap) goto fail;
+        VSDLSS_OMP(omp parallel for num_threads(nt) schedule(static))
+        for(csi v=0;v<n;v++) gmap[v]=UINT32_MAX;
+    }
+    /* groups (core vertices) in order of their first deferred update; each
+     * group's slots in elimination order */
+    csi G=0;
+    for(csi q=0;q<S;q++) {
+        const csi i=(csi)(list[2*q]>>2), d=(csi)(list[2*q]&3), v=t[i].neighbor[d];
+        if(gmap[v]==UINT32_MAX) { gmap[v]=(uint32_t)G; r->tail_core_upd[G]=(uint32_t)(list[2*q+1]>>32); r->tail_core_ptr[++G]=0; }
+        r->tail_core_ptr[gmap[v]+1]++;
+    }
+    for(csi k=0;k<G;k++) r->tail_core_ptr[k+1]+=r->tail_core_ptr[k];
+    fill=(csi *)malloc((size_t)(G+1)*sizeof(csi));
+    if(!fill) goto fail;
+    memcpy(fill,r->tail_core_ptr,(size_t)(G+1)*sizeof(csi));
+    for(csi q=0;q<S;q++) {
+        const csi i=(csi)(list[2*q]>>2), d=(csi)(list[2*q]&3);
+        r->tail_core_slot[(uint32_t)list[2*q+1]]=(uint32_t)fill[gmap[t[i].neighbor[d]]]++;  /* traversal slot -> group order */
+    }
+    r->tail_core_groups=G; r->tail_core_slots=S;
+    r->tail_core_buf=(double *)vsdlss_big_malloc((size_t)(S?S:1)*sizeof(double));   /* optional: NULL = per solve */
+    free(gmap); free(list); free(fill);
+    return 1;
+fail:
+    free(gmap); free(list); free(fill);
+    tail_defer_free(r);
+    return 0;
+}
+
 /* order: NULL to move the records into level order in place; otherwise
  * the records stay and *order receives the level order (new position ->
  * record), for pack_tail to pack from (no record moves). */
@@ -1033,11 +1480,42 @@ static vsdlss_status level_tail(vsdlss_reduction *r, vsdlss_elim_record *t, csi 
 {
     if(order) *order=NULL;
     if(cnt<tail_min() || cnt<2) return VSDLSS_OK;
-    uint16_t *last=(uint16_t *)vsdlss_big_calloc((size_t)r->n,sizeof(uint16_t));
-    uint16_t *lv=(uint16_t *)vsdlss_big_malloc((size_t)cnt*sizeof(uint16_t));
+    uint16_t *last=NULL, *lv=NULL;
     csi *pos=NULL, *dest=NULL, *at=NULL, levels=0, chunks=0;
+    csi *wb=NULL, *cb=NULL, nw=0; int win=0;
+    unsigned char *istail=NULL, *deferv=NULL;
     unsigned char *done=NULL;
     vsdlss_status st=VSDLSS_ERR_OOM;
+    if(tail_win_k() && order) {                  /* windows: packed path only (deferred core updates) */
+        istail=(unsigned char *)vsdlss_big_calloc((size_t)r->n,1);
+        deferv=(unsigned char *)vsdlss_big_malloc((size_t)r->n);
+        if(istail && deferv) {
+            int nt=vsdlss_parallel_width((double)cnt*8); (void)nt;
+            VSDLSS_OMP(omp parallel num_threads(nt))
+            {
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi i=0;i<cnt;i++) istail[t[i].vertex]=1;
+                VSDLSS_OMP(omp for schedule(static))
+                for(csi v=0;v<r->n;v++) deferv[v]=!istail[v];     /* core: deferred unless merged */
+            }
+            /* the whole tail as one window, records in elimination order: no levels needed */
+            csi *cnts=(csi *)vsdlss_big_malloc((size_t)cnt*sizeof(csi)), nc1=0;
+            dest=(csi *)vsdlss_big_malloc((size_t)cnt*sizeof(csi));
+            cb=(csi *)vsdlss_big_malloc((size_t)(cnt+1)*sizeof(csi));
+            wb=(csi *)malloc(2*sizeof(csi));
+            r->tail_level=(csi *)malloc(2*sizeof(csi));
+            if(cnts && dest && cb && wb && r->tail_level &&
+               tail_one_window(t,cnt,r->n,NULL,tail_win_k(),istail,deferv,dest,cnts,cb,&nc1)) {
+                wb[0]=0; wb[1]=nc1; cb[nc1]=cnt; nw=1; win=1;
+                free(cnts);
+                goto ordered;
+            }
+            free(cnts); free(dest); free(cb); free(wb); free(r->tail_level);
+            dest=cb=wb=NULL; r->tail_level=NULL;
+        }
+    }
+    last=(uint16_t *)vsdlss_big_calloc((size_t)r->n,sizeof(uint16_t));
+    lv=(uint16_t *)vsdlss_big_malloc((size_t)cnt*sizeof(uint16_t));
     if(!last||!lv) goto out;
     for(csi i=0;i<cnt;i++) {
         const vsdlss_elim_record *e=t+i; unsigned l=last[e->vertex];
@@ -1054,9 +1532,13 @@ static vsdlss_status level_tail(vsdlss_reduction *r, vsdlss_elim_record *t, csi 
     if(!pos||!dest||!r->tail_level) goto out;
     for(csi i=0;i<cnt;i++) pos[lv[i]+1]++;
     for(csi l=1;l<=levels;l++) { chunks+=(pos[l+1]+TAIL_CHUNK-1)/TAIL_CHUNK; pos[l+1]+=pos[l]; }
-    if(!tail_order(t,cnt,r->n,lv,levels,pos,dest))
+    if(istail && deferv) {                       /* several windows (the single one failed) */
+        win=tail_windows(t,cnt,r->n,lv,levels,pos,tail_win_k(),istail,deferv,0,dest,&wb,&nw,&cb);
+    }
+    if(!win && !tail_order(t,cnt,r->n,lv,levels,pos,dest))
         for(csi i=0;i<cnt;i++) dest[i]=pos[lv[i]]++;              /* pos[l] ends at level l's end */
     free(lv); lv=NULL;
+ordered:
     if(order) {
         at=dest; dest=(csi *)vsdlss_big_malloc((size_t)cnt*sizeof(csi));
         if(!dest) goto out;
@@ -1072,6 +1554,23 @@ static vsdlss_status level_tail(vsdlss_reduction *r, vsdlss_elim_record *t, csi 
             while(j!=i) { vsdlss_elim_record nx=t[j]; t[j]=carry; carry=nx; done[j]=1; j=dest[j]; }
             t[i]=carry;
         }
+    }
+    if(win) {                                    /* windows of levels, chunks of components */
+        const csi nc=wb[nw];
+        r->tail_chunk_rec=cb; cb=NULL;
+        r->tail_chunk_nb=(csi *)malloc((size_t)(nc+1)*sizeof(csi));
+        if(!r->tail_chunk_nb) goto out;
+        csi o=0;
+        for(csi c=0;c<nc;c++) {
+            r->tail_chunk_nb[c]=o;
+            for(csi i=r->tail_chunk_rec[c];i<r->tail_chunk_rec[c+1];i++) o+=t[at?at[i]:i].degree;
+        }
+        r->tail_chunk_nb[nc]=o;
+        for(csi w=0;w<=nw;w++) r->tail_level[w]=wb[w];
+        r->tail_levels=nw; r->tail_windows=1; 
+        if(!tail_defer_build(r,t,cnt,at,deferv)) goto out;   /* st: OOM, no schedule */
+        st=VSDLSS_OK; *order=at; at=NULL;
+        goto out;
     }
     r->tail_chunk_rec=(csi *)malloc((size_t)(chunks+1)*sizeof(csi));
     r->tail_chunk_nb=(csi *)malloc((size_t)(chunks+1)*sizeof(csi));
@@ -1096,6 +1595,8 @@ out:
      * serially (the records are then in elimination or in level order,
      * both valid), and the factorization goes on. */
     if(st!=VSDLSS_OK || !r->tail_levels) drop_tail_schedule(r);
+    free(wb); free(cb);
+    free(istail); free(deferv);
     free(last); free(lv); free(pos); free(dest); free(done); free(at);
     return VSDLSS_OK;
 }
@@ -1152,7 +1653,7 @@ static void radix_pass(const uint64_t *a, uint64_t *b, csi m, int shift, int bit
 }
 vsdlss_status vsdlss_reduce_tail_plan(vsdlss_reduction *r)
 {
-    if(!r || r->records || !r->pk || !r->tail_levels || r->tail_fwd) return VSDLSS_OK;
+    if(!r || r->records || !r->pk || !r->tail_levels || r->tail_fwd || r->tail_windows) return VSDLSS_OK;
     { const char *e=getenv("VSDLSS_TAIL_PLAN"); if(e && atoi(e)==0) return VSDLSS_OK; }
     const csi q0=r->blocks;
     if(q0<1 || q0!=r->pk_count-1) return VSDLSS_OK;
