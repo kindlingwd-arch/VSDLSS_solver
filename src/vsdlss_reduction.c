@@ -601,9 +601,10 @@ static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, cons
  * pay for it: with fewer, or with more threads than free CPUs, the team
  * waits at each barrier for descheduled members (measured: 4M nodes, ~560
  * records per level, 32 threads on 16 CPUs -- backward replay 0.06 s ->
- * 5 s).  At least VSDLSS_TAIL_GRAIN (default 4096) records per thread on
- * an average level. */
-csi vsdlss_reduce_tail_grain = 4096;
+ * 5 s).  At least VSDLSS_TAIL_GRAIN (default 2048) records per thread on
+ * an average level.  61M-node EMIR case (48K records per level), 32
+ * threads, whole solve: grain 4096 325 ms, 2048 285 ms, 1024 286 ms. */
+csi vsdlss_reduce_tail_grain = 2048;
 static csi tail_grain(void)
 {
     static csi env=-1;
