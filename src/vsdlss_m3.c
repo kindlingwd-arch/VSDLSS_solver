@@ -209,6 +209,51 @@ typedef struct {
     csi *newidx; vsdlss_reduce_input **inputs; int order;
 } factor_ctx;
 
+/* Chain-contiguous numbering (VSDLSS_CHAIN_ORDER=1, default off): the BFS
+ * order, except that every chain of degree-2 vertices is numbered
+ * consecutively, right after the vertex it is first reached from.  In BFS
+ * order consecutive chain vertices lie a whole BFS front apart; when the
+ * front exceeds the reduction block, chains cross blocks and their
+ * elimination falls to the sequential tail.  It changes the elimination
+ * order, so solutions are not bitwise those of the default.  Measured:
+ * synthetic 4M-node grid + wires, tail 90.1% -> 0.9%, solve 8-10% faster
+ * at 4-8 threads; 61M-node EMIR case (2 components), 32 threads, tail
+ * 99.6% -> 69.2%, warm solve ~290 -> ~241 ms, rel_err 2.75e-12 ->
+ * 2.97e-12.  gather[k] holds the BFS order (global vertices); rewritten in
+ * place, newidx updated. */
+static int chain_order_on(void)
+{
+    static int on=-1;
+    if(on<0) { const char *e=getenv("VSDLSS_CHAIN_ORDER"); on=e && e[0]=='1'; }
+    return on;
+}
+static vsdlss_status chain_order(const vsdlss_wgraph *g, csi *gather, csi n, csi *newidx)
+{
+    csi *out=(csi*)vsdlss_big_malloc((size_t)n*sizeof(csi)), m=0;
+    unsigned char *placed=(unsigned char*)vsdlss_big_calloc((size_t)n,1);
+    if(!out||!placed) { free(out); free(placed); return VSDLSS_ERR_OOM; }
+#define DEG(v) (g->ptr[(v)+1]-g->ptr[(v)])
+    for(csi k=0;k<n;k++) {
+        const csi v=gather[k];
+        if(placed[k]) continue;
+        placed[k]=1; out[m++]=v;
+        /* the chains starting at v's degree-2 neighbours (and v's own, if v is one) */
+        for(csi a=g->ptr[v];a<g->ptr[v+1];a++) {
+            csi prev=v, cur=g->idx[a];
+            while(DEG(cur)==2 && !placed[newidx[cur]]) {
+                placed[newidx[cur]]=1; out[m++]=cur;
+                const csi *e=g->idx+g->ptr[cur];
+                const csi next=e[0]==prev?e[1]:e[0];
+                prev=cur; cur=next;
+            }
+        }
+    }
+#undef DEG
+    for(csi k=0;k<n;k++) { gather[k]=out[k]; newidx[out[k]]=k; }
+    free(out); free(placed);
+    return VSDLSS_OK;
+}
+
 static vsdlss_status prepare_component(void *vctx, csi component)
 {
     factor_ctx *x=(factor_ctx*)vctx;
@@ -226,6 +271,10 @@ static vsdlss_status prepare_component(void *vctx, csi component)
         for(csi k=0;k<cf->n;k++){
             csi g=factor->components->vertices[begin+perm[k]];
             cf->gather[k]=g; x->newidx[g]=k;     /* this component's entries only */
+        }
+        if(chain_order_on()) {
+            st=chain_order(x->graph,cf->gather,cf->n,x->newidx);
+            if(st!=VSDLSS_OK) return st;
         }
         return vsdlss_reduce_prepare_graph(x->graph->ptr,x->graph->idx,x->graph->val,x->graph->diag,
                                            cf->gather,cf->n,x->newidx,input);
