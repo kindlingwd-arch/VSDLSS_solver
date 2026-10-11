@@ -56,3 +56,6 @@
 /test_kernels_asan
 /build/
 /bench_components
+/bench_phase
+/bench_tail
+/bench_core

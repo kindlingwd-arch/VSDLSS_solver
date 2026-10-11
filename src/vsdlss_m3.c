@@ -379,6 +379,13 @@ static vsdlss_status factor_component(void *vctx, csi component)
         status=relabel_component(cf);
         TRACE("solve-order relabel",t0);
     }
+    /* The tail's forward plan needs the final vertex numbering.  Optional:
+     * without its memory the forward replay runs the level chunks. */
+    if(status==VSDLSS_OK && !factor->disk_mode && cf->reduction) {
+        const vsdlss_status plan=vsdlss_reduce_tail_plan(cf->reduction);
+        if(plan!=VSDLSS_ERR_OOM) status=plan;
+        if(cf->reduction->tail_levels) TRACE("reduction tail plan",t0);
+    }
     /* 32-bit core map once the numbering is final (in memory only). */
     if(status==VSDLSS_OK && !factor->disk_mode && cf->core_map && cf->n<=(csi)UINT32_MAX) {
         const csi cn=cf->reduction->core_n;
@@ -441,6 +448,15 @@ static void trace_factor_bytes(const vsdlss_m3_factor *f)
             for(csi q=0;q<r->pk_count;q++)
                 replay+=(double)r->pk[q].count*(r->pk[q].head?4+8:1+8)+(double)r->pk[q].nbn*(4+8);
             if(r->records) replay+=(double)r->count*sizeof(vsdlss_elim_record);
+            if(r->tail_levels) {                    /* level schedule of the tail, forward plan */
+                const csi chunks=r->tail_level[r->tail_levels];
+                double bytes=(double)(r->tail_levels+1)*sizeof(csi)+(double)(chunks+1)*2*sizeof(csi);
+                if(r->tail_fwd) bytes+=(double)r->pk[r->blocks].nbn*16+(double)(r->tail_levels+1)*sizeof(csi);
+                replay+=bytes;
+                fprintf(stderr,"vsdlss trace: component %lld: tail %lld records, %lld levels, schedule %.1f MiB%s\n",
+                        (long long)c,(long long)r->pk[r->blocks].count,(long long)r->tail_levels,bytes*mb,
+                        r->tail_fwd?"":" (no forward plan)");
+            }
         }
         ws+=(double)(cf->ws_local?cf->n:0)*8+(double)(cf->ws_core?r->core_n:0)*8+
             (double)(cf->ws_saved?r->count:0)*8;
