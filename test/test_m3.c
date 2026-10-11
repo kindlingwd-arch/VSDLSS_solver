@@ -301,17 +301,19 @@ static int test_reduction_rhs_nonempty_core_and_transactions(void)
     vsdlss_reduction_free(r);
 
     { vsdlss_elim_record record={0,1,{1,0,0},1,{2,0,0}};
-      vsdlss_reduction fake={2,1,1,&record,(csi[]){1},NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
+      vsdlss_reduction fake; csi fake_core[1]={1}; memset(&fake,0,sizeof fake);
+      fake.n=2; fake.count=1; fake.core_n=1; fake.records=&record; fake.core_vertices=fake_core;
       double huge[]={DBL_MAX,DBL_MAX}, outcore[]={8}, outsaved[]={9};
       CHECK(vsdlss_reduce_rhs(&fake,huge,outcore,outsaved)==VSDLSS_ERR_NONFINITE);
       CHECK(outcore[0]==8 && outsaved[0]==9); }
-    { vsdlss_reduction no_elimination={2,0,2,NULL,(csi[]){0,1},NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
+    { vsdlss_reduction no_elimination; csi ne_core[2]={0,1}; memset(&no_elimination,0,sizeof no_elimination);
+      no_elimination.n=2; no_elimination.core_n=2; no_elimination.core_vertices=ne_core;
       double rhs[]={3,4}, core_only[2], recovered[2];
       CHECK(vsdlss_reduce_rhs(&no_elimination,rhs,core_only,NULL)==VSDLSS_OK);
       CHECK(core_only[0]==3 && core_only[1]==4);
       CHECK(vsdlss_reduce_recover(&no_elimination,NULL,core_only,recovered)==VSDLSS_OK);
       CHECK(recovered[0]==3 && recovered[1]==4); }
-    { vsdlss_reduction empty={0,0,0,NULL,NULL,NULL,0,NULL,0,NULL,0,NULL,NULL,NULL,NULL};
+    { vsdlss_reduction empty; memset(&empty,0,sizeof empty);
       CHECK(vsdlss_reduce_rhs(&empty,NULL,NULL,NULL)==VSDLSS_OK);
       CHECK(vsdlss_reduce_recover(&empty,NULL,NULL,NULL)==VSDLSS_OK); }
     return 0;
@@ -943,6 +945,7 @@ extern int vsdlss_m3_relabel;
 static int test_reduction_tail_levels(void)
 {
     const csi saved_blk=vsdlss_reduce_block, saved_tail=vsdlss_reduce_tail_min, saved_grain=vsdlss_reduce_tail_grain;
+    const csi saved_win=vsdlss_reduce_tail_windows;
     const int saved_relabel=vsdlss_m3_relabel;
     vsdlss_reduce_tail_grain=1;             /* small levels: still run them in parallel */
     const csi G=40, S=3;
@@ -962,9 +965,9 @@ static int test_reduction_tail_levels(void)
     int scheduled=0;
     for(int relabel=0;relabel<2;relabel++) {
         vsdlss_m3_relabel=relabel;
-        for(int t=1;t<=(vsdlss_parallel_enabled()?4:1);t*=2) for(int on=0;on<2;on++) {
+        for(int t=1;t<=(vsdlss_parallel_enabled()?4:1);t*=2) for(int on=0;on<3;on++) {      /* off, levels, windows */
             vsdlss_m3_factor *f=NULL; double eta;
-            vsdlss_reduce_tail_min=on?1:(csi)1<<62;
+            vsdlss_reduce_tail_min=on?1:(csi)1<<62; vsdlss_reduce_tail_windows=on==2?8:0;
             CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
             CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
             for(csi c=0;c<f->count;c++) {
@@ -981,7 +984,7 @@ static int test_reduction_tail_levels(void)
     }
     CHECK(scheduled>0);
     vsdlss_reduce_block=saved_blk; vsdlss_reduce_tail_min=saved_tail; vsdlss_m3_relabel=saved_relabel;
-    vsdlss_reduce_tail_grain=saved_grain;
+    vsdlss_reduce_tail_grain=saved_grain; vsdlss_reduce_tail_windows=saved_win;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     free(b); free(ref); free(x); vsdlss_spfree(A);
     printf("tail levels: identical solutions with and without the level schedule\n");
@@ -1056,6 +1059,8 @@ static int test_reduction_tail_order_threads(void)
     const csi n=300000;
     vsdlss *A=tail_graph(n); CHECK(A);
     const csi saved_og=vsdlss_reduce_tail_order_grain, saved_g=vsdlss_reduce_tail_grain, saved_min=vsdlss_reduce_tail_min;
+    const csi saved_win=vsdlss_reduce_tail_windows;
+    vsdlss_reduce_tail_windows=0;                 /* (1), (2): the level schedule unless set below */
     vsdlss_reduce_tail_order_grain=64; vsdlss_reduce_tail_grain=64;
     vsdlss_reduction *ref=NULL;
     for(int t=1;t<=4;t+=3) {
@@ -1076,20 +1081,39 @@ static int test_reduction_tail_order_threads(void)
             for(csi u=r->tail_fwd->lp[l]+1;u<r->tail_fwd->lp[l+1];u++) CHECK(r->tail_fwd->tgt[u-1]<r->tail_fwd->tgt[u]);
         vsdlss_reduction_free(r);
     }
+    {   /* the window schedule (with deferred core updates): built serially at 1
+         * thread and in parallel at 4, the same layout */
+        vsdlss_reduction *wr[2]={NULL,NULL};
+        vsdlss_reduce_tail_windows=64;
+        for(int k=0;k<2;k++) { CHECK(vsdlss_set_num_threads(k?4:1)==VSDLSS_OK); wr[k]=packed_reduction(A,1); CHECK(wr[k] && wr[k]->tail_windows); }
+        vsdlss_reduce_tail_windows=0;
+        const vsdlss_pk_seg *g0=wr[0]->pk+wr[0]->blocks, *g1=wr[1]->pk+wr[1]->blocks;
+        const csi nc=wr[0]->tail_level[wr[0]->tail_levels];
+        CHECK(g0->count==g1->count && g0->nbn==g1->nbn && wr[0]->tail_levels==wr[1]->tail_levels && nc==wr[1]->tail_level[wr[1]->tail_levels]);
+        CHECK(memcmp(g0->head,g1->head,(size_t)g0->count*sizeof(uint32_t))==0 && memcmp(g0->nb,g1->nb,(size_t)g0->nbn*sizeof(uint32_t))==0);
+        CHECK(memcmp(wr[0]->tail_chunk_rec,wr[1]->tail_chunk_rec,(size_t)(nc+1)*sizeof(csi))==0);
+        CHECK(wr[0]->tail_core_slots==wr[1]->tail_core_slots && wr[0]->tail_core_groups==wr[1]->tail_core_groups);
+        CHECK(memcmp(wr[0]->tail_core_slot,wr[1]->tail_core_slot,(size_t)wr[0]->tail_core_slots*sizeof(uint32_t))==0);
+        CHECK(wr[0]->tail_core_slots>0);
+        vsdlss_reduction_free(wr[0]); vsdlss_reduction_free(wr[1]);
+    }
     /* (2) against the serial tail (no schedule) */
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     vsdlss_reduce_tail_min=(csi)1<<62;
     vsdlss_reduction *serial=packed_reduction(A,1); CHECK(serial && !serial->tail_levels);
     vsdlss_reduce_tail_min=saved_min;
     vsdlss_reduction *noplan=packed_reduction(A,0); CHECK(noplan && noplan->tail_levels && !noplan->tail_fwd);
+    vsdlss_reduce_tail_windows=64;
+    vsdlss_reduction *win=packed_reduction(A,1); CHECK(win && win->tail_windows && win->tail_levels && !win->tail_fwd);
+    vsdlss_reduce_tail_windows=0;
     const size_t vb=(size_t)n*sizeof(double);
     double *b=malloc(vb), *fw=malloc(vb), *x=malloc(vb), *w=malloc(vb), *sv=malloc((size_t)ref->count*sizeof(double));
     CHECK(b&&fw&&x&&w&&sv);
     for(csi i=0;i<n;i++) b[i]=sin(0.31*(double)i)+0.2;
     memcpy(fw,b,vb); CHECK(vsdlss_reduce_forward_inplace(serial,fw,NULL)==VSDLSS_OK);
     memcpy(x,fw,vb); CHECK(vsdlss_reduce_backward_inplace(serial,NULL,x)==VSDLSS_OK);
-    for(int k=0;k<2;k++) {
-        const vsdlss_reduction *r=k?noplan:ref;
+    for(int k=0;k<3;k++) {
+        const vsdlss_reduction *r=k==2?win:k?noplan:ref;
         for(int t=1;t<=4;t*=2) for(int s=0;s<2;s++) {
             CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
             memcpy(w,b,vb);
@@ -1102,10 +1126,11 @@ static int test_reduction_tail_order_threads(void)
         memcpy(w,fw,vb); w[vsdlss_pk_vertex(r->pk+r->blocks,0)]=INFINITY;   /* a tail pivot */
         CHECK(vsdlss_reduce_backward_inplace(r,NULL,w)==VSDLSS_ERR_NONFINITE);
     }
-    vsdlss_reduction_free(ref); vsdlss_reduction_free(noplan); vsdlss_reduction_free(serial);
+    vsdlss_reduction_free(ref); vsdlss_reduction_free(noplan); vsdlss_reduction_free(serial); vsdlss_reduction_free(win);
     free(b); free(fw); free(x); free(w); free(sv); vsdlss_spfree(A);
     /* (3) allocation failures, one thread (deterministic allocation order) */
-    {
+    for(int wm=0;wm<2;wm++) {                                  /* levels, windows */
+        vsdlss_reduce_tail_windows=wm?64:0;
         const csi m=140000;
         A=tail_graph(m); CHECK(A);
         const size_t mb=(size_t)m*sizeof(double), base=m3_alloc_live();
@@ -1117,7 +1142,7 @@ static int test_reduction_tail_order_threads(void)
         m3_alloc_reset();
         CHECK(vsdlss_reduce_run_packed(in,&r,NULL)==VSDLSS_OK && vsdlss_reduce_tail_plan(r)==VSDLSS_OK);
         const size_t calls=m3_alloc_calls();
-        CHECK(r->tail_levels && r->tail_fwd);
+        CHECK(r->tail_levels && (wm?r->tail_windows&&!r->tail_fwd:r->tail_fwd!=NULL));
         CHECK(vsdlss_reduce_forward_inplace(r,ref2,NULL)==VSDLSS_OK && vsdlss_reduce_backward_inplace(r,NULL,ref2)==VSDLSS_OK);
         vsdlss_reduction_free(r);
         size_t clean=0, dropped=0;
@@ -1142,9 +1167,11 @@ static int test_reduction_tail_order_threads(void)
         CHECK(clean>0 && dropped>0);
         free(b2); free(ref2); free(w2); vsdlss_spfree(A);
     }
+    vsdlss_reduce_tail_windows=0;
     vsdlss_reduce_tail_order_grain=saved_og; vsdlss_reduce_tail_grain=saved_g;
+    vsdlss_reduce_tail_windows=saved_win;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-    printf("tail order: same level order and plan at 1 and 4 threads; scheduled replay = serial "
+    printf("tail order: same level order and plan at 1 and 4 threads; scheduled replay (levels, windows) = serial "
            "(saved, no plan, 1/2/4 threads, non-finite); allocation failures clean or serial\n");
     return 0;
 }
