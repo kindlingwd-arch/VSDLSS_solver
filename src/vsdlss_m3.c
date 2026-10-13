@@ -128,42 +128,70 @@ fail:
     vsdlss_spfree(normalized); vsdlss_m3_factor_free(factor); return status;
 }
 
+/* One component of vsdlss_m3_solve: vsdlss_reduce_rhs, the core solve in
+   the core order, vsdlss_reduce_recover -- the same operations and tests --
+   on three arrays, gathering and scattering through the maps directly. */
 static vsdlss_status solve_component(const vsdlss_m3_factor *factor,const double *rhs,
                                      double *global,csi component)
 {
-    vsdlss_status status=VSDLSS_OK;
-
-        const vsdlss_m3_component_factor *cf=factor->component+component;
-        const csi begin=factor->components->offset[component]; csi k;
-        double *local=NULL,*core_rhs=NULL,*saved=NULL,*permuted=NULL,*core_x=NULL,*local_x=NULL;
-        if(!count_fits(cf->n,sizeof(double)) ||
-           !count_fits(cf->reduction->core_n,sizeof(double)) ||
-           !count_fits(cf->reduction->count,sizeof(double))) {status=VSDLSS_ERR_OOM;goto component_done;}
-        local=(double*)malloc((size_t)cf->n*sizeof(double));
-        local_x=(double*)malloc((size_t)cf->n*sizeof(double));
-        if(cf->reduction->core_n) {
-            core_rhs=(double*)malloc((size_t)cf->reduction->core_n*sizeof(double));
-            permuted=(double*)malloc((size_t)cf->reduction->core_n*sizeof(double));
-            core_x=(double*)malloc((size_t)cf->reduction->core_n*sizeof(double));
+    const vsdlss_m3_component_factor *cf=factor->component+component;
+    const vsdlss_reduction *r=cf->reduction;
+    const csi n=cf->n,*vertex=factor->components->vertices+factor->components->offset[component];
+    double *work=NULL,*saved=NULL,*core=NULL; csi k,j; vsdlss_status status=VSDLSS_OK;
+    if(!count_fits(n,sizeof(double))||!count_fits(r->core_n,sizeof(double))||
+       !count_fits(r->count,sizeof(double))) return VSDLSS_ERR_OOM;
+    work=(double*)malloc((size_t)(n?n:1)*sizeof(double));
+    saved=(double*)malloc((size_t)(r->count?r->count:1)*sizeof(double));
+    core=(double*)malloc((size_t)(r->core_n?r->core_n:1)*sizeof(double));
+    if(!work||!saved||!core) {status=VSDLSS_ERR_OOM;goto done;}
+    for(k=0;k<n;k++) {
+        work[k]=rhs[vertex[k]];
+        if(!isfinite(work[k])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+    }
+    for(k=0;k<r->count;k++) {
+        const vsdlss_elim_record *record=r->records+k; double s;
+        if(record->vertex<0||record->vertex>=n||record->degree<0||record->degree>3) {status=VSDLSS_ERR_INVALID;goto done;}
+        s=saved[k]=work[record->vertex];
+        if(!isfinite(s)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        for(j=0;j<record->degree;j++) {
+            const csi neighbor=record->neighbor[j]; double update;
+            if(neighbor<0||neighbor>=n) {status=VSDLSS_ERR_INVALID;goto done;}
+            update=record->multiplier[j]*s;
+            if(!isfinite(record->multiplier[j])||!isfinite(update)||
+               !isfinite(work[neighbor]-update)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+            work[neighbor]-=update;
         }
-        if(cf->reduction->count) saved=(double*)malloc((size_t)cf->reduction->count*sizeof(double));
-        if(!local||!local_x||(cf->reduction->core_n&&(!core_rhs||!permuted||!core_x))||
-           (cf->reduction->count&&!saved)) {status=VSDLSS_ERR_OOM;goto component_done;}
-        for(k=0;k<cf->n;k++) local[k]=rhs[factor->components->vertices[begin+k]];
-        status=vsdlss_reduce_rhs(cf->reduction,local,core_rhs,saved);
-        if(status!=VSDLSS_OK) goto component_done;
-        if(cf->reduction->core_n) {
-            for(k=0;k<cf->reduction->core_n;k++) permuted[k]=core_rhs[cf->q[k]];
-            status=vsdlss_sn_solve(cf->numeric,permuted,permuted);
-            if(status!=VSDLSS_OK) goto component_done;
-            for(k=0;k<cf->reduction->core_n;k++) core_x[cf->q[k]]=permuted[k];
+    }
+    for(k=0;k<r->core_n;k++) {
+        const csi v=r->core_vertices[k];
+        if(v<0||v>=n) {status=VSDLSS_ERR_INVALID;goto done;}
+        if(!isfinite(work[v])) {status=VSDLSS_ERR_NONFINITE;goto done;}
+    }
+    if(r->core_n) {
+        for(k=0;k<r->core_n;k++) core[k]=work[r->core_vertices[cf->q[k]]];
+        status=vsdlss_m3_sn_solve(cf->numeric,core);
+        if(status!=VSDLSS_OK) goto done;
+    }
+    memset(work,0,(size_t)n*sizeof(double));     /* now the local solution */
+    for(k=0;k<r->core_n;k++) work[r->core_vertices[cf->q[k]]]=core[k];
+    for(k=r->count;k>0;k--) {
+        const vsdlss_elim_record *record=r->records+(k-1); double value;
+        if(!isfinite(record->pivot)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        if(record->pivot==0.0) {status=VSDLSS_ERR_INVALID;goto done;}
+        value=saved[k-1]/record->pivot;
+        if(!isfinite(value)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+        for(j=0;j<record->degree;j++) {
+            const csi neighbor=record->neighbor[j];
+            const double update=record->multiplier[j]*work[neighbor];
+            if(!isfinite(update)||!isfinite(value-update)) {status=VSDLSS_ERR_NONFINITE;goto done;}
+            value-=update;
         }
-        status=vsdlss_reduce_recover(cf->reduction,saved,core_x,local_x);
-        if(status==VSDLSS_OK) for(k=0;k<cf->n;k++)
-            global[factor->components->vertices[begin+k]]=local_x[k];
-component_done:
-        free(local);free(core_rhs);free(saved);free(permuted);free(core_x);free(local_x);
-        return status;
+        work[record->vertex]=value;
+    }
+    for(k=0;k<n;k++) global[vertex[k]]=work[k];
+done:
+    free(work);free(saved);free(core);
+    return status;
 }
 
 vsdlss_status vsdlss_m3_solve(const vsdlss_m3_factor *factor,

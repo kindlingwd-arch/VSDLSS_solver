@@ -101,4 +101,6 @@ vsdlss_status vsdlss_m3_mld_order(const vsdlss *, csi **q);
    the same factor, without the per-entry structure of L (l_col_ptr,
    l_row_index and l_panel_slot stay NULL; vsdlss_sn_solve needs none). */
 vsdlss_status vsdlss_m3_sn_factor(const vsdlss *, vsdlss_sn_factor **);
+/* vsdlss_sn_solve in place, same results; x is undefined after an error. */
+vsdlss_status vsdlss_m3_sn_solve(const vsdlss_sn_factor *, double *x);
 #endif
