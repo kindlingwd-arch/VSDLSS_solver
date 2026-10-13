@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define M3_TASK_MIN 4096 /* smallest component factored as a task of its own */
+
 static int count_fits(csi n, size_t width)
 {
     return n >= 0 && (uint64_t)n <= SIZE_MAX / width;
@@ -25,6 +27,27 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     free(factor);
 }
 
+/* vsdlss_order for a reduced core; MLD (orders 0 and 4) through the M3
+   implementation, which yields the same permutation. */
+static vsdlss_status core_order(const vsdlss *core,int order,csi **q,csi **pinv)
+{
+    csi *lq=NULL,*lp,k; vsdlss_status status;
+    if(order!=0&&order!=4) return vsdlss_order(core,order,q,pinv);
+    *q=NULL; *pinv=NULL;
+    status=vsdlss_validate_upper_csc(core);
+    if(status==VSDLSS_OK) status=vsdlss_m3_mld_order(core,&lq);
+    if(status!=VSDLSS_OK) return status;
+    lp=(csi *)malloc((size_t)core->n*sizeof(csi));
+    if(!lp) {free(lq);return VSDLSS_ERR_OOM;}
+    for(k=0;k<core->n;++k) lp[k]=-1;
+    for(k=0;k<core->n;++k) {
+        if(lq[k]<0||lq[k]>=core->n||lp[lq[k]]>=0) {free(lq);free(lp);return VSDLSS_ERR_INVALID;}
+        lp[lq[k]]=k;
+    }
+    *q=lq; *pinv=lp;
+    return VSDLSS_OK;
+}
+
 static vsdlss_status factor_component(vsdlss_m3_factor *factor,const vsdlss *normalized,
                                       csi component,int order)
 {
@@ -32,22 +55,21 @@ static vsdlss_status factor_component(vsdlss_m3_factor *factor,const vsdlss *nor
 
         vsdlss_m3_component_factor *cf=factor->component+component;
         vsdlss *local=NULL,*permuted=NULL; csi *pinv=NULL;
-        vsdlss_sn_symbolic *symbolic=NULL;
         cf->n=factor->components->offset[component+1]-factor->components->offset[component];
         status=vsdlss_component_extract_normalized(normalized,factor->components,component,&local);
         if(status!=VSDLSS_OK) goto component_fail;
         status=vsdlss_reduce(local,&cf->reduction);
         if(status!=VSDLSS_OK) goto component_fail;
         if(cf->reduction->core_n) {
-            status=vsdlss_order(cf->reduction->core,order,&cf->q,&pinv);
+            status=core_order(cf->reduction->core,order,&cf->q,&pinv);
             if(status!=VSDLSS_OK) goto component_fail;
             permuted=vsdlss_symperm(cf->reduction->core,pinv,1);
             if(!permuted) {status=VSDLSS_ERR_OOM;goto component_fail;}
-            status=vsdlss_sn_analyze(permuted,&symbolic);
-            if(status==VSDLSS_OK) status=vsdlss_sn_factorize(permuted,symbolic,&cf->numeric);
+            vsdlss_spfree(local); local=NULL;
+            status=vsdlss_m3_sn_factor(permuted,&cf->numeric);
         }
 component_fail:
-        free(pinv); vsdlss_sn_symbolic_free(symbolic); vsdlss_spfree(permuted); vsdlss_spfree(local);
+        free(pinv); vsdlss_spfree(permuted); vsdlss_spfree(local);
         return status;
 }
 
@@ -75,16 +97,27 @@ vsdlss_status vsdlss_factorize_m3(const vsdlss *A, int order,
     if(!factor->component) {status=VSDLSS_ERR_OOM;goto fail;}
     vsdlss_status *results=calloc((size_t)factor->count,sizeof(*results));
     if(!results){status=VSDLSS_ERR_OOM;goto fail;}
+    /* One team for everything: a large component is a task, and its ordering
+       hands independent subsets to idle threads as further tasks (results do
+       not depend on the schedule); the small components share a task loop. */
     int nt=vsdlss_parallel_width((double)factor->n*256);
-    if(nt>factor->count)nt=(int)factor->count;
     (void)nt;
     VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
     {
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
-        VSDLSS_OMP(omp for schedule(dynamic,1))
-        for(component=0;component<factor->count;component++)
-            results[component]=factor_component(factor,normalized,component,order);
+        VSDLSS_OMP(omp single)
+        {
+            for(component=0;component<factor->count;component++)
+                if(factor->components->offset[component+1]-factor->components->offset[component]>=M3_TASK_MIN) {
+                    VSDLSS_OMP(omp task firstprivate(component))
+                    results[component]=factor_component(factor,normalized,component,order);
+                }
+            VSDLSS_OMP(omp taskloop grainsize(64))
+            for(csi small=0;small<factor->count;small++)
+                if(factor->components->offset[small+1]-factor->components->offset[small]<M3_TASK_MIN)
+                    results[small]=factor_component(factor,normalized,small,order);
+        }
     }
     for(component=0;component<factor->count;component++)if(results[component]!=VSDLSS_OK){
         status=results[component];free(results);goto fail;

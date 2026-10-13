@@ -1,4 +1,5 @@
 #include "../src/vsdlss_m3_internal.h"
+#include "../src/vsdlss_internal.h"
 #include "m3_test_alloc.h"
 
 #include <stdio.h>
@@ -739,6 +740,89 @@ static int test_m3_allocation_failures(void)
     m3_alloc_reset();vsdlss_m3_factor_free(f);vsdlss_spfree(A);return 0;
 }
 
+/* The M3 MLD ordering and fused supernodal factor equal vsdlss_mld_order and
+ * vsdlss_sn_analyze + vsdlss_sn_factorize exactly, serially and with tasks:
+ * grids with pseudo-random chords, large enough for coarsening, separators
+ * of many columns and subsets ordered as tasks. */
+static vsdlss *grid_with_chords(csi side, csi chords, unsigned seed)
+{
+    const csi n = side * side, cap = 3 * n + chords;
+    csi *ea = (csi *)malloc((size_t)cap * sizeof(csi)), *eb = (csi *)malloc((size_t)cap * sizeof(csi));
+    double *ex = (double *)malloc((size_t)cap * sizeof(double));
+    csi *deg = (csi *)calloc((size_t)n, sizeof(csi)), m = 0, k;
+    vsdlss *T = NULL, *A = NULL;
+    if (!ea || !eb || !ex || !deg) goto done;
+    for (k = 0; k < n; k++) {
+        if (k % side + 1 < side) { ea[m] = k; eb[m] = k + 1; ex[m++] = -1.0; }
+        if (k + side < n) { ea[m] = k; eb[m] = k + side; ex[m++] = -1.0 - 0.25 * (double)(k % 3); }
+    }
+    for (k = 0; k < chords; k++) {
+        csi a, b;
+        seed = seed * 1103515245u + 12345u; a = (csi)((seed >> 8) % (unsigned)n);
+        seed = seed * 1103515245u + 12345u; b = (csi)((seed >> 8) % (unsigned)n);
+        if (a == b) continue;
+        ea[m] = a < b ? a : b; eb[m] = a < b ? b : a; ex[m++] = -0.5;
+    }
+    for (k = 0; k < m; k++) { deg[ea[k]]++; deg[eb[k]]++; }
+    for (k = 0; k < n; k++) { ea[m] = eb[m] = k; ex[m++] = 4.0 + 2.0 * (double)deg[k] + 0.001 * (double)(k % 11); }
+    T = vsdlss_spalloc(n, n, m, 1, 0);
+    if (!T) goto done;
+    memset(T->p, 0, (size_t)(n + 1) * sizeof(csi));
+    for (k = 0; k < m; k++) T->p[eb[k] + 1]++;
+    for (k = 0; k < n; k++) T->p[k + 1] += T->p[k];
+    memcpy(deg, T->p, (size_t)n * sizeof(csi));
+    for (k = 0; k < m; k++) { csi at = deg[eb[k]]++; T->i[at] = ea[k]; T->x[at] = ex[k]; }
+    if (vsdlss_normalize_upper(T, &A) != VSDLSS_OK) A = NULL;
+done:
+    free(ea); free(eb); free(ex); free(deg); vsdlss_spfree(T);
+    return A;
+}
+
+static int same_factor(const vsdlss_sn_factor *f, const vsdlss_sn_factor *g)
+{
+    return f->n == g->n && f->count == g->count && f->l_nnz == g->l_nnz &&
+        !memcmp(f->column_start, g->column_start, (size_t)(f->count + 1) * sizeof(csi)) &&
+        !memcmp(f->row_ptr, g->row_ptr, (size_t)(f->count + 1) * sizeof(csi)) &&
+        !memcmp(f->panel_offset, g->panel_offset, (size_t)(f->count + 1) * sizeof(csi)) &&
+        (!f->row_ptr[f->count] || !memcmp(f->row_index, g->row_index, (size_t)f->row_ptr[f->count] * sizeof(csi))) &&
+        !memcmp(f->panel, g->panel, (size_t)f->panel_offset[f->count] * sizeof(double));
+}
+
+static int test_m3_ordering_and_factor_match_reference(void)
+{
+    static const csi sides[] = {3, 6, 20, 45, 90};
+    for (int c = 0; c < 5; c++) {
+        vsdlss *A = grid_with_chords(sides[c], sides[c] * 2, 7u + (unsigned)c), *P = NULL;
+        csi *ref = NULL, *q1 = NULL, *q8 = NULL, *pinv = NULL, k;
+        vsdlss_sn_symbolic *s = NULL; vsdlss_sn_factor *f = NULL, *g = NULL;
+        vsdlss_status st8 = VSDLSS_OK;
+        CHECK(A && vsdlss_validate_upper_csc(A) == VSDLSS_OK);
+        CHECK(vsdlss_mld_order(A, &ref, NULL) == VSDLSS_OK);
+        CHECK(vsdlss_m3_mld_order(A, &q1) == VSDLSS_OK);
+        CHECK(!memcmp(ref, q1, (size_t)A->n * sizeof(csi)));
+#ifdef _OPENMP
+        _Pragma("omp parallel num_threads(4)")
+        _Pragma("omp single")
+#endif
+        st8 = vsdlss_m3_mld_order(A, &q8);
+        CHECK(st8 == VSDLSS_OK && !memcmp(ref, q8, (size_t)A->n * sizeof(csi)));
+        pinv = (csi *)malloc((size_t)A->n * sizeof(csi));
+        CHECK(pinv);
+        for (k = 0; k < A->n; k++) pinv[ref[k]] = k;
+        P = vsdlss_symperm(A, pinv, 1);
+        CHECK(P);
+        CHECK(vsdlss_sn_analyze(P, &s) == VSDLSS_OK && vsdlss_sn_factorize(P, s, &f) == VSDLSS_OK);
+        CHECK(vsdlss_m3_sn_factor(P, &g) == VSDLSS_OK);
+        CHECK(same_factor(f, g) && !g->l_row_index && !g->l_panel_slot);
+        P->x[P->p[1] - 1] = -1.0;                       /* not positive definite */
+        vsdlss_sn_factor_free(g); g = (vsdlss_sn_factor *)1;
+        CHECK(vsdlss_m3_sn_factor(P, &g) == VSDLSS_ERR_NOT_POSDEF && g == NULL);
+        vsdlss_sn_factor_free(f); vsdlss_sn_symbolic_free(s); vsdlss_spfree(P); vsdlss_spfree(A);
+        free(ref); free(q1); free(q8); free(pinv);
+    }
+    return 0;
+}
+
 int main(void)
 {
     CHECK(test_interleaved_components_and_extract()==0);
@@ -764,6 +848,7 @@ int main(void)
     CHECK(test_m3_facade_errors_transaction_and_many_isolates()==0);
     CHECK(test_m3_partial_factor_cleanup_without_component_array()==0);
     CHECK(test_deterministic_graph_oracles()==0);
+    CHECK(test_m3_ordering_and_factor_match_reference()==0);
     CHECK(test_m3_allocation_failures()==0);
     puts("m3 component, reduction, RHS, symbolic, and numeric tests passed");
     return 0;

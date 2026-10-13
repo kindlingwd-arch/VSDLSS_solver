@@ -94,4 +94,11 @@ double vsdlss_panel_dot(const double *, csi rows, csi width, csi i, csi j);
 vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
                                 csi ext, const csi *index, double *, int back);
 vsdlss_status vsdlss_sn_analyze_compact(const vsdlss *, vsdlss_sn_symbolic **);
+/* MLD ordering of a reduced core (vsdlss_m3_mld.c): the permutation of
+   vsdlss_mld_order, computed in time proportional to the work it describes. */
+vsdlss_status vsdlss_m3_mld_order(const vsdlss *, csi **q);
+/* vsdlss_sn_analyze + vsdlss_sn_factorize in one pass (vsdlss_m3_supernodal.c):
+   the same factor, without the per-entry structure of L (l_col_ptr,
+   l_row_index and l_panel_slot stay NULL; vsdlss_sn_solve needs none). */
+vsdlss_status vsdlss_m3_sn_factor(const vsdlss *, vsdlss_sn_factor **);
 #endif
