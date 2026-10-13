@@ -242,3 +242,61 @@ fail:
     vsdlss_sn_factor_free(f);
     return st;
 }
+
+/* vsdlss_sn_solve in place: the same forward and backward sweeps over the
+ * supernodes, the same operations on every value in the same order (an
+ * external row receives its updates column by column, as the original's
+ * running sum), without a parallel region per supernode.  A value that is
+ * not finite stays so through every later update, so tracking whether one
+ * has appeared (check: x - x sums to 0 exactly while all are finite) gives
+ * the original's status at each of its tests. */
+vsdlss_status vsdlss_m3_sn_solve(const vsdlss_sn_factor *f, double *x)
+{
+    double check = 0;
+    if (!f || !x || f->n < 1) return VSDLSS_ERR_INVALID;
+    for (csi j = 0; j < f->n; j++) check += x[j] - x[j];
+    if (!(check == 0)) return VSDLSS_ERR_NONFINITE;
+    for (csi sn = 0; sn < f->count; sn++) {
+        const csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+        const csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn], rows = w + ext;
+        const csi *idx = f->row_index + f->row_ptr[sn];
+        const double *a = f->panel + f->panel_offset[sn];
+        double *xs = x + b;
+        for (csi j = 0; j < w; j++) {
+            const double d = a[j * rows + j], *col = a + j * rows;
+            if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
+            xs[j] /= d;
+            if (!isfinite(xs[j])) return VSDLSS_ERR_NONFINITE;
+            for (csi r = j + 1; r < w; r++) xs[r] -= col[r] * xs[j];
+        }
+        for (csi j = 0; j < w; j++) {
+            const double *col = a + j * rows + w, s = xs[j];
+            for (csi t = 0; t < ext; t++) x[idx[t]] -= col[t] * s;
+        }
+        for (csi t = 0; t < ext; t++) check += x[idx[t]] - x[idx[t]];
+        if (!(check == 0)) return VSDLSS_ERR_NONFINITE;
+    }
+    for (csi sn = f->count; sn-- > 0;) {
+        const csi b = f->column_start[sn], w = f->column_start[sn + 1] - b;
+        const csi ext = f->row_ptr[sn + 1] - f->row_ptr[sn], rows = w + ext;
+        const csi *idx = f->row_index + f->row_ptr[sn];
+        const double *a = f->panel + f->panel_offset[sn];
+        double *xs = x + b;
+        for (csi t = 0; t < w; t++) {
+            const double *col = a + t * rows + w;
+            double v = xs[t];
+            for (csi r = 0; r < ext; r++) v -= col[r] * x[idx[r]];
+            xs[t] = v; check += v - v;
+        }
+        if (!(check == 0)) return VSDLSS_ERR_NONFINITE;
+        for (csi j = w; j-- > 0;) {
+            const double d = a[j * rows + j], *col = a + j * rows;
+            double v = xs[j];
+            if (!isfinite(d) || d <= 0) return VSDLSS_ERR_INVALID;
+            for (csi r = j + 1; r < w; r++) v -= col[r] * xs[r];
+            xs[j] = v / d;
+            if (!isfinite(xs[j])) return VSDLSS_ERR_NONFINITE;
+        }
+    }
+    return VSDLSS_OK;
+}
