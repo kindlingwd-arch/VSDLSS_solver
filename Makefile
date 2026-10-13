@@ -12,7 +12,8 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
            src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_components.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
-           src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m4.c \
+           src/vsdlss_supernodal_numeric.c src/vsdlss_m3.c src/vsdlss_m3_mld.c \
+           src/vsdlss_m3_supernodal.c src/vsdlss_m4.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c
 LIBOBJS := $(LIBSRCS:.c=.o)
 
