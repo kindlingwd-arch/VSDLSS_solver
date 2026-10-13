@@ -814,6 +814,16 @@ static int test_m3_ordering_and_factor_match_reference(void)
         CHECK(vsdlss_sn_analyze(P, &s) == VSDLSS_OK && vsdlss_sn_factorize(P, s, &f) == VSDLSS_OK);
         CHECK(vsdlss_m3_sn_factor(P, &g) == VSDLSS_OK);
         CHECK(same_factor(f, g) && !g->l_row_index && !g->l_panel_slot);
+        {
+            double *b = (double *)malloc((size_t)A->n * sizeof(double)), *x0 = (double *)malloc((size_t)A->n * sizeof(double));
+            CHECK(b && x0);
+            for (k = 0; k < A->n; k++) b[k] = 1.0 + 0.125 * (double)(k % 5) - 0.01 * (double)(k % 3);
+            CHECK(vsdlss_sn_solve(f, b, x0) == VSDLSS_OK);
+            CHECK(vsdlss_m3_sn_solve(g, b) == VSDLSS_OK && !memcmp(b, x0, (size_t)A->n * sizeof(double)));
+            b[A->n / 2] = INFINITY;
+            CHECK(vsdlss_m3_sn_solve(g, b) == VSDLSS_ERR_NONFINITE);
+            free(b); free(x0);
+        }
         P->x[P->p[1] - 1] = -1.0;                       /* not positive definite */
         vsdlss_sn_factor_free(g); g = (vsdlss_sn_factor *)1;
         CHECK(vsdlss_m3_sn_factor(P, &g) == VSDLSS_ERR_NOT_POSDEF && g == NULL);
