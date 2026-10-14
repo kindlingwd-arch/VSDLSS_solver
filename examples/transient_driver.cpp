@@ -30,6 +30,10 @@
 //      （kernel.numa_balancing=1）不再扫描这些内存；双路服务器上每次求解
 //      出现约百万次 minor fault 时试它。
 //      CHECK_RESIDUAL=0：不算残差，分解后释放 CSC（再省 nnz*16 字节）。
+//      PACKED=1：用库的共享缓冲区（vsdlss_m3_packed_buffer + vsdlss_m3_export_
+//      packed_slots）：右端项写入 buf[slot[i]]，原地求解，解从 buf[slot[i]]
+//      读出；求解本身没有 gather/scatter。b 已是现成向量，所以写入/读出两步
+//      单独计时（assemble_ms / readback_ms）；真实应用在组装时直接写 slot。
 //
 //  构建与运行（见 docs/user/QUICKSTART.md 第 7 节）
 //    make METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt -Wl,-rpath,<mkl>/lib' transient_driver
@@ -268,7 +272,7 @@ public:
     const vsdlss* matrix() const { return A_; }
     void drop_matrix() { if (A_) { vsdlss_spfree(A_); A_ = nullptr; } std::vector<csi>().swap(upperPos_); }
 
-    double factor_ms = 0, solve_only_ms = 0;
+    double factor_ms = 0, solve_only_ms = 0, assemble_ms = 0, readback_ms = 0;
     int observedThreads() const { return vsdlss_parallel_last_team_size(); }
 
 private:
@@ -280,6 +284,7 @@ private:
     void factor() {
         if (!A_) throw std::runtime_error("factor without a matrix");
         if (f_) { vsdlss_m3_factor_free(f_); f_ = nullptr; }
+        slot_.clear(); buf_ = nullptr;                   // a new factor has its own buffer and slots
         const auto t = clock::now();
         const vsdlss_status st = vsdlss_factorize_m3(A_, order_, &f_);
         factor_ms = msSince(t);
@@ -288,6 +293,33 @@ private:
         check(st, "vsdlss_factorize_m3");
     }
     void solve(const double* b) {
+        if (packed_) {
+            // PACKED=1: the library's shared buffer.  An application writes
+            // each RHS entry straight to buf[slot[i]] while assembling and
+            // reads x_i from buf[slot[i]]; here b is already a finished
+            // vector, so those two loops are timed apart (assemble_ms,
+            // readback_ms) and the solve itself has no gather / scatter.
+            if (slot_.size() != n_) {
+                slot_.resize(n_);
+                buf_ = vsdlss_m3_packed_buffer(f_);
+                if (!buf_) throw std::runtime_error("vsdlss_m3_packed_buffer: out of memory");
+                check(vsdlss_m3_export_packed_slots(f_, slot_.data(), (csi)n_), "vsdlss_m3_export_packed_slots");
+            }
+            const csi* slot = slot_.data(); double* buf = buf_; const std::ptrdiff_t n = (std::ptrdiff_t)n_;
+            auto t = clock::now();
+            #pragma omp parallel for schedule(static)
+            for (std::ptrdiff_t i = 0; i < n; ++i) buf[slot[i]] = b[i];
+            assemble_ms = msSince(t);
+            t = clock::now();
+            check(vsdlss_m3_solve_packed_inplace(f_, buf), "vsdlss_m3_solve_packed_inplace");
+            solve_only_ms = msSince(t);
+            t = clock::now();
+            double* x = x_.data();
+            #pragma omp parallel for schedule(static)
+            for (std::ptrdiff_t i = 0; i < n; ++i) x[i] = buf[slot[i]];
+            readback_ms = msSince(t);
+            return;
+        }
         const auto t = clock::now();
         check(vsdlss_m3_solve(f_, b, x_.data()), "vsdlss_m3_solve");
         solve_only_ms = msSince(t);
@@ -302,6 +334,9 @@ private:
     std::size_t n_ = 0, offCount_ = 0;
     std::vector<csi> upperPos_;
     std::vector<double> x_;
+    bool packed_ = std::getenv("PACKED") && std::atoi(std::getenv("PACKED")) != 0;
+    std::vector<csi> slot_;
+    double* buf_ = nullptr;                              // owned by f_
 };
 
 static void setDefaultEnv(const char* name, const char* value) { setenv(name, value, 0); }
@@ -320,6 +355,7 @@ int main(int argc, char** argv) {
         else if (std::getenv("VSDLSS_NUM_THREADS")) threads = -1;
         const int maxSteps = envInt("STEPS", 40);
         const bool residual = envInt("CHECK_RESIDUAL", 1) != 0;
+        const bool packed = envInt("PACKED", 0) != 0;
         const std::string diagPath = argc > 1 ? argv[1] : "diag.txt";
         const std::string dataPath = argc > 2 ? argv[2] : "data.txt";
         const auto now = [] { return std::chrono::steady_clock::now(); };
@@ -347,7 +383,8 @@ int main(int argc, char** argv) {
         const auto [err, norm] = compareWithFile("x_vector.txt", solver.gett_rhs(), n);
         std::cout << std::setprecision(6)
                   << "n=" << n << " off_diagonal=" << off << '\n'
-                  << "solver=libvsdlss M3 order=6 threads=" << vsdlss_get_num_threads() << " max_team=" << solver.observedThreads() << '\n'
+                  << "solver=libvsdlss M3 order=6 threads=" << vsdlss_get_num_threads() << " max_team=" << solver.observedThreads()
+                  << (envInt("PACKED", 0) ? " solve=shared packed buffer (assemble/readback timed apart)" : " solve=original order") << '\n'
                   << "env MKL_THREADING_LAYER=" << std::getenv("MKL_THREADING_LAYER")
                   << " VSDLSS_BLAS_SOLVE_MIN=" << (std::getenv("VSDLSS_BLAS_SOLVE_MIN") ? std::getenv("VSDLSS_BLAS_SOLVE_MIN") : "(library default)") << '\n'
                   << "numa: " << numa << '\n'
@@ -371,6 +408,7 @@ int main(int argc, char** argv) {
             const double r = residual ? relativeResidual(solver.matrix(), b.data(), solver.gett_rhs()) : -1;
             const auto [e, nn] = compareWithFile(xf, solver.gett_rhs(), n);
             std::cout << "step " << step << ": load_ms=" << ms(l0, l1) << " solve_ms=" << solver.solve_only_ms
+                      << (packed ? " assemble_ms=" + std::to_string(solver.assemble_ms) + " readback_ms=" + std::to_string(solver.readback_ms) : std::string())
                       << " major_faults=" << (s1.majflt - s0.majflt) << " minor_faults=" << (s1.minflt - s0.minflt)
                       << " residual=" << r << " rel_err=" << e / std::max(1.0, nn) << '\n';
         }

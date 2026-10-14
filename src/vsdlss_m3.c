@@ -110,6 +110,7 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
     free(factor->inv32); free(factor->inv64);
     for(k=0;k<VSDLSS_PERM_PLAN_SLOTS;k++) perm_plan_free(atomic_load(&factor->pplan[k]));
     free(factor->pbuf);
+    free(atomic_load(&factor->shared));
     free(factor);
 }
 
@@ -1305,6 +1306,43 @@ vsdlss_status vsdlss_m3_export_packed_permutation(const vsdlss_m3_factor *factor
 {
     if(!factor || length<factor->n) return VSDLSS_ERR_INVALID;
     return vsdlss_m3_internal_order(factor,packed_to_global);
+}
+
+/* global_to_packed[i]: the packed position of original unknown i (the
+ * inverse of vsdlss_m3_export_packed_permutation). */
+vsdlss_status vsdlss_m3_export_packed_slots(const vsdlss_m3_factor *factor,
+                                            csi *global_to_packed, csi length)
+{
+    if(!factor || !factor->components || !factor->component || !global_to_packed || length<factor->n)
+        return VSDLSS_ERR_INVALID;
+    for(csi c=0;c<factor->count;c++) {
+        const csi cn=factor->component[c].n, base=factor->components->offset[c];
+        const idxmap map=component_map(factor,c);
+        int nt=vsdlss_parallel_width((double)cn*4); (void)nt;
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
+        for(csi i=0;i<cn;i++) global_to_packed[im_at(map,i)]=base+i;
+    }
+    return VSDLSS_OK;
+}
+
+/* The packed vector shared with the application: allocated once per factor
+ * (64-byte aligned, huge-page hinted), zeroed by the solver's threads in the
+ * static partition its solves use so that, without process-wide
+ * interleaving, its pages still spread over the NUMA nodes those threads
+ * run on.  NULL for disk-mode factors or when out of memory. */
+double *vsdlss_m3_packed_buffer(vsdlss_m3_factor *factor)
+{
+    double *b, *expect=NULL;
+    if(!factor || factor->disk_mode || factor->n<1 || !count_fits(factor->n,sizeof(double))) return NULL;
+    b=atomic_load(&factor->shared);
+    if(b) return b;
+    b=(double*)vsdlss_big_malloc_aligned(64,(size_t)factor->n*sizeof(double));
+    if(!b) return NULL;
+    int nt=vsdlss_parallel_width((double)factor->n*4); (void)nt;
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
+    for(csi i=0;i<factor->n;i++) b[i]=0.0;
+    if(!atomic_compare_exchange_strong(&factor->shared,&expect,b)) { free(b); b=expect; }
+    return b;
 }
 
 /* A batch of right-hand sides through every component: per RHS gather and
