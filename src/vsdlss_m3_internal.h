@@ -203,6 +203,9 @@ struct vsdlss_m3_factor {
     double *pbuf;
     size_t pbuf_len;
     atomic_int pbuf_busy;
+    /* vsdlss_m3_packed_buffer: n doubles in packed order shared with the
+     * application, allocated on first request. */
+    _Atomic(double *) shared;
 };
 
 /* Symmetric weighted adjacency (no diagonal in idx/val; diag separate). */

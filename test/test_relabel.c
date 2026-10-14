@@ -96,6 +96,22 @@ static void run(vsdlss *A,const char *name,int threads)
         int eq=1; for(csi q=0;q<n;q++) if(memcmp(&px[q],&x1[pp[q]],8)) eq=0;
         CHECK(eq,"%s packed differs from caller order",name);
         CHECK(vsdlss_m3_solve_packed_inplace(f1,pb)==VSDLSS_OK && !memcmp(pb,px,n*8),"%s in-place",name);
+        /* Shared buffer: assembled through the slots, solved in place, read
+           back through the slots -- vsdlss_m3_solve's solution exactly. */
+        csi *slot=malloc(n*sizeof(csi));
+        double *buf=vsdlss_m3_packed_buffer(f1);
+        CHECK(buf && buf==vsdlss_m3_packed_buffer(f1),"%s shared buffer",name);
+        CHECK(vsdlss_m3_export_packed_slots(f1,slot,n)==VSDLSS_OK,"%s slots",name);
+        CHECK(vsdlss_m3_export_packed_slots(f1,slot,n-1)==VSDLSS_ERR_INVALID,"%s short slots",name);
+        if(buf){
+            int zero=1,inv=1; for(csi q=0;q<n;q++){ zero&=buf[q]==0.0; inv&=slot[pp[q]]==q; }
+            CHECK(zero && inv,"%s buffer not zero or slots not inverse",name);
+            for(csi i=0;i<n;i++) buf[slot[i]]=b[i];
+            CHECK(vsdlss_m3_solve_packed_inplace(f1,buf)==VSDLSS_OK,"%s shared solve",name);
+            int eq=1; for(csi i=0;i<n;i++) if(memcmp(&buf[slot[i]],&x1[i],8)) eq=0;
+            CHECK(eq,"%s shared buffer differs from vsdlss_m3_solve",name);
+        }
+        free(slot);
     }
     memcpy(x1,b,n*8); x1[n/3]=0.0/0.0;
     CHECK(vsdlss_m3_solve(f1,x1,x0)==VSDLSS_ERR_NONFINITE,"%s nonfinite",name);
