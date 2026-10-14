@@ -348,6 +348,14 @@ static vsdlss_status PS(dispatch)(const double *a,csi begin,csi width,
 #ifdef VSDLSS_BLAS
     { csi m=solve_blas_min();
       if(m && width>=m && width+ext<INT_MAX) return PS(blas)(a,begin,width,ext,index,x,back); }
+#if PACKED
+    /* Shape thresholds measured on the two 16M cases.  Keep narrow panels
+     * in the built-in kernels; leave forward dispatch and its tree policy
+     * unchanged.  The existing width-based BLAS option takes precedence. */
+    if(back && (width>=16 || (width>=7 && ext>=64)) &&
+       width+ext<INT_MAX && solve_blas_backward())
+        return PS(blas)(a,begin,width,ext,index,x,back);
+#endif
 #endif
     /* Keep large external-row work on the existing parallel path. */
     if(vsdlss_parallel_width((double)width*ext)>1)

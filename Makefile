@@ -138,6 +138,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
+	rm -f test_backward_blas
 	rm -rf build/metis
 	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_tail bench_history bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
@@ -202,7 +203,8 @@ test_small: test/test_small.c $(LIBSRCS) src/vsdlss_small_solve.inc src/vsdlss_p
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_small.c $(LIBSRCS) $(LDLIBS)
 
 test-small: test_small
-	./test_small
+	# This test requires bitwise equality with the built-in full-layout kernels.
+	VSDLSS_BLAS_SOLVE_MIN=0 VSDLSS_BLAS_BACKWARD=0 ./test_small
 
 test: test-small
 
@@ -249,6 +251,7 @@ test-supernodal: test_supernodal
 ifeq ($(BLAS),1)
 	VSDLSS_BLAS_SOLVE_MIN=4 ./test_supernodal
 	VSDLSS_BLAS_SOLVE_MIN=4 VSDLSS_TOP_BRANCHES=0 VSDLSS_FWD_TOP_WORK=1 ./test_supernodal
+	VSDLSS_BLAS_SOLVE_MIN=0 VSDLSS_BLAS_BACKWARD=1 ./test_supernodal
 endif
 
 .PHONY: test-supernodal
@@ -367,3 +370,18 @@ test_relabel: test/test_relabel.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_inte
 test-relabel: test_relabel
 	./test_relabel
 test: test-relabel
+
+# GNU ld wrapping verifies that the opt-in actually selects packed BLAS.
+ifeq ($(BLAS),1)
+BACKWARD_TEST_WRAP := -Wl,--wrap=dtpsv_
+endif
+test_backward_blas: test/test_backward_blas.c $(LIBSRCS) src/vsdlss_panel_solve.inc src/vsdlss_small_solve.inc
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_backward_blas.c $(LIBSRCS) $(BACKWARD_TEST_WRAP) $(LDLIBS)
+
+.PHONY: test-backward-blas
+test-backward-blas: test_backward_blas
+	env -u VSDLSS_BLAS_BACKWARD VSDLSS_BLAS_SOLVE_MIN=0 ./test_backward_blas
+	VSDLSS_BLAS_BACKWARD=0 VSDLSS_BLAS_SOLVE_MIN=0 ./test_backward_blas
+	VSDLSS_BLAS_BACKWARD=1 VSDLSS_BLAS_SOLVE_MIN=0 ./test_backward_blas
+
+test: test-backward-blas

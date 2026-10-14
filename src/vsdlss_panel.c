@@ -70,6 +70,19 @@ static csi solve_blas_min(void)
     }
     return (csi)v;
 }
+/* Opt-in packed backward dispatch, independent of the forward tree policy.
+ * Read once, like the width threshold; configure before the first solve. */
+static int solve_blas_backward(void)
+{
+    static atomic_int cached = -1;
+    int v = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("VSDLSS_BLAS_BACKWARD");
+        v = e && strcmp(e, "1") == 0;
+        atomic_store_explicit(&cached, v, memory_order_relaxed);
+    }
+    return v;
+}
 int vsdlss_panel_solve_uses_blas(void) { return solve_blas_min() > 0; }
 csi vsdlss_panel_solve_blas_min(void) { return solve_blas_min(); }
 /* Diagnostic builds for a BLAS that is not thread safe (see
