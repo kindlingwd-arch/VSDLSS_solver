@@ -194,6 +194,11 @@ BLAS 必须线程安全并在求解器内单线程运行（OpenBLAS 需 `OPENBLA
 BLAS 求解保留树并行（子树并行 + 树顶按分支，`VSDLSS_TOP_BRANCHES` 可切换），见 [blas-tree-solve-20261010](docs/reconstruction/blas-tree-solve-20261010.md)；
 实测、与 CHOLMOD 的对比和注意事项见 [perf-solve-blas-20260923](docs/reconstruction/perf-solve-blas-20260923.md)。
 
+BLAS 构建另提供默认关闭的 `VSDLSS_BLAS_BACKWARD=1`：按块尺寸选择 M3 反向回代的
+`dgemv` / `dtpsv`，保留原正向调度。搭配 `VSDLSS_BLAS_SOLVE_MIN=0` 可单独启用；
+全部因子和计算仍为 double。两个本地 16M case 的交替实测中位耗时分别降低约 3.5% / 6.2%，
+存在波动，未达到耗时减半目标，详见 [验证与限制](docs/reconstruction/backward-blas-20261014.md)。
+
 可选 METIS：`make METIS=1 METIS_CFLAGS=... METIS_LIBS=...`（默认关闭，需 64 位 idx_t）后，排序 6 对低度消元后的核心
 做 METIS 嵌套剖分。相比 AMD，L 少 22–48%，求解快约 20–30%（网格型数据近 2 倍），数值分解快 2–3 倍，但排序每个网多几秒，
 适合同一矩阵反复求解或内存紧张的场景。METIS 5.1 的随机数为全局状态，默认串行调用；以 `-DUSE_GKRAND` 且线程局部随机状态

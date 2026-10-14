@@ -60,3 +60,4 @@
 /bench_tail
 /bench_core
 /bench_history
+/test_backward_blas
