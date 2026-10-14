@@ -34,6 +34,8 @@
 //      packed_slots）：右端项写入 buf[slot[i]]，原地求解，解从 buf[slot[i]]
 //      读出；求解本身没有 gather/scatter。b 已是现成向量，所以写入/读出两步
 //      单独计时（assemble_ms / readback_ms）；真实应用在组装时直接写 slot。
+//      PACKED=2：同上，但求解用 vsdlss_m3_solve_packed(f, buf, buf)：先顺序拷入库的私有
+//      工作向量再求解、拷回（对照：工作向量是哪块内存是否影响求解）。
 //
 //  构建与运行（见 docs/user/QUICKSTART.md 第 7 节）
 //    make METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt -Wl,-rpath,<mkl>/lib' transient_driver
@@ -311,7 +313,8 @@ private:
             for (std::ptrdiff_t i = 0; i < n; ++i) buf[slot[i]] = b[i];
             assemble_ms = msSince(t);
             t = clock::now();
-            check(vsdlss_m3_solve_packed_inplace(f_, buf), "vsdlss_m3_solve_packed_inplace");
+            if (packed_ == 2) check(vsdlss_m3_solve_packed(f_, buf, buf), "vsdlss_m3_solve_packed");   // via the private buffers
+            else check(vsdlss_m3_solve_packed_inplace(f_, buf), "vsdlss_m3_solve_packed_inplace");
             solve_only_ms = msSince(t);
             t = clock::now();
             double* x = x_.data();
@@ -334,7 +337,7 @@ private:
     std::size_t n_ = 0, offCount_ = 0;
     std::vector<csi> upperPos_;
     std::vector<double> x_;
-    bool packed_ = std::getenv("PACKED") && std::atoi(std::getenv("PACKED")) != 0;
+    int packed_ = std::getenv("PACKED") ? std::atoi(std::getenv("PACKED")) : 0;
     std::vector<csi> slot_;
     double* buf_ = nullptr;                              // owned by f_
 };
@@ -384,7 +387,7 @@ int main(int argc, char** argv) {
         std::cout << std::setprecision(6)
                   << "n=" << n << " off_diagonal=" << off << '\n'
                   << "solver=libvsdlss M3 order=6 threads=" << vsdlss_get_num_threads() << " max_team=" << solver.observedThreads()
-                  << (envInt("PACKED", 0) ? " solve=shared packed buffer (assemble/readback timed apart)" : " solve=original order") << '\n'
+                  << (envInt("PACKED", 0) == 2 ? " solve=shared packed buffer, copied through the private buffers (vsdlss_m3_solve_packed)" : envInt("PACKED", 0) ? " solve=shared packed buffer, in place (assemble/readback timed apart)" : " solve=original order") << '\n'
                   << "env MKL_THREADING_LAYER=" << std::getenv("MKL_THREADING_LAYER")
                   << " VSDLSS_BLAS_SOLVE_MIN=" << (std::getenv("VSDLSS_BLAS_SOLVE_MIN") ? std::getenv("VSDLSS_BLAS_SOLVE_MIN") : "(library default)") << '\n'
                   << "numa: " << numa << '\n'

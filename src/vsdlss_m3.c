@@ -1241,6 +1241,24 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
         TRACE("solve: gather",tg);
         if(!(check==0)) { status=VSDLSS_ERR_NONFINITE; goto done; }
     }
+    /* Internal order, not in place: the copies into the component buffers
+     * (and back, below) are contiguous; made here with the whole team for
+     * the same reason. */
+    const int copied=internal==1 && !factor->disk_mode;
+    if(copied) {
+        double tg=trace_now(), check=0;
+        int T=vsdlss_parallel_width((double)factor->n*4); (void)T;
+        VSDLSS_OMP(omp parallel num_threads(T) if(T>1) reduction(+:check))
+        for(csi k=0;k<factor->count;k++) {
+            const double *src=rhs+factor->components->offset[k]; double *dst=ws[k].local;
+            const csi cn=factor->component[k].n;
+            VSDLSS_OMP(omp for schedule(static) nowait)
+            for(csi i=0;i<cn;i++) { double v=src[i]; dst[i]=v; check+=v-v; }
+        }
+        TRACE("solve: gather",tg);
+        if(!(check==0)) { status=VSDLSS_ERR_NONFINITE; goto done; }
+        ctx.pregathered=1;
+    }
     LEDGER_MARK(LG_SETUP,tl);
     double before[LG_OTHER];
     if(lg) memcpy(before,vsdlss_ledger.wall,sizeof before);
@@ -1258,6 +1276,16 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
     for(c=0;c<factor->count;c++) if(results[c]!=VSDLSS_OK) { status=results[c]; goto done; }
     double t0=trace_now();
     if(inplace) ;                               /* solution already in place */
+    else if(copied) {
+        int T=vsdlss_parallel_width((double)factor->n*4); (void)T;
+        VSDLSS_OMP(omp parallel num_threads(T) if(T>1))
+        for(csi k=0;k<factor->count;k++) {
+            const double *src=ws[k].local; double *dst=solution+factor->components->offset[k];
+            const csi cn=factor->component[k].n;
+            VSDLSS_OMP(omp for schedule(static) nowait)
+            for(csi i=0;i<cn;i++) dst[i]=src[i];
+        }
+    }
     else if(ctx.pregathered) perm2_writeback(factor,pl,pbuf,loc,solution,pq);
     else if(inverse) write_back_inverse(&ctx);
     else run_components(factor,factor->disk_mode,scatter_local,&ctx,results);
