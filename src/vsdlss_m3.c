@@ -737,15 +737,15 @@ static vsdlss_status solve_local(void *vctx, csi c)
     vsdlss_status status; int bad=0;
     int gt=vsdlss_parallel_width((double)cn*4); (void)gt;
     double t0=trace_now(), tl=vsdlss_ledger_level()?vsdlss_ledger_now():0;
-    if(x->inplace) {
-        /* No copy: only the finite scan of the caller's vector. */
-        VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
-        for(csi i=0;i<cn;i++) bad|=!isfinite(local[i]);
+    if(x->inplace || x->pregathered) {
+        /* checked (in place) or filled (two-pass gather, internal copy) by
+         * solve_common with the whole team; components run concurrently,
+         * so a scan here would get one thread each */
     } else if(x->internal) {
         const double *src=x->rhs+x->f->components->offset[c];
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
         for(csi i=0;i<cn;i++) { double v=src[i]; local[i]=v; bad|=!isfinite(v); }
-    } else if(!x->pregathered) {
+    } else {
         const idxmap map=component_map(x->f,c); const double *rhs=x->rhs;
         VSDLSS_OMP(omp parallel for num_threads(gt) if(gt>1) schedule(static) reduction(|:bad))
         for(csi i=0;i<cn;i++) { double v=rhs[im_at(map,i)]; local[i]=v; bad|=!isfinite(v); }
@@ -1228,6 +1228,18 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
             if(bad) { status=VSDLSS_ERR_NONFINITE; goto done; }
             ctx.pregathered=1;
         }
+    }
+    if(inplace) {
+        /* The in-place RHS check, with the whole team before the components
+         * run (concurrently, one thread each for such a loop).  x - x is +0
+         * for finite x and NaN otherwise, so the sum is 0 exactly when every
+         * entry is finite; x is not modified when it is not. */
+        double tg=trace_now(), check=0; const double *v=rhs;
+        int T=vsdlss_parallel_width((double)factor->n*4); (void)T;
+        VSDLSS_OMP(omp parallel for num_threads(T) if(T>1) schedule(static) reduction(+:check))
+        for(csi i=0;i<factor->n;i++) check+=v[i]-v[i];
+        TRACE("solve: gather",tg);
+        if(!(check==0)) { status=VSDLSS_ERR_NONFINITE; goto done; }
     }
     LEDGER_MARK(LG_SETUP,tl);
     double before[LG_OTHER];
