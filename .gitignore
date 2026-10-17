@@ -60,6 +60,7 @@
 /bench_components
 /bench_phase
 /bench_overlap
+/export_pipeline
 /bench_tail
 /bench_core
 /bench_history

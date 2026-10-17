@@ -5,10 +5,17 @@
 #ifndef VSDLSS_BENCH_INPUT_H
 #define VSDLSS_BENCH_INPUT_H
 
+/* Not every program uses every helper. */
+#if defined(__GNUC__)
+#define BENCH_MAYBE_UNUSED __attribute__((unused))
+#else
+#define BENCH_MAYBE_UNUSED
+#endif
+
 /* VSDLSS_INTERLEAVE=1: interleave the process's memory over the online NUMA
  * nodes (as numactl --interleave=all), which also keeps the kernel's
  * automatic NUMA balancing from scanning it (see examples/transient_driver). */
-static void interleave_memory(void)
+BENCH_MAYBE_UNUSED static void interleave_memory(void)
 {
     const char *e = getenv("VSDLSS_INTERLEAVE");
     if (!e || atoi(e) == 0) { puts("# numa: off (VSDLSS_INTERLEAVE=1 to interleave)"); return; }
@@ -33,11 +40,11 @@ static void interleave_memory(void)
 #endif
 }
 
-static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
-static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+BENCH_MAYBE_UNUSED static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+BENCH_MAYBE_UNUSED static int cmpd(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 
 typedef struct { csi a, b; double w; } gedge;
-static int cmp_edge(const void *x, const void *y)
+BENCH_MAYBE_UNUSED static int cmp_edge(const void *x, const void *y)
 {
     const gedge *p = x, *q = y;
     if (p->b != q->b) return (p->b > q->b) - (p->b < q->b);
@@ -45,7 +52,7 @@ static int cmp_edge(const void *x, const void *y)
 }
 
 /* Upper CSC of the grid-of-chains Laplacian, slightly grounded. */
-static vsdlss *grid_chains(csi side, csi chain)
+BENCH_MAYBE_UNUSED static vsdlss *grid_chains(csi side, csi chain)
 {
     csi n = side * side, e = 0, maxe = 2 * side * (side - 1) * (chain + 1);
     gedge *ed = malloc((size_t)maxe * sizeof(*ed));
@@ -73,7 +80,7 @@ static vsdlss *grid_chains(csi side, csi chain)
     return A;
 }
 
-static vsdlss *read_dump(const char *path)
+BENCH_MAYBE_UNUSED static vsdlss *read_dump(const char *path)
 {
     FILE *fp = fopen(path, "rb"); int64_t n, nz;
     if (!fp || fread(&n, 8, 1, fp) != 1 || fread(&nz, 8, 1, fp) != 1) { if (fp) fclose(fp); return NULL; }
@@ -87,7 +94,7 @@ static vsdlss *read_dump(const char *path)
 /* text:DIR -- the files of examples/transient_driver: DIR/diag.txt ("value" or
  * "i value" per line) and DIR/data.txt ("row col value", strict upper,
  * zero-based).  Blank lines and lines starting with '#' are skipped. */
-static int text_line(FILE *f, char **buf, size_t *cap)
+BENCH_MAYBE_UNUSED static int text_line(FILE *f, char **buf, size_t *cap)
 {
     for (;;) {
         if (getline(buf, cap, f) < 0) return 0;
@@ -95,7 +102,7 @@ static int text_line(FILE *f, char **buf, size_t *cap)
         if (*s && *s != '\n' && *s != '\r' && *s != '#') return 1;
     }
 }
-static vsdlss *read_text(const char *dir)
+BENCH_MAYBE_UNUSED static vsdlss *read_text(const char *dir)
 {
     char path[4096]; char *line = NULL; size_t cap = 0;
     snprintf(path, sizeof path, "%s/diag.txt", dir);
@@ -148,7 +155,7 @@ static vsdlss *read_text(const char *dir)
 }
 
 /* "dump.bin" | "grid:SIDE[:CHAIN]" | "text:DIR" */
-static vsdlss *read_input(const char *spec)
+BENCH_MAYBE_UNUSED static vsdlss *read_input(const char *spec)
 {
     if (!strncmp(spec, "grid:", 5)) {
         csi side = atol(spec + 5), chain = 3; const char *c = strchr(spec + 5, ':');

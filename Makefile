@@ -139,7 +139,7 @@ src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src
 
 clean:
 	rm -rf build/metis
-	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_overlap bench_tail bench_history bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_overlap export_pipeline bench_tail bench_history bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -309,6 +309,10 @@ bench_phase: test/bench_phase.c test/bench_input.h $(LIBSRCS) include/vsdlss.h s
 # at the same time, cost of H^T b and z - H x (see test/bench_overlap.c).
 bench_overlap: test/bench_overlap.c test/bench_input.h $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_overlap.c $(LIBSRCS) $(LDLIBS) -lpthread
+
+# Structure for the pipelined-solve analysis (tools/pipeline_analysis.py).
+export_pipeline: test/export_pipeline.c test/bench_input.h $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/export_pipeline.c $(LIBSRCS) $(LDLIBS)
 
 # Components + weighted adjacency phase alone, thread sweep, bitwise check:
 #   ./bench_components SIDE[:CHAIN[:NETS]] "threads" [reps] [shuffle]
