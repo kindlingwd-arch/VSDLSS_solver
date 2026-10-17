@@ -1259,6 +1259,7 @@ typedef struct {
     atomic_int *left;    /* forward: children in the top still to finish, per top panel */
     double task_work;    /* backward */
     int *bad;            /* shared: atomic updates */
+    const vsdlss_sn_bwd_hook *hook;   /* backward: told of every finished panel (or NULL) */
 } top_ctx;
 
 static inline void top_fail(const top_ctx *g, int e)
@@ -1296,7 +1297,10 @@ static void backward_subtree(const top_ctx *g, csi k)
     const tree_info *t = g->t;
     const csi lo = t->first[t->order[k]];
     int e = 0;
-    for (csi q = k; q >= lo && !e; --q) e = backward_panel(g->f, t->order[q], g->x);
+    for (csi q = k; q >= lo && !e; --q) {
+        e = backward_panel(g->f, t->order[q], g->x);
+        if (!e && g->hook) g->hook->done(g->hook->ctx, t->order[q]);
+    }
     if (e) top_fail(g, e);
 }
 
@@ -1355,6 +1359,7 @@ static void backward_branch(const top_ctx *g, csi k)
         if (top_failed(g)) return;
         if (g->sp->in_sub[d]) { backward_subtree(g, k); return; }
         if ((e = backward_panel(g->f, d, g->x))) { top_fail(g, e); return; }
+        if (g->hook) g->hook->done(g->hook->ctx, d);
         k = backward_kids(g, k - 1, t->first[d]);
     }
 }
@@ -1369,7 +1374,8 @@ long vsdlss_sn_tree_solves(int kind)
  * tree in order or by branches (forward: subtrees first; backward: top
  * first).  The tree and the split for nt come from the factor's cache when
  * it has one. */
-static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, const blas_fwd *bf)
+static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, const blas_fwd *bf,
+                                const vsdlss_sn_bwd_hook *hook)
 {
     csi count = f->count;
     tree_info local_t; const tree_info *t; int bad = 0;
@@ -1419,7 +1425,7 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
     int branches = top_branches_mode();
     if (branches < 0) branches = bf ? 3 : 0;
     if (nt_top < 2) branches = 0;
-    top_ctx g = { f, t, sp, x, bf, NULL, bwd_task_work(), &bad };
+    top_ctx g = { f, t, sp, x, bf, NULL, bwd_task_work(), &bad, hook };
     atomic_int left_stack[256], *left_heap = NULL;
     if ((branches & 1) && !sp->tpos) branches &= ~1;
     if ((branches & 1) && sp->ntop > 256 &&
@@ -1503,16 +1509,37 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
         VSDLSS_OMP(omp parallel num_threads(nt_top))
         VSDLSS_OMP(omp single)
         {
+            if (hook && hook->start) hook->start(hook->ctx);
             const csi last = backward_kids(&g, count - 1, 0);
             if (last >= 0) backward_branch(&g, last);
         }
     } else
     for (csi k = count - 1; k >= 0 && !bad; --k)
-        if (!in_sub[t->order[k]]) bad |= backward_panel(f, t->order[k], x);
+        if (!in_sub[t->order[k]]) {
+            bad |= backward_panel(f, t->order[k], x);
+            if (!bad && hook) hook->done(hook->ctx, t->order[k]);
+        }
 #ifdef _OPENMP
     if (prof) tp[3] = omp_get_wtime();
 #endif
-    if (!bad && !(branches & 2)) {
+    if (!bad && !(branches & 2) && hook) {
+        /* As below, on the whole team: the hook's tasks (work released by
+         * finished panels) run on the threads the subtrees leave free. */
+        int badh = 0;
+        VSDLSS_OMP(omp parallel num_threads(nt_top) reduction(|:badh))
+        {
+            VSDLSS_OMP(omp single nowait)
+            { if (hook->start) hook->start(hook->ctx); }
+            VSDLSS_OMP(omp for schedule(dynamic,1))
+            for (csi i = 0; i < nsub; ++i)
+                for (csi k = sub_end[i]; !badh && k >= t->first[sub[i]]; --k) {
+                    const csi d = t->order[k];
+                    badh |= backward_panel(f, d, x);
+                    if (!badh) hook->done(hook->ctx, d);
+                }
+        }
+        bad |= badh;
+    } else if (!bad && !(branches & 2)) {
         /* The subtree is order[first[root] .. sub_end] with the root last;
          * walk it backwards so parents precede children. */
         VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1) reduction(|:bad))
@@ -1545,6 +1572,9 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
 }
 
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
+{ return vsdlss_sn_solve_inplace_hooked(f, x, NULL); }
+
+vsdlss_status vsdlss_sn_solve_inplace_hooked(const vsdlss_sn_factor *f, double *x, const vsdlss_sn_bwd_hook *hook)
 {
     if (!f || !x || f->n < 1) return VSDLSS_ERR_INVALID;
     int nt = vsdlss_parallel_width((double)f->l_nnz * 2);
@@ -1578,7 +1608,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
     const int lg = vsdlss_ledger_level();
     if (nt > 1 && f->count > 1 && f->sn_parent && f->blk_ptr) {
         double t0 = lg ? vsdlss_ledger_now() : 0;
-        vsdlss_status st = solve_tree(f, x, nt, bf);
+        vsdlss_status st = solve_tree(f, x, nt, bf, hook);
 #ifdef VSDLSS_BLAS
         if (tbuf) free(atomic_exchange(&c->tpool, tbuf));   /* keep ours, drop a concurrent solve's */
 #endif
@@ -1602,6 +1632,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
                     ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
                 uint64_t c1 = vsdlss_ledger_tsc();
                 if (st != VSDLSS_OK) return st;
+                if (back && hook) hook->done(hook->ctx, sn);
                 int k = vsdlss_ledger_bucket(w);
                 vsdlss_ledger.bucket_s[back][k] += (double)(c1 - c0) * tick;
                 vsdlss_ledger.bucket_n[back][k]++;
@@ -1620,6 +1651,7 @@ vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
             vsdlss_status st = vsdlss_sn_panel_solve(f->panel + f->panel_offset[sn], b, w, ext,
                 ext ? f->row_index + f->row_ptr[sn] : NULL, x, back);
             if (st != VSDLSS_OK) return st;
+            if (back && hook) hook->done(hook->ctx, sn);
         }
         if (lg) vsdlss_ledger.wall[back ? LG_CORE_BWD : LG_CORE_FWD] += vsdlss_ledger_now() - t0;
     }
