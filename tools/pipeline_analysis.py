@@ -11,7 +11,9 @@ replay units) and answers, per component:
   3. a schedule simulation on P threads (the core on at most --core-max of
      them): the current order with a wait between the four phases
      (forward replay, core forward, core backward, backward replay) against
-     the same tasks run as soon as their inputs are ready.
+     the same tasks run as soon as their inputs are ready -- on the forward
+     side only (replay with core forward), on the backward side only (core
+     backward with replay), and on both.
 
 Task costs: replay units by records, core supernodes by stored entries,
 calibrated so that the phase-by-phase simulation matches the measured times
@@ -202,41 +204,54 @@ def analyse(hdr, parent, work, units, a):
     _, t_brep = phase([rec[i] * ab for i in range(U)], [], False, P, CM)
     barrier = t_frep + t_cf + t_cb + t_brep
     # dataflow graph: F units | CF supernodes | CB supernodes | B units (+ barriers)
-    F0, CF0, CB0, B0 = 0, U, U + S, U + 2 * S
-    nt = U + 2 * S + U + 2
-    BAR_F, BAR_B = nt - 2, nt - 1          # blocks -> tail (forward), tail -> blocks (backward)
-    dur = [0.0] * nt; core = [False] * nt
-    for i in range(U):
-        dur[F0 + i] = rec[i] * af; dur[B0 + i] = rec[i] * ab
-    for s in range(S):
-        dur[CF0 + s] = work[s] * kf; dur[CB0 + s] = work[s] * kb
-        core[CF0 + s] = core[CB0 + s] = True
-    E = []
-    for b in blocks:
-        E.append((F0 + b, BAR_F)); E.append((BAR_B, B0 + b))
-    for t_ in tails:
-        E.append((BAR_F, F0 + t_)); E.append((B0 + t_, BAR_B))
-    for i in range(U):
-        for s in units[i][3]:
-            E.append((F0 + i, CF0 + s))      # its updates reach core column s
-            E.append((CB0 + s, B0 + i))      # it reads core values of s
-    for s in range(S):
-        p = parent[s]
-        if 0 <= p < S:
-            E.append((CF0 + s, CF0 + p)); E.append((CB0 + p, CB0 + s))
-        else:
-            E.append((CF0 + s, CB0 + s))     # root: backward after its forward
-    for i in range(U):                       # a unit's backward after its own forward
-        E.append((F0 + i, B0 + i))
-    succ = [[] for _ in range(nt)]; indeg = [0] * nt
-    for x, y in E:
-        succ[x].append(y); indeg[y] += 1
-    pr = list(range(nt))                     # forward units in the chosen order, before the backward units
-    for k, i in enumerate(order):
-        pr[F0 + i] = k
-    for s_ in range(S):                      # core: forward bottom-up, backward top-down
-        pr[CF0 + s_] = po[s_]; pr[CB0 + s_] = S - po[s_]
-    _, pipe = simulate(dur, core, succ, indeg, pr, P, CM)
+    def dataflow(mode):
+        """mode: 'both' -- every task as soon as its inputs are ready;
+        'fwd' -- only the forward side overlaps (forward replay with the
+        core forward), the backward replay waits for the whole core backward;
+        'bwd' -- only the backward side overlaps, the core forward waits for
+        the whole forward replay."""
+        F0, CF0, CB0, B0 = 0, U, U + S, U + 2 * S
+        nt = U + 2 * S + U + 4
+        BAR_F, BAR_B, BAR_X, BAR_C = nt - 4, nt - 3, nt - 2, nt - 1
+        dur = [0.0] * nt; core = [False] * nt
+        for i in range(U):
+            dur[F0 + i] = rec[i] * af; dur[B0 + i] = rec[i] * ab
+        for s in range(S):
+            dur[CF0 + s] = work[s] * kf; dur[CB0 + s] = work[s] * kb
+            core[CF0 + s] = core[CB0 + s] = True
+        E = []
+        for b in blocks:                     # blocks before the tail (forward), after it (backward)
+            E.append((F0 + b, BAR_F)); E.append((BAR_B, B0 + b))
+        for t_ in tails:
+            E.append((BAR_F, F0 + t_)); E.append((B0 + t_, BAR_B))
+        for i in range(U):
+            for s in units[i][3]:
+                E.append((F0 + i, CF0 + s))      # its updates reach core column s
+                E.append((CB0 + s, B0 + i))      # it reads core values of s
+        for s in range(S):
+            p = parent[s]
+            if 0 <= p < S:
+                E.append((CF0 + s, CF0 + p)); E.append((CB0 + p, CB0 + s))
+            else:
+                E.append((CF0 + s, CB0 + s))     # root: backward after its forward
+        for i in range(U):                       # a unit's backward after its own forward
+            E.append((F0 + i, B0 + i))
+        if mode == "bwd":                        # core forward after the whole forward replay
+            E += [(F0 + i, BAR_X) for i in range(U)] + [(BAR_X, CF0 + s) for s in range(S)]
+        if mode == "fwd":                        # backward replay after the whole core backward
+            E += [(CB0 + s, BAR_C) for s in range(S)] + [(BAR_C, B0 + i) for i in range(U)]
+        succ = [[] for _ in range(nt)]; indeg = [0] * nt
+        for x, y in E:
+            succ[x].append(y); indeg[y] += 1
+        pr = list(range(nt))                     # forward units in the chosen order, before the backward units
+        for k, i in enumerate(order):
+            pr[F0 + i] = k
+        for s_ in range(S):                      # core: forward bottom-up, backward top-down
+            pr[CF0 + s_] = po[s_]; pr[CB0 + s_] = S - po[s_]
+        return simulate(dur, core, succ, indeg, pr, P, CM)[1]
+
+    modes = [(m, dataflow(m)) for m in ("fwd", "bwd", "both")]
+    now = t_frep + a.core + t_brep               # the core as measured now, at P threads
 
     print("component %d: n %d, records %d, core %d in %d supernodes, %d block segments, %d tail units" %
           (hdr["component"], hdr["n"], hdr["records"], hdr["core"], S, len(blocks), len(tails)))
@@ -246,9 +261,15 @@ def analyse(hdr, parent, work, units, a):
           "  ".join("%d%%: %4.1f%%" % (100 * m, 100 * v) for m, v in zip(marks, fcurve)))
     print("  2. backward replay ready when the core backward is      " +
           "  ".join("%d%%: %4.1f%%" % (100 * m, 100 * v) for m, v in zip(marks, bcurve)))
-    print("  3. whole solve: phases with waits %.1f ms | dataflow %.1f ms | saving %.1f ms (%.1f%%)"
-          % (barrier, pipe, barrier - pipe, 100 * (barrier - pipe) / barrier if barrier else 0))
-    return barrier, pipe
+    print("  3. whole solve (replays + core, one net, ms):")
+    print("       now, phases with waits, core as measured (%.1f ms)   %6.1f" % (a.core, now))
+    if a.core_cap:
+        print("       phases with waits, core at %d threads (%.1f ms)   %6.1f  (%+.1f)" % (CM, a.core_cap, barrier, barrier - now))
+    names = {"fwd": "forward side only  (replay -> core fwd)", "bwd": "backward side only (core bwd -> replay)",
+             "both": "both sides"}
+    for m, t in modes:
+        print("       dataflow, %-40s %6.1f  (%+.1f ms, %+.1f%%)" % (names[m], t, t - now, 100 * (t - now) / now if now else 0))
+    return now, dict(modes)
 
 
 def main():
