@@ -19,8 +19,9 @@ static double seconds_now(void)
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "usage: %s [-p 0|1|2|3|4|5] [--text-dump dir] [--demo-rhs] [--disk-budget bytes] [--temp-dir path] [--block-cols n] [--save-factor path] [--load-factor path] [--m3] [--m4-reduced] [--dag] [--threads n] <job>\n", program);
-    fprintf(stderr, "  -p: 0/5 = AMD (default, recommended), 1 = RCM, 2 = natural, 3 = minimum degree, 4 = MLD\n");
+    fprintf(stderr, "usage: %s [-p 0|1|2|3|4|5|6] [--text-dump dir] [--demo-rhs] [--disk-budget bytes] [--temp-dir path] [--block-cols n] [--save-factor path] [--load-factor path] [--m3] [--m4-reduced] [--dag] [--threads n|auto] <job>\n", program);
+    fprintf(stderr, "  -p: 0/5 = AMD (default), 1 = RCM, 2 = natural, 3 = minimum degree, 4 = MLD, 6 = METIS (--m3, built with make METIS=1)\n");
+    fprintf(stderr, "  --threads: default auto (VSDLSS_NUM_THREADS if set, else OMP_NUM_THREADS / the CPUs this process may use)\n");
     fprintf(stderr, "  --text-dump: read diag.txt, data.txt, b_vector.txt, x_vector.txt from dir; <job> is the .rsl output prefix\n");
 }
 
@@ -31,7 +32,7 @@ int main(int argc, char **argv)
     size_t disk_budget=0;
     int disk_mode=0, m3_mode=0, reduced_mode=0;
     csi block_cols=8;
-    int threads=1;
+    int threads=-1;                     /* -1: not given, 0: auto */
     int explicit_cols=0;
     const char *save_factor=NULL, *load_factor=NULL;
     vsdlss_m3_factor *m3_factor=NULL;
@@ -47,7 +48,7 @@ int main(int argc, char **argv)
     for(arg=1;arg<argc;++arg){
         if(strcmp(argv[arg],"-p")==0){
             if(++arg>=argc){usage(argv[0]);return 2;}
-            if(strlen(argv[arg])!=1 || argv[arg][0]<'0' || argv[arg][0]>'5'){usage(argv[0]);return 2;}
+            if(strlen(argv[arg])!=1 || argv[arg][0]<'0' || argv[arg][0]>'6'){usage(argv[0]);return 2;}
             order=argv[arg][0]-'0';
         }else if(strcmp(argv[arg],"--disk-budget")==0){
             char *end; uintmax_t value;
@@ -60,6 +61,7 @@ int main(int argc, char **argv)
         }else if(strcmp(argv[arg],"--threads")==0){
             char *end; long value;
             if(++arg>=argc){usage(argv[0]);return 2;}
+            if(strcmp(argv[arg],"auto")==0){threads=0;continue;}
             errno=0;value=strtol(argv[arg],&end,10);
             if(errno||end==argv[arg]||*end||value<1||value>1024){usage(argv[0]);return 2;}
             threads=(int)value;
@@ -95,7 +97,9 @@ int main(int argc, char **argv)
        (m3_mode&&disk_mode) || (load_factor&&(save_factor||explicit_cols||temp_dir)) ||
        (text_dump&&allow_missing_rhs)){usage(argv[0]);return 2;}
     load_start=seconds_now();
-    status=vsdlss_set_num_threads(threads);
+    /* --threads n|auto; without it VSDLSS_NUM_THREADS if set, else automatic */
+    if(threads<0&&!getenv("VSDLSS_NUM_THREADS"))threads=0;
+    status=threads>=0?vsdlss_set_num_threads(threads):VSDLSS_OK;
     if(status!=VSDLSS_OK)goto done;
     if(text_dump)status=vsdlss_load_text_dump(text_dump,&A,&rhs,&reference);
     else status=vsdlss_load_job(job,allow_missing_rhs,&A,&rhs);
@@ -180,7 +184,7 @@ done:
                stats.multi_column_blocks,stats.max_columns,stats.numeric_workspace_bytes,
                stats.block_reads,stats.block_writes);
     }
-    if(status==VSDLSS_OK)printf("threads_requested=%d max_team_used=%d\n",threads,vsdlss_parallel_last_team_size());
+    if(status==VSDLSS_OK)printf("threads_requested=%d max_team_used=%d\n",vsdlss_get_num_threads(),vsdlss_parallel_last_team_size());
     vsdlss_m4_reduced_free(reduced_factor);
     vsdlss_m3_factor_free(m3_factor);
     vsdlss_m4_factor_free(disk_factor);vsdlss_factor_free(factor);vsdlss_spfree(A);free(rhs);free(solution);free(reference);

@@ -63,7 +63,17 @@ typedef struct vsdlss_order_stats
     csi separator_count;
 } vsdlss_order_stats;
 
-/* Per-calling-thread policy; default 1; never changes global OpenMP settings.
+/* Thread count of the factorizations and solves called from this thread
+ * (per calling thread; never changes global OpenMP settings).
+ *   vsdlss_set_num_threads(n): n threads (1..1024); 0 = automatic, the
+ *     OpenMP default team size, which follows OMP_NUM_THREADS and the
+ *     process's CPU affinity (taskset, container cpusets), capped on Linux
+ *     at the physical cores allowed (hardware threads do not add bandwidth).
+ *   A thread that never calls it uses VSDLSS_NUM_THREADS (a number, or
+ *     "auto" / 0 for automatic), else 1.  The variable is read once.
+ * Results are the same bits for every thread count.  The solve is memory
+ * bandwidth bound: past what the memory system can feed, more threads do
+ * not help; compare a few counts on the target machine.
  * last_team_size is the largest observed team since the last setter call.
  * OpenMP runtime memory is not part of the M4 numeric workspace budget.
  */
@@ -101,6 +111,32 @@ vsdlss_status vsdlss_m3_export_packed_permutation(const vsdlss_m3_factor *factor
                                                    csi *packed_to_global, csi length);
 vsdlss_status vsdlss_m3_solve_packed(const vsdlss_m3_factor *factor,
                                     const double *rhs, double *solution);
+/* In-place variant of vsdlss_m3_solve_packed: x (packed order) holds the
+ * RHS on entry and the solution on success, without the input/output
+ * copies.  A non-finite RHS is rejected before x is modified; other
+ * failures may leave x partially updated.  Not for disk-mode factors. */
+vsdlss_status vsdlss_m3_solve_packed_inplace(const vsdlss_m3_factor *factor, double *x);
+/* Shared packed buffer (no gather/scatter, no copies).  The factor owns one
+ * vector of n doubles in packed order, freed by vsdlss_m3_factor_free and
+ * placed for the solver's threads (zeroed on first request).  Export the
+ * slots once; the application then assembles the RHS straight into it and
+ * reads the solution from it:
+ *     double *buf = vsdlss_m3_packed_buffer(f);
+ *     vsdlss_m3_export_packed_slots(f, slot, n);      // slot[i]: position of unknown i
+ *     ... buf[slot[i]] = b_i (or += per stamped element) ...
+ *     vsdlss_m3_solve_packed_inplace(f, buf);
+ *     ... x_i = buf[slot[i]] ...
+ * After a solve the buffer holds the solution; overwrite (or zero) it
+ * before assembling the next RHS.  A new factor has its own buffer and slots.
+ * This saves the solver's gather/scatter only when the application writes
+ * entries there while it assembles (stamping per element); permuting a
+ * finished vector into the buffer costs more than vsdlss_m3_solve's own
+ * blocked gather.  vsdlss_m3_solve and the other entry points are unchanged.
+ * Results are bitwise those of vsdlss_m3_solve.  One solve at a time per
+ * buffer; NULL for disk-mode factors or when out of memory. */
+double *vsdlss_m3_packed_buffer(vsdlss_m3_factor *factor);
+vsdlss_status vsdlss_m3_export_packed_slots(const vsdlss_m3_factor *factor,
+                                            csi *global_to_packed, csi length);
 /* Same order and implementation under the names of the other branch:
  * vsdlss_m3_internal_order(f, perm) equals
  * vsdlss_m3_export_packed_permutation(f, perm, n), and

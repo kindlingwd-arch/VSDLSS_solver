@@ -282,11 +282,11 @@ int main(int argc,char **argv)
         if (!lev || !elim || !lay) { puts("alloc failed"); return 1; }
         for (csi v = 0; v < r->n; v++) elim[v] = -1;
         csi o = 0;
-        for (csi i = 0; i < g->count; i++) { elim[g->head[i] & 0x3fffffffu] = i; o += (csi)(g->head[i] >> 30); }
+        for (csi i = 0; i < g->count; i++) { elim[vsdlss_pk_vertex(g, i)] = i; o += vsdlss_pk_degree(g, i); }
         /* forward: record i waits for every earlier record that updates its vertex */
         csi fmax = 0; o = 0;
         for (csi i = 0; i < g->count; i++) {
-            uint32_t hd = g->head[i]; csi d = (csi)(hd >> 30), v = hd & 0x3fffffffu, L = lev[v];
+            csi d = vsdlss_pk_degree(g, i), v = vsdlss_pk_vertex(g, i), L = lev[v];
             if (L > fmax) fmax = L;
             for (csi j = 0; j < d; j++) { csi w = g->nb[o + j]; if (elim[w] > i && lev[w] < L + 1) lev[w] = L + 1; }
             o += d;
@@ -295,7 +295,7 @@ int main(int argc,char **argv)
         memset(lev, 0, (size_t)r->n * sizeof(csi));
         csi bmax = 0; o = g->nbn;
         for (csi i = g->count; i > 0;) {
-            i--; uint32_t hd = g->head[i]; csi d = (csi)(hd >> 30), v = hd & 0x3fffffffu, L = 0;
+            i--; csi d = vsdlss_pk_degree(g, i), v = vsdlss_pk_vertex(g, i), L = 0;
             o -= d;
             for (csi j = 0; j < d; j++) { csi w = g->nb[o + j]; if (elim[w] > i && lev[w] + 1 > L) L = lev[w] + 1; }
             lev[v] = L; lay[L < g->count ? L : g->count]++; if (L > bmax) bmax = L;

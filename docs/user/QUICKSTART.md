@@ -117,3 +117,54 @@ make dist
 静态库不意味着所有运行时静态链接：默认仍需平台的 libm/OpenMP 运行时。这里交付源码发行包和构建方法，不声明跨平台二进制 ABI 稳定，也不擅自增加许可证授权。
 
 发布验收：解压包 → make clean → make smoke → make test；在接收方目标平台重复验证。M5 测试通过只表示适配器/gate 自检通过，不表示原版兼容已验收。
+
+## 6. METIS 排序与大规模求解的推荐构建
+
+仓库自带 METIS 5.1.0（`third_party/metis-5.1.0`，Apache 2.0，64 位 `idx_t`，GKlib 随机数状态改为线程局部，见其中的 `README.vsdlss.md`）。`make METIS=1` 会自动把它编译到 `build/metis/libmetis.a`，并让 VDD/GND 两个网的排序并发执行；也可以用 `METIS_CFLAGS`/`METIS_LIBS` 指向外部 METIS（必须是 64 位 `idx_t`）。
+
+```sh
+make -j8 METIS=1 test
+make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt' test   # 可选：MKL 用于分解中的宽超节点
+```
+
+C 接口用 `vsdlss_factorize_m3(A, 6, &f)` 选择 METIS，命令行用 `vsdlss_solver --m3 -p 6`。自己的程序链接 `libvsdlss.a` 时，同时链接 `build/metis/libmetis.a`，编译选项加 `-fopenmp -DVSDLSS_METIS -DVSDLSS_METIS_THREADSAFE`。
+
+线程数：`vsdlss_set_num_threads(n)` 只对调用它的线程生效，`n = 0` 为自动（OpenMP 默认线程数，遵守 `OMP_NUM_THREADS` 与 taskset/容器的 CPU 限制；Linux 上不超过可用的物理核数，超线程对带宽受限的求解没有帮助）；从未调用过的线程用环境变量 `VSDLSS_NUM_THREADS`（数字或 `auto`），没有设置时为 1。命令行 `--threads` 默认 `auto`。不同线程数的解逐位相同；求解受内存带宽限制，线程多到一定程度不再变快，建议在目标机器上比较几个线程数（`tools/diag_solve.sh`）。
+
+运行时：带 BLAS 构建时用单线程 BLAS（MKL：`MKL_THREADING_LAYER=SEQUENTIAL`）。BLAS 求解现在保留树并行，不必再设 `VSDLSS_BLAS_SOLVE_MIN=0`；2 线程实测不慢于内置内核，更多线程下根分隔子面板仍是单线程，建议在目标机器上对比 `VSDLSS_BLAS_SOLVE_MIN=0` 后选取（见 [blas-tree-solve-20261010](../reconstruction/blas-tree-solve-20261010.md)）；多路服务器建议 `OMP_PROC_BIND=spread OMP_PLACES=cores`。
+
+## 7. 瞬态驱动示例与大规模性能排查
+
+`examples/transient_driver.cpp`（C++17）：读文本矩阵与右端项，分解一次，对第 1..N 步右端项反复求解并与参考解比较；文件格式与 `SolveCase` 语义见文件头注释。
+
+```sh
+make -j8 METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt -Wl,-rpath,<mkl>/lib' transient_driver
+VSDLSS_THREADS=32 OMP_PROC_BIND=spread OMP_PLACES=cores ./transient_driver diag.txt data.txt
+```
+
+输出分别给出分解时间、第一次求解（冷，含缺页与求解计划构建）和后续各步求解（热）的时间与中位数；性能比较请用热求解。每步还给出缺页次数：`major_faults` 大于 0 说明在换页。
+
+**几千万结点时，调用方内存往往比求解器本身更关键**：6400 万结点双网，求解器约需 17–18 GB；若调用方把文本整行读成字符串数组、用 `std::set` 去重、同时保留原矩阵和多份右端项，额外会多出约 8 GB（装载期间更多），在 20 GB 的机器上就会换页，求解慢数倍，且时间随线程数近似线性变化。该示例逐行解析、建完 CSC 即释放中间数据，4M 用例上峰值内存 1.70 → 1.05 GB。`CHECK_RESIDUAL=0` 再省下 CSC（nnz × 16 字节）。
+
+求解偏慢时，用 `tools/diag_solve.sh` 一次收集机器、环境变量、实际加载的 OpenMP/MKL 库，并在当前环境与推荐环境下扫描线程数、打开分阶段计时：
+
+```sh
+tools/diag_solve.sh "./transient_driver diag.txt data.txt"    # 线程数由 VSDLSS_THREADS 控制
+tools/diag_solve.sh "./vsdlss_solver --m3 --threads {T} job"  # {T} 换成各线程数
+```
+
+常见原因：没设 `MKL_THREADING_LAYER=SEQUENTIAL`（实测求解慢约 2 倍，同时加载 `libiomp5` 与 `libgomp` 时更糟）；内存不足换页；容器限制了可用核数（`nproc`）；双路机器内存集中在一个 NUMA 节点（试 `numactl --interleave=all`）。
+
+**低度消元的串行尾部**：在大量导线链、长电源轨的电网上，低度消元的记录几乎都落在块并行之外的“尾部”（`VSDLSS_TRACE=1` 输出 `tail ... records, N windows, ... chunks, deferred core updates ...`）。
+
+- **默认的窗口调度**：
+  - 尾部按互不相关的连通块分给各线程，每块由一个线程按原顺序回放，通常整个尾部只需一个窗口、只同步一次。
+  - 多个块共用的 core 结点，其累加先暂存，尾部做完后再按原消元顺序补上，所以结果与串行逐位相同。
+  - 6100 万结点双网，32 线程：热求解 2.1 s →（按层并行）0.29 s →（窗口调度）0.17 s；分解时间基本不变，求解时常驻内存少约 2.5 GB。
+- `VSDLSS_TAIL_WINDOWS`：窗口内最大连通块不超过窗口记录数的 1/K，默认 K=64。设为 0 时改用按冲突层并行（每层同步一次），用于对比。
+- `VSDLSS_TAIL_GRAIN`：按层并行时每线程每层至少处理的记录数，默认 2048；每层记录很少时自动串行，避免同步开销。
+- `VSDLSS_TAIL_MIN=999999999999`：关闭尾部并行，用于对比。
+- `VSDLSS_CHAIN_ORDER=1`（默认关闭）：把度为 2 的导线链连续编号，使更多记录进入块并行。
+  - 同一用例：按层并行时尾部从 99.6% 降到 69.2%，热求解约 290 → 241 ms；与窗口调度一起用时约 170 → 150–160 ms。
+  - 消元顺序改变，结果不再与默认设置逐位相同（rel_err 2.75e-12 → 2.97e-12）。
+  - 其他电网的效果不一，建议先在目标用例上对比。

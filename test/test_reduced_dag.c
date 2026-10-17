@@ -83,7 +83,7 @@ int main(void){
   CHECK(vsdlss_sn_factorize(a,s,&many)==VSDLSS_OK);
   printf("DAG threads=%d numeric_ms=%.3f supernodes=%lld\n",nt,1000*(now()-start),(long long)s->count);
   CHECK(vsdlss_parallel_last_team_size()>1);
-  CHECK(memcmp(one->panel,many->panel,(size_t)s->panel_offset[s->count]*sizeof(double))==0);
+  CHECK(memcmp(one->panel,many->panel,(size_t)one->panel_offset[one->count]*sizeof(double))==0);
   CHECK(vsdlss_sn_solve(many,b,out)==VSDLSS_OK);
   CHECK(memcmp(ref,out,n*sizeof(double))==0);
   double eta;CHECK(vsdlss_backward_error(a,out,b,&eta)==VSDLSS_OK&&eta<1e-12);

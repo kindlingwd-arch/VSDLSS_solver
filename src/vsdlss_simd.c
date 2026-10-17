@@ -33,6 +33,44 @@ int vsdlss_simd_enabled(void)
 #define SUBMUL(v, c, s) _mm256_sub_pd((v), _mm256_mul_pd((c), (s)))
 
 SIMD_FN void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
+                                      const int32_t *R, csi r0, csi r1, double *x)
+{
+    csi r = r0;
+    for (; r + 8 <= r1; r += 8) {
+        const int c0 = R[r + 3] - R[r] == 3, c1 = R[r + 7] - R[r + 4] == 3;
+        __m256d v0 = c0 ? _mm256_loadu_pd(x + R[r])
+                        : _mm256_i32gather_pd(x, _mm_loadu_si128((const __m128i *)(R + r)), 8);
+        __m256d v1 = c1 ? _mm256_loadu_pd(x + R[r + 4])
+                        : _mm256_i32gather_pd(x, _mm_loadu_si128((const __m128i *)(R + r + 4)), 8);
+        for (csi j = 0; j < ws; ++j) {
+            const double *col = as + j * rs + r;
+            const __m256d s = _mm256_set1_pd(xs[j]);
+            v0 = SUBMUL(v0, _mm256_loadu_pd(col), s);
+            v1 = SUBMUL(v1, _mm256_loadu_pd(col + 4), s);
+        }
+        if (c0) _mm256_storeu_pd(x + R[r], v0);
+        else { double t[4]; _mm256_storeu_pd(t, v0); x[R[r]] = t[0]; x[R[r + 1]] = t[1]; x[R[r + 2]] = t[2]; x[R[r + 3]] = t[3]; }
+        if (c1) _mm256_storeu_pd(x + R[r + 4], v1);
+        else { double t[4]; _mm256_storeu_pd(t, v1); x[R[r + 4]] = t[0]; x[R[r + 5]] = t[1]; x[R[r + 6]] = t[2]; x[R[r + 7]] = t[3]; }
+    }
+    for (; r + 4 <= r1; r += 4) {
+        const int c0 = R[r + 3] - R[r] == 3;
+        __m256d v0 = c0 ? _mm256_loadu_pd(x + R[r])
+                        : _mm256_i32gather_pd(x, _mm_loadu_si128((const __m128i *)(R + r)), 8);
+        for (csi j = 0; j < ws; ++j)
+            v0 = SUBMUL(v0, _mm256_loadu_pd(as + j * rs + r), _mm256_set1_pd(xs[j]));
+        if (c0) _mm256_storeu_pd(x + R[r], v0);
+        else { double t[4]; _mm256_storeu_pd(t, v0); x[R[r]] = t[0]; x[R[r + 1]] = t[1]; x[R[r + 2]] = t[2]; x[R[r + 3]] = t[3]; }
+    }
+    for (; r < r1; ++r) {
+        double v = x[R[r]];
+        for (csi j = 0; j < ws; ++j) { double u = as[j * rs + r] * xs[j]; v -= u; }
+        x[R[r]] = v;
+    }
+}
+
+/* The same with 64-bit row indices (full-layout panels). */
+SIMD_FN void vsdlss_simd_block_update64(const double *as, csi rs, csi ws, const double *xs,
                                       const csi *R, csi r0, csi r1, double *x)
 {
     csi r = r0;
@@ -69,14 +107,83 @@ SIMD_FN void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const do
     }
 }
 
-SIMD_FN void vsdlss_simd_block_update_contig(const double *a, csi ld, csi j0, csi j1, const double *xs,
-                                             csi r0, csi r1, double *xt)
+/* vsdlss_simd_block_update for the tree solve's pull and push updates
+ * (ported from the 2026-09-27 solve-panels branch): up to 16 destinations
+ * in registers across the columns, and the last 1..3 rows as independent
+ * scalar chains advanced together, so each column is visited once instead
+ * of once per leftover row.  Power-grid source blocks average about four
+ * rows, so the leftover rows are a large share of the work.  Per entry:
+ * the same products and subtractions in ascending j, same bits. */
+#define XLOAD32(c, r) ((c) ? _mm256_loadu_pd(x + R[r]) \
+                           : _mm256_i32gather_pd(x, _mm_loadu_si128((const __m128i *)(R + (r))), 8))
+#define XSTORE32(c, r, v) do { if (c) _mm256_storeu_pd(x + R[r], (v)); else { double t_[4]; \
+    _mm256_storeu_pd(t_, (v)); x[R[r]] = t_[0]; x[R[(r) + 1]] = t_[1]; \
+    x[R[(r) + 2]] = t_[2]; x[R[(r) + 3]] = t_[3]; } } while (0)
+SIMD_FN void vsdlss_simd_block_update16(const double *as, csi rs, csi ws, const double *xs,
+                                        const int32_t *R, csi r0, csi r1, double *x)
+{
+    csi r = r0;
+    for (; r + 16 <= r1; r += 16) {
+        const int c0 = R[r + 3] - R[r] == 3, c1 = R[r + 7] - R[r + 4] == 3;
+        const int c2 = R[r + 11] - R[r + 8] == 3, c3 = R[r + 15] - R[r + 12] == 3;
+        __m256d v0 = XLOAD32(c0, r), v1 = XLOAD32(c1, r + 4), v2 = XLOAD32(c2, r + 8), v3 = XLOAD32(c3, r + 12);
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) {
+            const __m256d s = _mm256_set1_pd(xs[j]);
+            v0 = SUBMUL(v0, _mm256_loadu_pd(col), s);
+            v1 = SUBMUL(v1, _mm256_loadu_pd(col + 4), s);
+            v2 = SUBMUL(v2, _mm256_loadu_pd(col + 8), s);
+            v3 = SUBMUL(v3, _mm256_loadu_pd(col + 12), s);
+        }
+        XSTORE32(c0, r, v0); XSTORE32(c1, r + 4, v1); XSTORE32(c2, r + 8, v2); XSTORE32(c3, r + 12, v3);
+    }
+    for (; r + 8 <= r1; r += 8) {
+        const int c0 = R[r + 3] - R[r] == 3, c1 = R[r + 7] - R[r + 4] == 3;
+        __m256d v0 = XLOAD32(c0, r), v1 = XLOAD32(c1, r + 4);
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) {
+            const __m256d s = _mm256_set1_pd(xs[j]);
+            v0 = SUBMUL(v0, _mm256_loadu_pd(col), s);
+            v1 = SUBMUL(v1, _mm256_loadu_pd(col + 4), s);
+        }
+        XSTORE32(c0, r, v0); XSTORE32(c1, r + 4, v1);
+    }
+    for (; r + 4 <= r1; r += 4) {
+        const int c0 = R[r + 3] - R[r] == 3;
+        __m256d v0 = XLOAD32(c0, r);
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) v0 = SUBMUL(v0, _mm256_loadu_pd(col), _mm256_set1_pd(xs[j]));
+        XSTORE32(c0, r, v0);
+    }
+    if (r < r1) {
+        const csi m = r1 - r;
+        double u0 = x[R[r]], u1 = m > 1 ? x[R[r + 1]] : 0, u2 = m > 2 ? x[R[r + 2]] : 0;
+        const double *col = as + r;
+        for (csi j = 0; j < ws; ++j, col += rs) {
+            const double s = xs[j];
+            { double p = col[0] * s; u0 -= p; }
+            if (m > 1) { double p = col[1] * s; u1 -= p; }
+            if (m > 2) { double p = col[2] * s; u2 -= p; }
+        }
+        x[R[r]] = u0;
+        if (m > 1) x[R[r + 1]] = u1;
+        if (m > 2) x[R[r + 2]] = u2;
+    }
+}
+#undef XLOAD32
+#undef XSTORE32
+
+/* Column j of a packed lower triangle of order w, indexed by row. */
+#define PCOL(D, w, j) ((D) + (j) * (w) - (j) * ((j) - 1) / 2 - (j))
+
+SIMD_FN void vsdlss_simd_tri_update_packed(const double *D, csi w, csi j0, csi j1, const double *xs,
+                                           csi r0, csi r1, double *xt)
 {
     csi r = r0;
     for (; r + 8 <= r1; r += 8) {
         __m256d v0 = _mm256_loadu_pd(xt + r), v1 = _mm256_loadu_pd(xt + r + 4);
         for (csi j = j0; j < j1; ++j) {
-            const double *col = a + j * ld + r;
+            const double *col = PCOL(D, w, j) + r;
             const __m256d s = _mm256_set1_pd(xs[j]);
             v0 = SUBMUL(v0, _mm256_loadu_pd(col), s);
             v1 = SUBMUL(v1, _mm256_loadu_pd(col + 4), s);
@@ -85,12 +192,12 @@ SIMD_FN void vsdlss_simd_block_update_contig(const double *a, csi ld, csi j0, cs
     }
     for (; r + 4 <= r1; r += 4) {
         __m256d v0 = _mm256_loadu_pd(xt + r);
-        for (csi j = j0; j < j1; ++j) v0 = SUBMUL(v0, _mm256_loadu_pd(a + j * ld + r), _mm256_set1_pd(xs[j]));
+        for (csi j = j0; j < j1; ++j) v0 = SUBMUL(v0, _mm256_loadu_pd(PCOL(D, w, j) + r), _mm256_set1_pd(xs[j]));
         _mm256_storeu_pd(xt + r, v0);
     }
     for (; r < r1; ++r) {
         double v = xt[r];
-        for (csi j = j0; j < j1; ++j) { double u = a[j * ld + r] * xs[j]; v -= u; }
+        for (csi j = j0; j < j1; ++j) { double u = PCOL(D, w, j)[r] * xs[j]; v -= u; }
         xt[r] = v;
     }
 }
@@ -136,16 +243,111 @@ SIMD_FN int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, 
     return _mm256_movemask_pd(_mm256_cmp_pd(z, z, _CMP_UNORD_Q)) != 0;
 }
 
+/* Eight backward dot products, columns c0 + k*ld (k = 0..7): two dot4
+ * accumulators interleaved.  Each lane still holds one column's chain in
+ * ascending r, so results equal dot4 on each half bit for bit; the second
+ * independent chain hides the subtraction latency that bounds dot4. */
+SIMD_FN int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
+{
+    const double *c1 = c0 + ld, *c2 = c1 + ld, *c3 = c2 + ld;
+    const double *c4 = c3 + ld, *c5 = c4 + ld, *c6 = c5 + ld, *c7 = c6 + ld;
+    __m256d acc = _mm256_loadu_pd(v), acd = _mm256_loadu_pd(v + 4);
+    csi r = 0;
+    for (; r + 4 <= n; r += 4) {
+        __m256d q0, q1, q2, q3, p0, p1, p2, p3;
+        TRANSPOSE4(_mm256_loadu_pd(c0 + r), _mm256_loadu_pd(c1 + r), _mm256_loadu_pd(c2 + r),
+                   _mm256_loadu_pd(c3 + r), q0, q1, q2, q3);
+        TRANSPOSE4(_mm256_loadu_pd(c4 + r), _mm256_loadu_pd(c5 + r), _mm256_loadu_pd(c6 + r),
+                   _mm256_loadu_pd(c7 + r), p0, p1, p2, p3);
+        const __m256d x0 = _mm256_set1_pd(xg[r]), x1 = _mm256_set1_pd(xg[r + 1]);
+        const __m256d x2 = _mm256_set1_pd(xg[r + 2]), x3 = _mm256_set1_pd(xg[r + 3]);
+        acc = SUBMUL(acc, q0, x0); acd = SUBMUL(acd, p0, x0);
+        acc = SUBMUL(acc, q1, x1); acd = SUBMUL(acd, p1, x1);
+        acc = SUBMUL(acc, q2, x2); acd = SUBMUL(acd, p2, x2);
+        acc = SUBMUL(acc, q3, x3); acd = SUBMUL(acd, p3, x3);
+    }
+    for (; r < n; ++r) {
+        const __m256d xr = _mm256_set1_pd(xg[r]);
+        acc = SUBMUL(acc, _mm256_set_pd(c3[r], c2[r], c1[r], c0[r]), xr);
+        acd = SUBMUL(acd, _mm256_set_pd(c7[r], c6[r], c5[r], c4[r]), xr);
+    }
+    _mm256_storeu_pd(v, acc); _mm256_storeu_pd(v + 4, acd);
+    __m256d z = _mm256_sub_pd(acc, acc), y = _mm256_sub_pd(acd, acd);
+    return (_mm256_movemask_pd(_mm256_cmp_pd(z, z, _CMP_UNORD_Q)) |
+            _mm256_movemask_pd(_mm256_cmp_pd(y, y, _CMP_UNORD_Q))) != 0;
+}
+
+/* y[i] = (((y[i] - c[i]*s[0]) - c[ld+i]*s[1]) - c[2ld+i]*s[2]) - c[3ld+i]*s[3]:
+ * four axpy_neg calls in one pass over y (same operations per entry, in the
+ * same order, so the same bits); y is loaded and stored once per four
+ * columns instead of once per column. */
+/* axpy4_neg with four arbitrary column pointers (columns of a packed
+ * triangle are not equally spaced); same operations per entry. */
+SIMD_FN void vsdlss_simd_axpy4p_neg(double *y, const double *c, const double *c1, const double *c2,
+                                    const double *c3, const double *s, csi n)
+{
+    const __m256d s0 = _mm256_set1_pd(s[0]), s1 = _mm256_set1_pd(s[1]);
+    const __m256d s2 = _mm256_set1_pd(s[2]), s3 = _mm256_set1_pd(s[3]);
+    csi i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256d a = _mm256_loadu_pd(y + i), b = _mm256_loadu_pd(y + i + 4);
+        a = SUBMUL(a, _mm256_loadu_pd(c + i), s0);  b = SUBMUL(b, _mm256_loadu_pd(c + i + 4), s0);
+        a = SUBMUL(a, _mm256_loadu_pd(c1 + i), s1); b = SUBMUL(b, _mm256_loadu_pd(c1 + i + 4), s1);
+        a = SUBMUL(a, _mm256_loadu_pd(c2 + i), s2); b = SUBMUL(b, _mm256_loadu_pd(c2 + i + 4), s2);
+        a = SUBMUL(a, _mm256_loadu_pd(c3 + i), s3); b = SUBMUL(b, _mm256_loadu_pd(c3 + i + 4), s3);
+        _mm256_storeu_pd(y + i, a); _mm256_storeu_pd(y + i + 4, b);
+    }
+    for (; i < n; ++i) {
+        double v = y[i], u;
+        u = c[i] * s[0]; v -= u; u = c1[i] * s[1]; v -= u; u = c2[i] * s[2]; v -= u; u = c3[i] * s[3]; v -= u;
+        y[i] = v;
+    }
+}
+
+SIMD_FN void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, csi n)
+{
+    const double *c1 = c + ld, *c2 = c1 + ld, *c3 = c2 + ld;
+    const __m256d s0 = _mm256_set1_pd(s[0]), s1 = _mm256_set1_pd(s[1]);
+    const __m256d s2 = _mm256_set1_pd(s[2]), s3 = _mm256_set1_pd(s[3]);
+    csi i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256d a = _mm256_loadu_pd(y + i), b = _mm256_loadu_pd(y + i + 4);
+        a = SUBMUL(a, _mm256_loadu_pd(c + i), s0);  b = SUBMUL(b, _mm256_loadu_pd(c + i + 4), s0);
+        a = SUBMUL(a, _mm256_loadu_pd(c1 + i), s1); b = SUBMUL(b, _mm256_loadu_pd(c1 + i + 4), s1);
+        a = SUBMUL(a, _mm256_loadu_pd(c2 + i), s2); b = SUBMUL(b, _mm256_loadu_pd(c2 + i + 4), s2);
+        a = SUBMUL(a, _mm256_loadu_pd(c3 + i), s3); b = SUBMUL(b, _mm256_loadu_pd(c3 + i + 4), s3);
+        _mm256_storeu_pd(y + i, a); _mm256_storeu_pd(y + i + 4, b);
+    }
+    for (; i < n; ++i) {
+        double v = y[i], u;
+        u = c[i] * s[0]; v -= u; u = c1[i] * s[1]; v -= u; u = c2[i] * s[2]; v -= u; u = c3[i] * s[3]; v -= u;
+        y[i] = v;
+    }
+}
+
 #else   /* no x86 GCC-compatible compiler: scalar paths only */
 int vsdlss_simd_enabled(void) { return 0; }
-void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
-                              const csi *R, csi r0, csi r1, double *x)
+void vsdlss_simd_block_update64(const double *as, csi rs, csi ws, const double *xs,
+                                const csi *R, csi r0, csi r1, double *x)
 { (void)as; (void)rs; (void)ws; (void)xs; (void)R; (void)r0; (void)r1; (void)x; abort(); }
-void vsdlss_simd_block_update_contig(const double *a, csi ld, csi j0, csi j1, const double *xs,
-                                     csi r0, csi r1, double *xt)
-{ (void)a; (void)ld; (void)j0; (void)j1; (void)xs; (void)r0; (void)r1; (void)xt; abort(); }
+void vsdlss_simd_axpy4p_neg(double *y, const double *c, const double *c1, const double *c2,
+                            const double *c3, const double *s, csi n)
+{ (void)y; (void)c; (void)c1; (void)c2; (void)c3; (void)s; (void)n; abort(); }
+void vsdlss_simd_block_update(const double *as, csi rs, csi ws, const double *xs,
+                              const int32_t *R, csi r0, csi r1, double *x)
+{ (void)as; (void)rs; (void)ws; (void)xs; (void)R; (void)r0; (void)r1; (void)x; abort(); }
+void vsdlss_simd_block_update16(const double *as, csi rs, csi ws, const double *xs,
+                                const int32_t *R, csi r0, csi r1, double *x)
+{ (void)as; (void)rs; (void)ws; (void)xs; (void)R; (void)r0; (void)r1; (void)x; abort(); }
+void vsdlss_simd_tri_update_packed(const double *D, csi w, csi j0, csi j1, const double *xs,
+                                   csi r0, csi r1, double *xt)
+{ (void)D; (void)w; (void)j0; (void)j1; (void)xs; (void)r0; (void)r1; (void)xt; abort(); }
 void vsdlss_simd_axpy_neg(double *y, const double *c, double s, csi n)
 { (void)y; (void)c; (void)s; (void)n; abort(); }
 int vsdlss_simd_dot4(const double *c0, csi ld, const double *xg, csi n, double *v)
+{ (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
+void vsdlss_simd_axpy4_neg(double *y, const double *c, csi ld, const double *s, csi n)
+{ (void)y; (void)c; (void)ld; (void)s; (void)n; abort(); }
+int vsdlss_simd_dot8(const double *c0, csi ld, const double *xg, csi n, double *v)
 { (void)c0; (void)ld; (void)xg; (void)n; (void)v; abort(); }
 #endif

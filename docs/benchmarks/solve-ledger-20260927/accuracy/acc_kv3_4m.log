@@ -1,0 +1,7 @@
+# n=4000000 branches=5000000 coupling_caps=998383 gratio=1 shuffle=1 gen=1.5s rss=513 MB
+# setup: factor 6.349 s order=5 threads=1 core_n=1042089 (26.1%) panels=302977 max_width=1472 | resident: L values 647.5 MB, L row idx 33.3 MB, reduction 113.7 MB | rss before factor 513 MB, peak 1452 MB
+# packed chain one-time mapping: 0.446 s (sources 1199464, coupling caps 998383, branches 5000000)
+# per-warm-solve allocations: 0.00 calls, 0 bytes (all flows; needs COUNT_ALLOC build)
+# steps=21 (step 0 = cold, excluded from medians) bitwise G==N==P (v and EM) 1 worst berr 5.4e-17 peak_rss 1850 MB
+STEP G caller-order               rhs 0.0357 (p95 0.0395) solve 0.2959 (p95 0.3053) convert 0.0000 (p95 0.0000) em 0.0474 (p95 0.0505) | step med 0.3798 p95 0.3941 | cold step 0.5459
+# final solution hash (caller order) fd92cc85055a8c4f

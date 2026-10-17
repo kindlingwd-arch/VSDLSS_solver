@@ -23,8 +23,22 @@ typedef struct vsdlss_elim_record {
 typedef struct vsdlss_pk_seg {
     csi k0, count, nbn;
     uint32_t *head, *nb;
-    double *val;
+    uint8_t *deg;
+    double *piv, *val;
 } vsdlss_pk_seg;
+
+/* Degree and pivot vertex of record i of a packed segment, in either form
+ * (head, or deg after a solve-order relabel; see vsdlss_reduction). */
+static inline csi vsdlss_pk_degree(const vsdlss_pk_seg *g, csi i)
+{ return g->head ? (csi)(g->head[i] >> 30) : (csi)g->deg[i]; }
+static inline csi vsdlss_pk_vertex(const vsdlss_pk_seg *g, csi i)
+{ return g->head ? (csi)(g->head[i] & 0x3fffffffu) : g->k0 + i; }
+
+/* Forward plan of the scheduled tail: the updates of level l are
+ * [lp[l], lp[l+1]), sorted by target; update u subtracts m[u] times the
+ * pivot value of tail record src[u] from work[tgt[u]].  Target and
+ * multiplier are copies, so the forward pass streams the plan. */
+struct vsdlss_tail_plan { csi levels; csi *lp; uint32_t *tgt, *src; double *m; };
 
 typedef struct vsdlss_reduction {
     csi n, count, core_n;
@@ -40,15 +54,48 @@ typedef struct vsdlss_reduction {
      * cover records [pk[s].k0, pk[s].k0 + pk[s].count) in order.  When the
      * reduction is blocked, segment b < blocks is block b and the last one
      * holds the sequential tail.  Within a segment, record i has head[i] =
-     * vertex | degree << 30, neighbours nb[o..o+d) and pivot, multipliers
-     * val[i+o], val[i+o+1..i+o+d] (o = sum of the degrees before i).  Packed
+     * vertex | degree << 30, pivot piv[i], neighbours nb[o..o+d) and
+     * multipliers val[o..o+d) (o = sum of the degrees before i); the forward
+     * replay does not read the pivots, so they are kept apart.  When the
+     * vertex of every record k is k itself (solve-order relabel), head is
+     * replaced by deg[i] = degree (head NULL, vertex = k0 + i).  Packed
      * records were validated (indices in range, pivots and multipliers
      * finite, pivots nonzero), so replay needs no per-entry checks. */
     csi pk_count;
     struct vsdlss_pk_seg *pk;
-    /* Size of the parallel pass's blocks: block b covers vertices
-     * [b*block_size, min((b+1)*block_size, n)). */
-    csi block_size;
+    /* Optional level schedule of the sequential tail (tail_levels > 0; the
+     * reduction is blocked and the tail is segment pk[blocks]).  The tail
+     * records are stored level by level (within a level in the order of
+     * their first updater, see tail_order); no two records of one level
+     * share a vertex (pivot or neighbour), and a record's level is above
+     * that of every earlier record it shares a vertex with, so every vector
+     * entry still sees its updates in the original order and a level's
+     * records can be replayed concurrently.  Level l is chunks [tail_level[l], tail_level[l+1]);
+     * chunk c is tail records [tail_chunk_rec[c], tail_chunk_rec[c+1]) whose
+     * neighbours start at tail_chunk_nb[c] (offsets within the tail). */
+    csi tail_levels;
+    csi *tail_level, *tail_chunk_rec, *tail_chunk_nb;
+    /* Forward plan of the scheduled tail (vsdlss_reduce_tail_plan): each
+     * level's updates sorted by target, so the threads of a level write
+     * disjoint contiguous ranges of the vector.  NULL: none. */
+    struct vsdlss_tail_plan *tail_fwd;
+    /* The tail schedule is by windows (VSDLSS_TAIL_WINDOWS): each "level" is a
+     * window of consecutive levels and its chunks are connected components
+     * of the window (records of different chunks share no tail vertex), each
+     * replayed in order by one thread.  No forward plan.  Core vertices do
+     * not link records unless that keeps components small: the forward
+     * replay defers the tail's updates of the other core vertices (bit u of
+     * tail_core_bit set for update u) to a buffer, the k-th such update of
+     * chunk c to buf[tail_core_slot[tail_chunk_core[c] + k]], and then core
+     * group g subtracts buf[tail_core_ptr[g] .. tail_core_ptr[g+1]) (in
+     * elimination order) from the vertex nb[tail_core_upd[g]] of the tail
+     * segment, as the serial replay does. */
+    int tail_windows;
+    uint64_t *tail_core_bit;
+    csi *tail_chunk_core, *tail_core_ptr, tail_core_groups, tail_core_slots;
+    uint32_t *tail_core_slot, *tail_core_upd;
+    double *tail_core_buf;       /* the deferred updates (one solve at a time: tail_core_busy) */
+    int tail_core_busy;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -81,14 +128,29 @@ typedef struct vsdlss_sn_symbolic {
     csi *blk_ptr;         /* count+1 */
     csi *blk_src, *blk_first, *blk_end; /* blk_ptr[count] each */
 } vsdlss_sn_symbolic;
+/* Supernodal numeric factor.  Indices below n or count are 32-bit
+ * (vsdlss_sni; the factorization rejects larger cores), offsets 64-bit.
+ *
+ * Panels are packed: panel s (width w, e = |R_s| external rows) holds the
+ * lower triangle of its diagonal block by columns, column j (rows j..w-1)
+ * at VSDLSS_SN_DCOL(j, w), followed by the external rows column-major with
+ * leading dimension e: w(w+1)/2 + w e values, exactly the stored entries
+ * counted by l_nnz, so panel_offset[count] == l_nnz. */
+typedef int32_t vsdlss_sni;
+#define VSDLSS_SN_DCOL(j,w) ((j)*(w)-(j)*((j)-1)/2)
 typedef struct vsdlss_sn_factor {
     csi n, count, l_nnz;
-    csi *column_start, *row_ptr, *row_index, *panel_offset;
+    vsdlss_sni *column_start;  /* count+1 */
+    csi *row_ptr;              /* count+1 */
+    vsdlss_sni *row_index;     /* row_ptr[count] */
+    csi *panel_offset;         /* count+1 */
     double *panel;        /* panel_offset[count] values */
     void *panel_block;    /* allocation owning `panel` (may be aligned inside) */
     /* Tree and source blocks (copied from the symbolic layout) for the
      * tree-parallel triangular solves. */
-    csi *sn_parent, *blk_ptr, *blk_src, *blk_first, *blk_end;
+    vsdlss_sni *sn_parent;     /* count */
+    csi *blk_ptr;              /* count+1 */
+    vsdlss_sni *blk_src, *blk_first, *blk_end;
     /* Solve-tree postorder and per-thread-count subtree splits, built once
      * so repeated tree-parallel solves do not rebuild them (NULL: built per
      * solve). */
@@ -97,11 +159,21 @@ typedef struct vsdlss_sn_factor {
 
 typedef struct vsdlss_m3_component_factor {
     csi n;
-    csi *gather;                 /* NULL, or global vertex of each local index */
+    int renumbered;              /* local numbering is the BFS order */
+    /* Global vertex of each local index.  map32 when every global index
+     * fits 32 bits (then the 64-bit tables are freed once factored);
+     * otherwise gather, or NULL for components->vertices in ascending
+     * order.  During the factorization gather holds the BFS numbering. */
+    uint32_t *map32;
+    csi *gather;
     vsdlss_m4_factor *disk;
     vsdlss_reduction *reduction; /* owns local reduction and core matrix */
-    csi *core_map;               /* local vertex of each (permuted) core unknown */
+    /* Local vertex of each (permuted) core unknown: core_map32 when local
+     * indices fit 32 bits, else core_map. */
+    uint32_t *core_map32;
+    csi *core_map;
     vsdlss_sn_factor *numeric;   /* owns supernodal numeric layout */
+    int core_contig;             /* core_map[k] == reduction->count + k (relabelled) */
     /* Solve workspace allocated with the factor, so repeated solves do not
      * allocate (and fault in) large buffers.  A solve takes it with an
      * atomic flag; a concurrent solve on the same factor falls back to
@@ -123,14 +195,17 @@ struct vsdlss_m3_factor {
     uint64_t *inv64;
     int inv_shift;
     /* Blocked two-pass gather / write-back of original-order solves
-     * (vsdlss_m3.c): a plan built on first use, and a scratch vector
-     * (padded internal length) with the passes' scratch slots, taken with
-     * an atomic flag. */
-    _Atomic(struct vsdlss_perm_plan *) pplan;
+     * (vsdlss_m3.c): plans built on first use per thread count, and a
+     * scratch area (bucket buffer, write-combining lines, staging blocks;
+     * pbuf_len doubles, 64-byte aligned) taken with an atomic flag. */
+#define VSDLSS_PERM_PLAN_SLOTS 65
+    _Atomic(struct vsdlss_perm_plan *) pplan[VSDLSS_PERM_PLAN_SLOTS];
     double *pbuf;
-    double *pscr; size_t pscr_len;      /* pass scratch slots (64-byte aligned), taken with pbuf */
-    void *pscr_block;                   /* allocation holding pscr */
+    size_t pbuf_len;
     atomic_int pbuf_busy;
+    /* vsdlss_m3_packed_buffer: n doubles in packed order shared with the
+     * application, allocated on first request. */
+    _Atomic(double *) shared;
 };
 
 /* Symmetric weighted adjacency (no diagonal in idx/val; diag separate). */
@@ -183,11 +258,24 @@ void vsdlss_reduction_free(vsdlss_reduction *);
 /* Size thresholds (internal; tests lower them to reach the large-input
  * paths on small matrices).  Results depend on them, never on threads. */
 extern csi vsdlss_reduce_block;   /* block of the parallel reduction pass */
+extern csi vsdlss_reduce_tomb_min; /* tests: shortest adjacency list removed lazily (tombstones) */
+extern csi vsdlss_reduce_tail_min; /* smallest sequential tail given a level schedule (tests: lower it) */
+extern csi vsdlss_reduce_tail_grain; /* records per thread per level of the scheduled tail (tests: lower it) */
+extern csi vsdlss_reduce_tail_order_grain; /* same, for building the level order (tests: lower it) */
+extern csi vsdlss_reduce_tail_windows; /* window schedule K (default 64), 0 = levels (tests: set it) */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
-extern double vsdlss_perm2_stream_min; /* tests: smallest vector (bytes) moved with streaming stores; < 0 automatic */
+extern csi vsdlss_perm2_nt_min;      /* tests: smallest n for its non-temporal stores */
+/* Benchmarks (bench_core): called with each component's ordered core
+ * matrix (upper CSC, postordered) before its supernodal analysis; may run
+ * concurrently for different components.  NULL in normal use. */
+extern void (*vsdlss_m3_core_hook)(csi component, const vsdlss *core);
 extern int vsdlss_fwd_top_team;        /* 1: one team for the whole forward tree top (0: a team per large target) */
+/* Return free heap memory to the system when VSDLSS_TRIM >= level (glibc
+ * malloc_trim; no-op elsewhere).  Levels: 1 end of factorization, 2 between
+ * factorization phases. */
+void vsdlss_release_free_memory(int level);
 /* Non-transactional in-place variants for callers with private buffers. */
 /* Replaces records by the packed form (about half the bytes; the solve's
  * reduction replay is bandwidth bound).  Keeps records, returning OK, when
@@ -207,22 +295,11 @@ vsdlss_status vsdlss_reduce_run_packed(vsdlss_reduce_input *, vsdlss_reduction *
  * use the same work/x vector, untouched between them except at core vertices. */
 vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *, double *work, double *saved);
 vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *, const double *saved, double *x);
-/* Same without the finiteness scan of the core entries of x, which the
- * caller has already checked. */
-vsdlss_status vsdlss_reduce_backward_core_checked(const vsdlss_reduction *, const double *saved, double *x);
-/* Block-wise form of the packed replays, for callers that fuse other work
- * with each block (the M3 two-pass gather / write-back).  Returns the
- * number of blocks (0: not a packed blocked reduction, use the calls above)
- * and their size.  The full forward replay is forward_block for every block
- * (any order, concurrently) then forward_tail; the backward replay is
- * backward_tail then backward_block for every block.  The backward calls
- * return 0 when a recovered value is not finite and do not check the core
- * entries (the caller has). */
-csi vsdlss_reduce_fused_blocks(const vsdlss_reduction *, csi *block_size);
-void vsdlss_reduce_forward_block(const vsdlss_reduction *, csi b, double *work);
-void vsdlss_reduce_forward_tail(const vsdlss_reduction *, double *work);
-int vsdlss_reduce_backward_tail(const vsdlss_reduction *, double *x);
-int vsdlss_reduce_backward_block(const vsdlss_reduction *, csi b, double *x);
+/* Build the forward plan of a level-scheduled tail (see tail_fwd) once the
+ * vertex numbering is final (after the solve-order relabel); a no-op without
+ * a schedule.  VSDLSS_ERR_OOM on allocation failure, leaving no plan (the
+ * replay is still correct: the plan is optional). */
+vsdlss_status vsdlss_reduce_tail_plan(vsdlss_reduction *);
 vsdlss_status vsdlss_sn_analyze(const vsdlss *, vsdlss_sn_symbolic **);
 vsdlss_status vsdlss_sn_analyze_relaxed(const vsdlss *, vsdlss_sn_symbolic **);
 /* Compose an elimination-tree postorder into (q, pinv) for matrix A (the
@@ -235,12 +312,28 @@ void vsdlss_sn_symbolic_free(vsdlss_sn_symbolic *);
 vsdlss_status vsdlss_sn_reorder_within(const vsdlss_sn_symbolic *s, csi **perm);
 vsdlss_status vsdlss_sn_factorize(const vsdlss *, const vsdlss_sn_symbolic *,
                                   vsdlss_sn_factor **);
+/* Same, but takes ownership of *A and *s and frees them as soon as the
+ * factor has copied what it needs, before L is allocated (always freed;
+ * both NULL on return), then returns free heap memory to the system
+ * (vsdlss_release_free_memory(2)). */
+vsdlss_status vsdlss_sn_factorize_consume(vsdlss **A, vsdlss_sn_symbolic **s,
+                                          vsdlss_sn_factor **);
 vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *);
 /* In place on x (length n), no allocation on the serial path and no input or
  * output finiteness scans: the caller checks x afterwards (a non-finite input
  * or intermediate always leaves a non-finite entry in the result).  Bitwise
  * the same result as vsdlss_sn_solve.  On failure x is partially updated. */
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *, double *x);
+/* Number of vsdlss_sn_solve_inplace calls so far that took the tree-parallel
+ * schedule instead of the serial panel loop (kind 0), and of those, the ones
+ * that ran the forward (1) / backward (2) tree top by branches.
+ * Process-wide; for tests. */
+long vsdlss_sn_tree_solves(int kind);
+/* The tree top of the tree-parallel solve: -1 (default) by branches in both
+ * passes when the solve has BLAS-solved panels, else a bit mask, 1 = forward
+ * by branches, 2 = backward by branches (0: in order).  Same bits in every
+ * mode; VSDLSS_TOP_BRANCHES overrides. */
+extern int vsdlss_top_branches;
 vsdlss_status vsdlss_sn_solve_batch(const vsdlss_sn_factor *, csi nrhs, double *x, csi ldx);
 vsdlss_status vsdlss_sn_export_L(const vsdlss_sn_factor *, vsdlss **);
 void vsdlss_sn_factor_free(vsdlss_sn_factor *);
@@ -252,8 +345,27 @@ vsdlss_status vsdlss_panel_solve(const double *, csi begin, csi width,
 #ifdef VSDLSS_BLAS
 /* 1 when wide panels are solved with BLAS (VSDLSS_BLAS_SOLVE_MIN > 0). */
 int vsdlss_panel_solve_uses_blas(void);
+/* Width from which the panel solves use BLAS (0: never). */
+csi vsdlss_panel_solve_blas_min(void);
 #endif
 /* Internal reference path for microkernel validation. */
 vsdlss_status vsdlss_panel_solve_generic(const double *,csi,csi,csi,const csi *,double *,int);
+/* The same solves for one packed panel of a vsdlss_sn_factor (same
+ * operations and results as the full-layout kernels on the same values). */
+/* 1 unless VSDLSS_SOLVE_UPD16=0: 16-row forward block updates (vsdlss_panel.c). */
+int vsdlss_solve_upd16(void);
+vsdlss_status vsdlss_sn_panel_solve(const double *, csi begin, csi width,
+                                    csi ext, const vsdlss_sni *index, double *, int back);
+vsdlss_status vsdlss_sn_panel_solve_generic(const double *,csi,csi,csi,const vsdlss_sni *,double *,int);
+#ifdef VSDLSS_BLAS
+/* 1 when vsdlss_sn_panel_solve takes the BLAS path for a panel of this shape. */
+int vsdlss_sn_panel_solve_is_blas(csi width, csi ext);
+/* Forward BLAS step of one packed panel without the scatter: dtpsv on the
+ * diagonal block (xb = the panel's own entries of x), then t = L_ext * x_J
+ * (ext entries).  vsdlss_sn_panel_solve's BLAS forward is exactly this
+ * followed by x[index[r]] -= t[r]; the tree solve stores t instead. */
+vsdlss_status vsdlss_sn_panel_blas_forward(const double *a, csi width, csi ext,
+                                           double *xb, double *t);
+#endif
 
 #endif

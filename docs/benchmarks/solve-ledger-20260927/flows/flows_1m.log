@@ -1,0 +1,14 @@
+# n=1000000 branches=1250000 coupling_caps=249976 gratio=1 shuffle=1 gen=0.3s rss=130 MB
+# setup: factor 1.215 s order=5 threads=1 core_n=261480 (26.1%) panels=77630 max_width=756 | resident: L values 134.0 MB, L row idx 8.3 MB, reduction 28.3 MB | rss before factor 130 MB, peak 333 MB
+# packed chain one-time mapping: 0.100 s (sources 299447, coupling caps 249976, branches 1250000)
+# per-warm-solve allocations: 0.00 calls, 0 bytes (all flows; needs COUNT_ALLOC build)
+# steps=41 (step 0 = cold, excluded from medians) bitwise G==N==P (v and EM) 1 worst berr 2.5e-17 peak_rss 539 MB
+STEP G caller-order               rhs 0.0082 (p95 0.0090) solve 0.0585 (p95 0.0613) convert 0.0000 (p95 0.0000) em 0.0120 (p95 0.0142) | step med 0.0787 p95 0.0838 | cold step 0.1014
+LEDGER G (wall-clock, exclusive, mean ms over 40 warm solves): setup 0.004 gather 5.398 red_fwd 4.232 core_gather 0.715 core_fwd 16.474 core_bwd 20.513 core_scatter 0.999 red_bwd 4.881 writeback 5.066 other 0.007 TOTAL 58.288
+STEP N packed+caller conversion   rhs 0.0081 (p95 0.0091) solve 0.0499 (p95 0.0537) convert 0.0127 (p95 0.0140) em 0.0100 (p95 0.0111) | step med 0.0809 p95 0.0859 | cold step 0.1102
+LEDGER N (wall-clock, exclusive, mean ms over 40 warm solves): setup 0.004 gather 1.448 red_fwd 3.993 core_gather 0.660 core_fwd 16.608 core_bwd 20.599 core_scatter 0.867 red_bwd 4.693 writeback 1.320 other 0.007 TOTAL 50.198
+STEP P packed chain               rhs 0.0054 (p95 0.0060) solve 0.0496 (p95 0.0569) convert 0.0000 (p95 0.0000) em 0.0046 (p95 0.0050) | step med 0.0598 p95 0.0676 | cold step 0.0883
+LEDGER P (wall-clock, exclusive, mean ms over 40 warm solves): setup 0.003 gather 1.185 red_fwd 4.036 core_gather 0.650 core_fwd 16.671 core_bwd 20.712 core_scatter 0.843 red_bwd 4.735 writeback 1.286 other 0.007 TOTAL 50.129
+STEP I packed chain in-place      rhs 0.0066 (p95 0.0082) solve 0.0474 (p95 0.0532) convert 0.0000 (p95 0.0000) em 0.0043 (p95 0.0047) | step med 0.0583 p95 0.0659 | cold step 0.0852
+LEDGER I (wall-clock, exclusive, mean ms over 40 warm solves): setup 0.003 gather 0.752 red_fwd 3.893 core_gather 0.620 core_fwd 16.724 core_bwd 20.454 core_scatter 0.763 red_bwd 4.620 writeback 0.001 other 0.006 TOTAL 47.835
+# final solution hash (caller order) 6b00a40aa5165c1b

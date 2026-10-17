@@ -1,0 +1,13 @@
+# n=4000000 branches=5000000 coupling_caps=998383 gratio=1 shuffle=1 gen=1.4s rss=513 MB
+# setup: factor 6.307 s order=5 threads=1 core_n=1042089 (26.1%) panels=302977 max_width=1472 | resident: L values 647.5 MB, L row idx 33.3 MB, reduction 113.7 MB | rss before factor 513 MB, peak 1452 MB
+# packed chain one-time mapping: 0.486 s (sources 1199464, coupling caps 998383, branches 5000000)
+# step 0: max rel diff K vs I 1.68e-14
+# step 5: max rel diff K vs I 1.46e-14
+# step 10: max rel diff K vs I 1.32e-14
+# step 15: max rel diff K vs I 1.63e-14
+# step 20: max rel diff K vs I 2.23e-14
+# per-warm-solve allocations: 0.00 calls, 0 bytes (all flows; needs COUNT_ALLOC build)
+# steps=21 (step 0 = cold, excluded from medians) bitwise G==N==P (v and EM) 1 worst berr 0.0e+00 peak_rss 1783 MB
+STEP I packed chain in-place      rhs 0.0261 (p95 0.0290) solve 0.2143 (p95 0.2214) convert 0.0000 (p95 0.0000) em 0.0196 (p95 0.0204) | step med 0.2601 p95 0.2728 | cold step 0.3966
+STEP K = I with TR_KKV kernels    rhs 0.0266 (p95 0.0300) solve 0.2110 (p95 0.2167) convert 0.0000 (p95 0.0000) em 0.0195 (p95 0.0203) | step med 0.2575 p95 0.2666 | cold step 0.3085
+# final solution hash (caller order) 29bf10f605fd3a66

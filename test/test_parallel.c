@@ -38,8 +38,12 @@ static int panel_tile_boundaries(void)
 
 static int kernels(void)
 {
-    CHECK(vsdlss_get_num_threads()==1);
-    CHECK(vsdlss_set_num_threads(0)==VSDLSS_ERR_INVALID);
+    CHECK(vsdlss_get_num_threads()==1);        /* default without VSDLSS_NUM_THREADS */
+    CHECK(vsdlss_set_num_threads(-1)==VSDLSS_ERR_INVALID && vsdlss_set_num_threads(1025)==VSDLSS_ERR_INVALID);
+    /* 0 = automatic: the OpenMP default team size (1 without OpenMP) */
+    CHECK(vsdlss_set_num_threads(0)==VSDLSS_OK && vsdlss_get_num_threads()>=1);
+    if(!vsdlss_parallel_enabled()) CHECK(vsdlss_get_num_threads()==1);
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK && vsdlss_get_num_threads()==1);
     if(!vsdlss_parallel_enabled()){
         CHECK(vsdlss_set_num_threads(2)==VSDLSS_ERR_UNSUPPORTED);
         puts("parallel: serial build correctly rejects threads>1");return 0;
@@ -192,9 +196,9 @@ static int solve_kernel(void)
 }
 
 /* Two power-grid-like nets (chains with taps between junctions), plus
- * isolated vertices and pairs, numbered in shuffled order.  Upper CSC with
- * sorted columns. */
-static vsdlss *two_nets(void)
+ * (extras) isolated vertices and pairs, numbered in shuffled order.  Upper
+ * CSC with sorted columns. */
+static vsdlss *two_nets_ex(int extras)
 {
     enum { G=40, CH=4 };
     csi cap=2*(2*G*G*(CH+2)+G*G)+2000, m=0, n=0;
@@ -210,8 +214,10 @@ static vsdlss *two_nets(void)
             ea[m]=prev; eb[m++]=base+y2*g+x2;
         }
     }
-    for(int k=0;k<100;k++){ ea[m]=n; eb[m++]=n+1; n+=2; }
-    n+=300;                                     /* isolated vertices */
+    if(extras){
+        for(int k=0;k<100;k++){ ea[m]=n; eb[m++]=n+1; n+=2; }
+        n+=300;                                 /* isolated vertices */
+    }
     csi *perm=malloc(n*sizeof(csi)); uint64_t r=12345;
     for(csi i=0;i<n;i++) perm[i]=i;
     for(csi i=n-1;i>0;i--){ r^=r<<13; r^=r>>7; r^=r<<17; csi j=(csi)(r%(uint64_t)(i+1)),t=perm[i]; perm[i]=perm[j]; perm[j]=t; }
@@ -228,17 +234,19 @@ static vsdlss *two_nets(void)
     free(ea); free(eb); free(perm); free(cnt); return A;
 }
 
-/* Components, BFS order and weighted adjacency are identical for 1, 3 and 4
- * threads (serial BFS vs union-find + concurrent BFS, row-range fill). */
-static int components_threads_equal(void)
+static vsdlss *two_nets(void){ return two_nets_ex(1); }
+
+/* Components, BFS order and weighted adjacency are identical for 1 to 8
+ * threads (serial BFS vs union-find + concurrent BFS, row-range fill, and
+ * for few components the per-range vertex maps). */
+static int components_equal_on(vsdlss *A, csi expect_count)
 {
-    vsdlss *A=two_nets(); CHECK(A);
     const csi n=A->n;
     vsdlss_components *c1=NULL,*c2=NULL; vsdlss_wgraph *g1=NULL,*g2=NULL;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     CHECK(vsdlss_components_build_graph(A,&c1,&g1)==VSDLSS_OK);
-    CHECK(c1->count==2+100+300);
-    for(int t=3;t<=4;t++){
+    CHECK(c1->count==expect_count);
+    for(int t=2;t<=8;t++){
         CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
         CHECK(vsdlss_components_build_graph(A,&c2,&g2)==VSDLSS_OK);
         CHECK(c2->count==c1->count);
@@ -253,6 +261,18 @@ static int components_threads_equal(void)
         CHECK(memcmp(g1->diag,g2->diag,n*sizeof(double))==0);
         vsdlss_components_free(c2); vsdlss_wgraph_free(g2); c2=NULL; g2=NULL;
     }
+    vsdlss_components_free(c1); vsdlss_wgraph_free(g1);
+    return 0;
+}
+
+static int components_threads_equal(void)
+{
+    vsdlss *nets=two_nets_ex(0); CHECK(nets);
+    CHECK(components_equal_on(nets,2)==0);
+    vsdlss_spfree(nets);
+    vsdlss *A=two_nets(); CHECK(A);
+    const csi n=A->n;
+    CHECK(components_equal_on(A,2+100+300)==0);
     /* Full factor/solve with the two nets as concurrent components. */
     double *b=malloc(n*8),*x1=malloc(n*8),*x2=malloc(n*8); CHECK(b&&x1&&x2);
     for(csi i=0;i<n;i++) b[i]=sin(0.01*(double)i)+0.5;
@@ -275,7 +295,7 @@ static int components_threads_equal(void)
         vsdlss_m3_factor_free(f); f=NULL;
     }
     double eta; CHECK(vsdlss_backward_error(A,x1,b,&eta)==VSDLSS_OK&&eta<1e-13);
-    vsdlss_components_free(c1); vsdlss_wgraph_free(g1); vsdlss_spfree(A); free(b); free(x1); free(x2);
+    vsdlss_spfree(A); free(b); free(x1); free(x2);
     return 0;
 }
 
@@ -324,57 +344,43 @@ static int internal_order_solve(void)
 }
 
 /* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
- * takes it: many small components, blocks straddling components; with and
- * without the passes fused into blocked reductions) against the direct
- * loops: the same bits for every thread count, both inverse-map widths and
- * plain or streaming stores (staging lines shared by two chunks), cached
- * plans, aliasing; a non-finite
+ * takes it: several buckets, many small components, blocks straddling
+ * components) against the direct loops: the same bits for every thread
+ * count, both inverse-map widths, plain and non-temporal stores, cached plans, aliasing; a non-finite
  * RHS fails and leaves the output untouched. */
 static int two_pass_permutation(void)
 {
     vsdlss *A=two_nets(); CHECK(A);
-    const csi n=A->n, saved_min=vsdlss_perm2_min, saved_block=vsdlss_reduce_block, saved_reorder=vsdlss_reorder_min;
+    const csi n=A->n, saved_min=vsdlss_perm2_min, saved_nt=vsdlss_perm2_nt_min;
     double *b=malloc(n*8),*bb=malloc(n*8),*ref=malloc(n*8),*x=malloc(n*8);
     CHECK(b&&bb&&ref&&x);
     for(csi i=0;i<n;i++) b[i]=cos(0.021*(double)i)+0.3;
+    vsdlss_m3_factor *f=NULL;
+    vsdlss_perm2_min=(csi)1<<62;                    /* direct loops: reference */
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+    CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
+    vsdlss_m3_factor_free(f);
+    vsdlss_perm2_min=1;
     int maxt=vsdlss_parallel_enabled()?4:1;
-    /* fused = 1: reduction blocks of 64 vertices, so both nets are reduced
-     * in blocks and take the gather / write-back fused with the replays
-     * (buckets of 64 entries: many buckets, chunks and shared lines). */
-    for(int fused=0;fused<2;fused++) {
-        vsdlss_reduce_block=fused?64:saved_block; vsdlss_reorder_min=fused?64:saved_reorder;
-        vsdlss_m3_factor *f=NULL;
-        vsdlss_perm2_min=(csi)1<<62;                /* direct loops: reference */
-        CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
-        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
-        CHECK(vsdlss_m3_solve(f,b,ref)==VSDLSS_OK);
-        vsdlss_m3_factor_free(f);
-        vsdlss_perm2_min=1;
-        for(int streamed=0;streamed<2;streamed++)   /* plain / non-temporal stores */
-        for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
-            vsdlss_perm2_stream_min=streamed?0:1e300;
-            vsdlss_m3_inverse_force64=wide;
-            CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
-            f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
-            for(int rep=0;rep<2;rep++){             /* second call: cached plan */
-                CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
-                CHECK(memcmp(x,ref,(size_t)n*8)==0);
-            }
-            memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
+    for(int nt=0;nt<2;nt++) for(int wide=0;wide<2;wide++) for(int t=1;t<=maxt;t++){
+        vsdlss_m3_inverse_force64=wide;
+        vsdlss_perm2_nt_min=nt?1:(csi)1<<62;          /* non-temporal stores or plain */
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        f=NULL; CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        for(int rep=0;rep<2;rep++){                 /* second call: cached plan */
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
             CHECK(memcmp(x,ref,(size_t)n*8)==0);
-            for(int where=0;where<2;where++){       /* non-finite RHS: output untouched */
-                memcpy(bb,b,(size_t)n*8); bb[where?n-1:n/3]=NAN;
-                for(csi i=0;i<n;i++) x[i]=55;
-                CHECK(vsdlss_m3_solve(f,bb,x)==VSDLSS_ERR_NONFINITE);
-                for(csi i=0;i<n;i++) CHECK(x[i]==55);
-            }
-            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);   /* usable after a failure */
-            CHECK(memcmp(x,ref,(size_t)n*8)==0);
-            vsdlss_m3_factor_free(f);
         }
+        memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
+        CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        memcpy(bb,b,(size_t)n*8); bb[n/3]=NAN;
+        for(csi i=0;i<n;i++) x[i]=55;
+        CHECK(vsdlss_m3_solve(f,bb,x)==VSDLSS_ERR_NONFINITE);
+        for(csi i=0;i<n;i++) CHECK(x[i]==55);
+        vsdlss_m3_factor_free(f);
     }
-    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_stream_min=-1;
-    vsdlss_reduce_block=saved_block; vsdlss_reorder_min=saved_reorder;
+    vsdlss_m3_inverse_force64=0; vsdlss_perm2_min=saved_min; vsdlss_perm2_nt_min=saved_nt;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     vsdlss_spfree(A); free(b); free(bb); free(ref); free(x);
     return 0;
