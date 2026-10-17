@@ -239,6 +239,9 @@ static int cmp_edge(const void *x, const void *y)
     return (a>b)-(a<b);
 }
 
+struct vsdlss_bwd_pipe;
+static void bwd_pipe_free(struct vsdlss_bwd_pipe *);
+
 static void tail_plan_free(struct vsdlss_tail_plan *p)
 { if(p) { free(p->lp); free(p->tgt); free(p->src); free(p->m); free(p); } }
 
@@ -249,7 +252,7 @@ void vsdlss_reduction_free(vsdlss_reduction *reduction)
     free(reduction->tail_level); free(reduction->tail_chunk_rec); free(reduction->tail_chunk_nb);
     free(reduction->tail_core_bit); free(reduction->tail_chunk_core); free(reduction->tail_core_ptr);
     free(reduction->tail_core_slot); free(reduction->tail_core_upd); free(reduction->tail_core_buf);
-    tail_plan_free(reduction->tail_fwd);
+    tail_plan_free(reduction->tail_fwd); bwd_pipe_free(reduction->bwd_pipe);
     if(reduction->pk) for(csi q=0;q<reduction->pk_count;q++) {
         free(reduction->pk[q].head); free(reduction->pk[q].deg); free(reduction->pk[q].nb); free(reduction->pk[q].piv); free(reduction->pk[q].val);
     }
@@ -741,8 +744,8 @@ vsdlss_status vsdlss_reduce_forward_inplace(const vsdlss_reduction *r, double *w
  * are recovered in reverse order with the arithmetic of reduce_recover.
  * The core values are checked for finiteness here unless core_vertices was
  * dropped (M3 in memory: its core write-back already checks them). */
-vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const double *saved,
-                                             double *x)
+static vsdlss_status backward_inplace(const vsdlss_reduction *r, const double *saved, double *x,
+                                      int skip_tail)
 {
     csi k, stop=0; int bad=0, nt;
     if(!valid_reduction_shape(r) || (!x && r->n) || (!saved && r->count && r->records)) return VSDLSS_ERR_INVALID;
@@ -755,9 +758,9 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
     (void)nt;
     if(!r->records && r->count) {
         const vsdlss_pk_seg *pk=r->pk; int ok=1; csi q0=pk_blocked(r)?r->blocks:0;
-        const int tt=tail_scheduled(r,q0,nt);
+        const int tt=skip_tail?0:tail_scheduled(r,q0,nt);
         if(tt) ok&=backward_tail(r,pk+q0,SV(saved,pk[q0]),x,tt);
-        else for(csi q=r->pk_count;q>q0;q--) ok&=backward_seg(pk+q-1,SV(saved,pk[q-1]),x);
+        else if(!skip_tail) for(csi q=r->pk_count;q>q0;q--) ok&=backward_seg(pk+q-1,SV(saved,pk[q-1]),x);
         if(q0) {
             int bt=nt; if(bt>r->blocks) bt=(int)r->blocks;
             (void)bt;
@@ -778,6 +781,220 @@ vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const do
         if(bad) return status_of(bad);
     }
     return VSDLSS_OK;
+}
+
+vsdlss_status vsdlss_reduce_backward_inplace(const vsdlss_reduction *r, const double *saved,
+                                             double *x)
+{ return backward_inplace(r,saved,x,0); }
+
+/* The rest after vsdlss_reduce_core_bwd_pipelined: the core check and the
+ * block segments (the tail is done). */
+vsdlss_status vsdlss_reduce_backward_blocks_inplace(const vsdlss_reduction *r, const double *saved,
+                                                    double *x)
+{ return backward_inplace(r,saved,x,1); }
+
+/* Backward pipeline.  With one tail window, the chunks are connected
+ * components of the tail: a chunk's backward replay reads its own records'
+ * vertices and core vertices only, so it can run as soon as the core
+ * supernodes holding those core vertices are final, while the core solve
+ * goes on.  pending[c] counts the supernodes chunk c still waits for; the
+ * solve's hook decrements it for every finished supernode, and at zero the
+ * chunk becomes an OpenMP task of the solve's parallel region (outside a
+ * region of the solve, it waits on a list for the next one, or for the end
+ * of the solve).  Every record is computed from the same values as in
+ * backward_tail, so x is bitwise the same. */
+struct vsdlss_bwd_pipe {
+    csi chunks, sn, nzero;
+    int32_t *cnt;          /* chunks: distinct core supernodes read */
+    csi *sp;               /* sn+1: chunks reading supernode s are sc[sp[s] .. sp[s+1]) */
+    int32_t *sc, *zero;    /* zero: the chunks reading no core vertex */
+};
+
+static void bwd_pipe_free(struct vsdlss_bwd_pipe *p)
+{ if(p) { free(p->cnt); free(p->sp); free(p->sc); free(p->zero); free(p); } }
+
+int vsdlss_reduce_bwd_pipe_ok(const vsdlss_reduction *r, const vsdlss_sn_factor *L)
+{
+    if(!r || !L || r->records || !r->count || !pk_blocked(r) || !r->tail_windows || r->tail_levels!=1) return 0;
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    return g->count==r->tail_chunk_rec[r->tail_level[1]] && r->tail_level[0]==0 &&
+           L->n==r->n-r->count && L->count>0 && L->count<INT32_MAX && r->tail_level[1]<INT32_MAX;
+}
+
+static struct vsdlss_bwd_pipe *bwd_pipe_build(const vsdlss_reduction *r, const vsdlss_sn_factor *L)
+{
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    const csi C=r->tail_level[1], S=L->count, base=r->count, *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
+    struct vsdlss_bwd_pipe *p=(struct vsdlss_bwd_pipe *)calloc(1,sizeof *p);
+    int32_t *col_sn=(int32_t *)malloc((size_t)L->n*sizeof(int32_t));
+    csi *cp=(csi *)malloc((size_t)(C+1)*sizeof(csi));
+    int32_t *list=NULL; int fail=0;
+    if(!p || !col_sn || !cp) goto oom;
+    p->chunks=C; p->sn=S;
+    p->cnt=(int32_t *)malloc((size_t)(C?C:1)*sizeof(int32_t));
+    p->sp=(csi *)calloc((size_t)S+1,sizeof(csi));
+    if(!p->cnt || !p->sp) goto oom;
+    for(csi s=0;s<S;s++) for(csi k=L->column_start[s];k<L->column_start[s+1];k++) col_sn[k]=(int32_t)s;
+    /* two passes over the chunks (count, then list), a mark array per thread */
+    for(int pass=0;pass<2 && !fail;pass++) {
+        VSDLSS_OMP(omp parallel reduction(|:fail))
+        {
+            int32_t *mark=(int32_t *)malloc((size_t)S*sizeof(int32_t));
+            if(!mark) fail=1;
+            else {
+                for(csi s=0;s<S;s++) mark[s]=-1;
+                VSDLSS_OMP(omp for schedule(dynamic,16))
+                for(csi c=0;c<C;c++) {
+                    csi o=cn[c], m=0; int32_t *out=pass?list+cp[c]:NULL;
+                    for(csi i=cr[c];i<cr[c+1];i++) {
+                        const csi d=vsdlss_pk_degree(g,i);
+                        for(csi j=0;j<d;j++) {
+                            const csi v=(csi)g->nb[o+j];
+                            if(v<base) continue;
+                            const int32_t s=col_sn[v-base];
+                            if(mark[s]!=(int32_t)c) { mark[s]=(int32_t)c; if(out) out[m]=s; m++; }
+                        }
+                        o+=d;
+                    }
+                    if(!pass) p->cnt[c]=(int32_t)m;
+                }
+                free(mark);
+            }
+        }
+        if(fail) goto oom;
+        if(!pass) {
+            cp[0]=0; for(csi c=0;c<C;c++) cp[c+1]=cp[c]+p->cnt[c];
+            list=(int32_t *)malloc((size_t)(cp[C]?cp[C]:1)*sizeof(int32_t));
+            if(!list) goto oom;
+        }
+    }
+    /* transpose: supernode -> chunks */
+    for(csi q=0;q<cp[C];q++) p->sp[list[q]+1]++;
+    for(csi s=0;s<S;s++) p->sp[s+1]+=p->sp[s];
+    p->sc=(int32_t *)malloc((size_t)(cp[C]?cp[C]:1)*sizeof(int32_t));
+    if(!p->sc) goto oom;
+    {
+        csi *at=(csi *)malloc((size_t)(S?S:1)*sizeof(csi));
+        if(!at) goto oom;
+        memcpy(at,p->sp,(size_t)S*sizeof(csi));
+        for(csi c=0;c<C;c++) for(csi q=cp[c];q<cp[c+1];q++) p->sc[at[list[q]]++]=(int32_t)c;
+        free(at);
+    }
+    for(csi c=0;c<C;c++) p->nzero+=p->cnt[c]==0;
+    p->zero=(int32_t *)malloc((size_t)(p->nzero?p->nzero:1)*sizeof(int32_t));
+    if(!p->zero) goto oom;
+    { csi z=0; for(csi c=0;c<C;c++) if(!p->cnt[c]) p->zero[z++]=(int32_t)c; }
+    free(col_sn); free(cp); free(list);
+    return p;
+oom:
+    free(col_sn); free(cp); free(list); bwd_pipe_free(p);
+    return NULL;
+}
+
+typedef struct {
+    const vsdlss_reduction *r;
+    const vsdlss_pk_seg *g;
+    const struct vsdlss_bwd_pipe *p;
+    const double *saved;
+    double *x;
+    atomic_int *pending;
+    int32_t *deferred;     /* released outside a region of the solve */
+    atomic_long ndeferred;
+    long flushed;          /* deferred[0 .. flushed) became tasks */
+    atomic_int ok, started;
+    int level;             /* omp_get_level() of the caller */
+} bwd_pipe_ctx;
+
+static void pipe_chunk(bwd_pipe_ctx *q, csi c)
+{
+    const csi *cr=q->r->tail_chunk_rec, *cn=q->r->tail_chunk_nb;
+    if(!backward_range(q->g,cr[c],cr[c+1],cn[c+1],q->saved,q->x)) atomic_store_explicit(&q->ok,0,memory_order_relaxed);
+}
+
+static int pipe_in_region(const bwd_pipe_ctx *q)
+{
+#ifdef _OPENMP
+    return omp_get_level()>q->level;
+#else
+    (void)q; return 0;
+#endif
+}
+
+/* Inside a region of the solve, once (the first caller): tasks for the
+ * chunks that wait for nothing and for those released before the region
+ * (by the serial tree top, which runs before the solve's regions). */
+static void pipe_start(void *vq)
+{
+    bwd_pipe_ctx *q=(bwd_pipe_ctx *)vq; const struct vsdlss_bwd_pipe *p=q->p;
+    int expect=0;
+    if(atomic_load_explicit(&q->started,memory_order_acquire) || !pipe_in_region(q) ||
+       !atomic_compare_exchange_strong(&q->started,&expect,1)) return;
+    const long nd=atomic_load(&q->ndeferred);
+    for(csi z=0;z<p->nzero;z++) { const csi c=p->zero[z]; VSDLSS_OMP(omp task firstprivate(c)) pipe_chunk(q,c); }
+    for(long k=0;k<nd;k++) { const csi c=q->deferred[k]; VSDLSS_OMP(omp task firstprivate(c)) pipe_chunk(q,c); }
+    q->flushed=nd;
+}
+
+static void pipe_release(bwd_pipe_ctx *q, csi c)
+{
+    if(pipe_in_region(q)) {
+        pipe_start(q);
+        VSDLSS_OMP(omp task firstprivate(c))
+        pipe_chunk(q,c);
+    } else q->deferred[atomic_fetch_add_explicit(&q->ndeferred,1,memory_order_relaxed)]=(int32_t)c;
+}
+
+static void pipe_done(void *vq, csi s)
+{
+    bwd_pipe_ctx *q=(bwd_pipe_ctx *)vq; const struct vsdlss_bwd_pipe *p=q->p;
+    for(csi k=p->sp[s];k<p->sp[s+1];k++) {
+        const csi c=p->sc[k];
+        if(atomic_fetch_sub_explicit(q->pending+c,1,memory_order_acq_rel)==1) pipe_release(q,c);
+    }
+}
+
+long vsdlss_reduce_bwd_pipe_runs;
+vsdlss_status vsdlss_reduce_core_bwd_pipelined(const vsdlss_reduction *r, const vsdlss_sn_factor *L,
+                                               const double *saved, double *x)
+{
+    if(!vsdlss_reduce_bwd_pipe_ok(r,L) || !x) return VSDLSS_ERR_INVALID;
+    vsdlss_reduction *rw=(vsdlss_reduction *)r;
+    struct vsdlss_bwd_pipe *p=__atomic_load_n(&rw->bwd_pipe,__ATOMIC_ACQUIRE);
+    if(!p) {
+        struct vsdlss_bwd_pipe *b=bwd_pipe_build(r,L), *expect=NULL;
+        if(!b) return VSDLSS_ERR_OOM;
+        if(__atomic_compare_exchange_n(&rw->bwd_pipe,&expect,b,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) p=b;
+        else { bwd_pipe_free(b); p=expect; }
+    }
+    const csi C=p->chunks;
+    bwd_pipe_ctx q;
+    memset(&q,0,sizeof q);
+    q.r=r; q.g=r->pk+r->blocks; q.p=p; q.saved=SV(saved,r->pk[r->blocks]); q.x=x;
+    q.pending=(atomic_int *)malloc((size_t)(C?C:1)*sizeof(atomic_int));
+    q.deferred=(int32_t *)malloc((size_t)(C?C:1)*sizeof(int32_t));
+    if(!q.pending || !q.deferred) { free(q.pending); free(q.deferred); return VSDLSS_ERR_OOM; }
+    for(csi c=0;c<C;c++) atomic_init(q.pending+c,p->cnt[c]);
+    atomic_init(&q.ndeferred,0); atomic_init(&q.ok,1); atomic_init(&q.started,0);
+#ifdef _OPENMP
+    q.level=omp_get_level();
+#endif
+    const vsdlss_sn_bwd_hook hook={pipe_done,pipe_start,&q};
+    vsdlss_status st=vsdlss_sn_solve_inplace_hooked(L,x+r->count,&hook);
+    if(st==VSDLSS_OK) {
+        /* what is left: released after the last region of the solve (or the
+         * solve had none), and the chunks without core reads if never started */
+        const int st0=atomic_load(&q.started);
+        const csi nz=st0?0:p->nzero, f0=st0?(csi)q.flushed:0, nd=(csi)atomic_load(&q.ndeferred)-f0, left=nz+nd;
+        int nt=vsdlss_parallel_width((double)r->n*4); if(nt>left) nt=(int)left;
+        (void)nt;
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(dynamic,1))
+        for(csi k=0;k<left;k++) pipe_chunk(&q,k<nz?p->zero[k]:q.deferred[f0+k-nz]);
+        for(csi c=0;c<C;c++) if(atomic_load_explicit(q.pending+c,memory_order_relaxed)>0) { st=VSDLSS_ERR_INVALID; break; }
+        if(st==VSDLSS_OK && !atomic_load(&q.ok)) st=VSDLSS_ERR_NONFINITE;
+    }
+    free(q.pending); free(q.deferred);
+    __atomic_fetch_add(&vsdlss_reduce_bwd_pipe_runs,1,__ATOMIC_RELAXED);
+    return st;
 }
 
 static int record_valid(const vsdlss_reduction *r, const vsdlss_elim_record *e)

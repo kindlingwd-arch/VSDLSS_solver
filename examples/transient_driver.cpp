@@ -45,6 +45,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cerrno>
 #include <cstring>
@@ -344,6 +345,14 @@ private:
 
 static void setDefaultEnv(const char* name, const char* value) { setenv(name, value, 0); }
 static int envInt(const char* name, int def) { const char* e = std::getenv(name); return e && *e ? std::atoi(e) : def; }
+// X_HASH=1: FNV-1a of the solution bits, to compare runs bitwise.
+static std::string solutionHash(const double* x, std::size_t n) {
+    std::uint64_t h = 1469598103934665603ull;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(x);
+    for (std::size_t i = 0; i < n * sizeof(double); ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    char buf[24]; std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
 
 int main(int argc, char** argv) {
     try {
@@ -359,6 +368,7 @@ int main(int argc, char** argv) {
         const int maxSteps = envInt("STEPS", 40);
         const bool residual = envInt("CHECK_RESIDUAL", 1) != 0;
         const bool packed = envInt("PACKED", 0) != 0;
+        const bool hash = envInt("X_HASH", 0) != 0;
         const std::string diagPath = argc > 1 ? argv[1] : "diag.txt";
         const std::string dataPath = argc > 2 ? argv[2] : "data.txt";
         const auto now = [] { return std::chrono::steady_clock::now(); };
@@ -395,7 +405,8 @@ int main(int argc, char** argv) {
                   << "first: factor_ms=" << solver.factor_ms << " solve_ms(cold)=" << solver.solve_only_ms
                   << " total_ms=" << ms(t2, t3) << '\n'
                   << "  peak_rss_gb=" << u1.maxrss_gb << " major_faults_during_factor+solve=" << (u1.majflt - u0.majflt) << '\n'
-                  << "relative_residual_inf=" << res << " relative_error_vs_x_inf=" << err / std::max(1.0, norm) << "\n\n";
+                  << "relative_residual_inf=" << res << " relative_error_vs_x_inf=" << err / std::max(1.0, norm)
+                  << (hash ? " x_hash=" + solutionHash(solver.gett_rhs(), n) : std::string()) << "\n\n";
 
         std::vector<double> warm;
         for (int step = 1; step <= maxSteps; ++step) {
@@ -413,7 +424,8 @@ int main(int argc, char** argv) {
             std::cout << "step " << step << ": load_ms=" << ms(l0, l1) << " solve_ms=" << solver.solve_only_ms
                       << (packed ? " assemble_ms=" + std::to_string(solver.assemble_ms) + " readback_ms=" + std::to_string(solver.readback_ms) : std::string())
                       << " major_faults=" << (s1.majflt - s0.majflt) << " minor_faults=" << (s1.minflt - s0.minflt)
-                      << " residual=" << r << " rel_err=" << e / std::max(1.0, nn) << '\n';
+                      << " residual=" << r << " rel_err=" << e / std::max(1.0, nn)
+                      << (hash ? " x_hash=" + solutionHash(solver.gett_rhs(), n) : std::string()) << '\n';
         }
         if (!warm.empty()) {
             std::vector<double> s = warm; std::sort(s.begin(), s.end());

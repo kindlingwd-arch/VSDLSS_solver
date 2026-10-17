@@ -6,12 +6,14 @@
 /test_ordering
 /test_mld
 /test_m3
+/test_simd
 /bench_m3
 /test_sparse.*
 
 /test_ordering
 /test_mld
 /test_m3
+/test_simd
 /test_m4
 
 /test_m4_panels
@@ -57,6 +59,8 @@
 /build/
 /bench_components
 /bench_phase
+/bench_overlap
+/export_pipeline
 /bench_tail
 /bench_core
 /bench_history

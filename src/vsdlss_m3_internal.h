@@ -96,6 +96,9 @@ typedef struct vsdlss_reduction {
     uint32_t *tail_core_slot, *tail_core_upd;
     double *tail_core_buf;       /* the deferred updates (one solve at a time: tail_core_busy) */
     int tail_core_busy;
+    /* Backward pipeline (VSDLSS_PIPE_BWD, vsdlss_reduce_core_bwd_pipelined):
+     * the core supernodes each tail chunk reads, built on first use. */
+    struct vsdlss_bwd_pipe *bwd_pipe;
 } vsdlss_reduction;
 
 /* Supernodal symbolic layout.
@@ -263,6 +266,8 @@ extern csi vsdlss_reduce_tail_min; /* smallest sequential tail given a level sch
 extern csi vsdlss_reduce_tail_grain; /* records per thread per level of the scheduled tail (tests: lower it) */
 extern csi vsdlss_reduce_tail_order_grain; /* same, for building the level order (tests: lower it) */
 extern csi vsdlss_reduce_tail_windows; /* window schedule K (default 64), 0 = levels (tests: set it) */
+extern int vsdlss_m3_pipe_bwd;      /* backward pipeline: -1 = VSDLSS_PIPE_BWD (default off), 0 / 1 (tests: set it) */
+extern long vsdlss_reduce_bwd_pipe_runs; /* tests: calls of vsdlss_reduce_core_bwd_pipelined */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
 extern int vsdlss_m3_inverse_force64; /* tests: 64-bit inverse-map codes */
 extern csi vsdlss_perm2_min;         /* tests: smallest n for the two-pass gather/write-back */
@@ -324,6 +329,31 @@ vsdlss_status vsdlss_sn_solve(const vsdlss_sn_factor *, const double *, double *
  * or intermediate always leaves a non-finite entry in the result).  Bitwise
  * the same result as vsdlss_sn_solve.  On failure x is partially updated. */
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *, double *x);
+/* The same solve, telling hook->done(hook->ctx, s) as soon as panel s of
+ * the backward pass is final (its columns of x hold the solution), from
+ * whichever thread finished it.  Inside the tree-parallel schedule the call
+ * may come from a parallel region (it may create OpenMP tasks, which finish
+ * before the solve returns) or from the serial tree top; hook->start runs
+ * once, inside the first parallel region of the backward pass, before any
+ * of its panels.  The arithmetic is that of vsdlss_sn_solve_inplace. */
+typedef struct vsdlss_sn_bwd_hook {
+    void (*done)(void *ctx, csi sn);
+    void (*start)(void *ctx);
+    void *ctx;
+} vsdlss_sn_bwd_hook;
+vsdlss_status vsdlss_sn_solve_inplace_hooked(const vsdlss_sn_factor *, double *x, const vsdlss_sn_bwd_hook *hook);
+/* Backward pipeline of a relabelled component (core at x[count..n), core
+ * factor L): solves the core in place and replays the backward pass of the
+ * window-scheduled tail chunk by chunk as soon as the core supernodes the
+ * chunk reads are final, on the threads the core solve leaves idle.  Then
+ * vsdlss_reduce_backward_blocks_inplace finishes the backward replay.  The
+ * same arithmetic as vsdlss_sn_solve_inplace followed by
+ * vsdlss_reduce_backward_inplace (bitwise the same x).
+ * vsdlss_reduce_bwd_pipe_ok tells whether the reduction has that form. */
+int vsdlss_reduce_bwd_pipe_ok(const vsdlss_reduction *, const vsdlss_sn_factor *L);
+vsdlss_status vsdlss_reduce_core_bwd_pipelined(const vsdlss_reduction *, const vsdlss_sn_factor *L,
+                                               const double *saved, double *x);
+vsdlss_status vsdlss_reduce_backward_blocks_inplace(const vsdlss_reduction *, const double *saved, double *x);
 /* Number of vsdlss_sn_solve_inplace calls so far that took the tree-parallel
  * schedule instead of the serial panel loop (kind 0), and of those, the ones
  * that ran the forward (1) / backward (2) tree top by branches.

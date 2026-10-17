@@ -991,6 +991,59 @@ static int test_reduction_tail_levels(void)
     return 0;
 }
 
+/* Backward pipeline (VSDLSS_PIPE_BWD): the core solve with the tail's
+ * backward replay released by finished supernodes gives the bits of the
+ * separate passes, at 1/2/4 threads and with the tree top in order and by
+ * branches, for solve and solve_many. */
+static int test_pipe_bwd(void)
+{
+    const csi saved_blk=vsdlss_reduce_block, saved_win=vsdlss_reduce_tail_windows, saved_min=vsdlss_reduce_tail_min;
+    const int saved_relabel=vsdlss_m3_relabel, saved_pipe=vsdlss_m3_pipe_bwd, saved_br=vsdlss_top_branches;
+    const csi G=150, S=3;
+    test_edge *edge=malloc((size_t)(2*G*(G-1)*(S+1))*sizeof(*edge)); csi e=0, n=G*G;
+    CHECK(edge);
+    for(csi y=0;y<G;y++) for(csi x=0;x<G;x++) for(int dir=0;dir<2;dir++) {
+        csi x2=x+(dir==0), y2=y+(dir==1), prev=y*G+x;
+        if(x2>=G||y2>=G) continue;
+        const csi len=(x+3*y)%4==0?S:0;                /* some edges direct: the grid stays as the core */
+        for(csi c=0;c<len;c++) { csi node=n++; edge[e++]=(test_edge){prev,node,1.0+0.001*(double)(e%97)}; prev=node; }
+        edge[e++]=(test_edge){prev,y2*G+x2,0.5+0.002*(double)(e%89)};
+    }
+    vsdlss *A=make_laplacian(n,edge,e); CHECK(A); free(edge);
+    double *b=malloc((size_t)n*16), *ref=malloc((size_t)n*16), *x=malloc((size_t)n*16);
+    CHECK(b&&ref&&x);
+    for(csi i=0;i<2*n;i++) b[i]=sin(0.23*(double)i)+0.1;
+    vsdlss_reduce_block=256; vsdlss_reduce_tail_windows=64; vsdlss_reduce_tail_min=1; vsdlss_m3_relabel=1;
+    const long runs0=vsdlss_reduce_bwd_pipe_runs;
+    int first=1;
+    for(int t=1;t<=(vsdlss_parallel_enabled()?4:1);t*=2) for(int br=0;br<4;br+=2) {
+        vsdlss_m3_factor *f=NULL; double eta;
+        CHECK(vsdlss_set_num_threads(t)==VSDLSS_OK);
+        vsdlss_top_branches=br;
+        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        int ok=0;
+        for(csi c=0;c<f->count;c++) ok|=f->component[c].core_contig && vsdlss_reduce_bwd_pipe_ok(f->component[c].reduction,f->component[c].numeric);
+        CHECK(ok);
+        for(int pipe=0;pipe<2;pipe++) {
+            vsdlss_m3_pipe_bwd=pipe;
+            for(int rep=0;rep<2;rep++) {                /* the second solve reuses the cached structure */
+                CHECK(vsdlss_m3_solve_many(f,2,b,n,first?ref:x,n)==VSDLSS_OK);
+                if(first) { CHECK(vsdlss_backward_error(A,ref,b,&eta)==VSDLSS_OK && eta<1e-13); first=0; }
+                else CHECK(memcmp(x,ref,(size_t)n*16)==0);
+                CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK && memcmp(x,ref,(size_t)n*8)==0);
+            }
+        }
+        vsdlss_m3_factor_free(f);
+    }
+    CHECK(vsdlss_reduce_bwd_pipe_runs>runs0);
+    vsdlss_reduce_block=saved_blk; vsdlss_reduce_tail_windows=saved_win; vsdlss_reduce_tail_min=saved_min;
+    vsdlss_m3_relabel=saved_relabel; vsdlss_m3_pipe_bwd=saved_pipe; vsdlss_top_branches=saved_br;
+    CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
+    free(b); free(ref); free(x); vsdlss_spfree(A);
+    printf("backward pipeline: same bits as the separate core solve and tail replay (1/2/4 threads, top in order / by branches)\n");
+    return 0;
+}
+
 /* A 2% grid joined by wires of 20..60 nodes, all numbered at random, so
  * nearly every eliminated record lands in the sequential tail (upper CSC). */
 static vsdlss *tail_graph(csi n)
@@ -1222,6 +1275,7 @@ static int test_reduction_tombstones(void)
 int main(void)
 {
     CHECK(test_reduction_tail_levels()==0);
+    CHECK(test_pipe_bwd()==0);
     CHECK(test_reduction_tail_order_threads()==0);
     CHECK(test_reduction_tombstones()==0);
     CHECK(test_interleaved_components_and_extract()==0);

@@ -726,6 +726,15 @@ static vsdlss_status ws_acquire(const vsdlss_m3_factor *f, csi c, solve_ws *w)
 }
 
 /* Phase 1 for one component (all buffers private). */
+/* Backward pipeline of the in-memory relabelled solve (see
+ * vsdlss_reduce_core_bwd_pipelined): VSDLSS_PIPE_BWD=1; off by default. */
+int vsdlss_m3_pipe_bwd=-1;
+static int pipe_bwd_on(void)
+{
+    if(vsdlss_m3_pipe_bwd<0) { const char *e=getenv("VSDLSS_PIPE_BWD"); vsdlss_m3_pipe_bwd=e && e[0]=='1'; }
+    return vsdlss_m3_pipe_bwd;
+}
+
 static vsdlss_status solve_local(void *vctx, csi c)
 {
     const solve_ctx *x=(const solve_ctx*)vctx;
@@ -774,7 +783,9 @@ static vsdlss_status solve_local(void *vctx, csi c)
                  * without them (dropped after factorization) it is checked
                  * here, in one sequential pass over the core tail. */
                 LEDGER_MARK(LG_CORE_GATHER,tl);
-                status=vsdlss_sn_solve_inplace(cf->numeric,local+r->count);
+                const int piped=pipe_bwd_on() && vsdlss_reduce_bwd_pipe_ok(r,cf->numeric);
+                status=piped?vsdlss_reduce_core_bwd_pipelined(r,cf->numeric,w->saved,local)
+                            :vsdlss_sn_solve_inplace(cf->numeric,local+r->count);
                 if(status!=VSDLSS_OK) return status;
                 if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
                 if(!r->core_vertices) {
@@ -783,6 +794,15 @@ static vsdlss_status solve_local(void *vctx, csi c)
                     VSDLSS_OMP(omp parallel for num_threads(ct) if(ct>1) schedule(static) reduction(|:bad))
                     for(csi k=0;k<core;k++) bad|=!isfinite(cv[k]);
                     if(bad) return VSDLSS_ERR_NONFINITE;
+                }
+                if(piped) {
+                    /* the tail's backward replay ran with the core solve */
+                    TRACE("solve: core + tail backward",t0);
+                    if(vsdlss_ledger_level()) tl=vsdlss_ledger_now();
+                    status=vsdlss_reduce_backward_blocks_inplace(r,w->saved,local);
+                    TRACE("solve: reduce backward (blocks)",t0);
+                    LEDGER_MARK(LG_RED_BWD,tl);
+                    return status;
                 }
                 goto core_done;
             }
