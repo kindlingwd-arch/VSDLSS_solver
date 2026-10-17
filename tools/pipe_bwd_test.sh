@@ -20,11 +20,14 @@
 # 3. Phases: one run each with VSDLSS_TRACE=1 (median of every "solve:"
 #    line); with the pipeline, "core" + "reduce backward" become
 #    "core + tail backward" + "reduce backward (blocks)".
-# OMP_PROC_BIND / OMP_PLACES etc. are taken from the caller's environment.
+# Threads are bound as in production (OMP_PROC_BIND=spread OMP_PLACES=cores)
+# unless the caller sets OMP_PROC_BIND / OMP_PLACES: unbound threads on a
+# two-socket machine move between NUMA nodes and make runs differ by +-50%.
 # Output: pipe_bwd_test_<time>/  (build.log, one .log per run, summary.txt)
 set -u
 ARG=${1:?usage: bash pipe_bwd_test.sh <source directory | transient_driver> [threads] [steps] [rounds]}
 T=${2:-32}; STEPS=${3:-5}; ROUNDS=${4:-3}
+export OMP_PROC_BIND=${OMP_PROC_BIND:-spread} OMP_PLACES=${OMP_PLACES:-cores}
 for f in diag.txt data.txt b_vector.txt x_vector.txt 1b_vector.txt; do [ -f "$f" ] || { echo "missing $f in $(pwd)"; exit 1; }; done
 OUT=pipe_bwd_test_$(date +%m%d_%H%M); mkdir -p "$OUT"
 {
@@ -51,6 +54,7 @@ if [ -d "$ARG" ]; then
         { echo "    BUILD FAILED"; tail -n 15 "$OUT/build.log" | sed 's/^/    | /'; } | tee -a "$OUT/summary.txt"; exit 1
     fi
     DRV=$SRC/transient_driver
+    case "$BUILD" in *BLAS=1*) ;; *) echo "    WARNING: built without BLAS/MKL (production uses MKL): set BUILD=\"METIS=1 BLAS=1 BLAS_LIBS='-L<mkl>/lib -lmkl_rt -Wl,-rpath,<mkl>/lib'\" or MKLROOT" | tee -a "$OUT/summary.txt";; esac
     grep -E "^(cc|gcc|g\+\+|c\+\+).*transient_driver" "$OUT/build.log" | tail -n 1 | cut -c1-300 | sed 's/^/    /' | tee -a "$OUT/summary.txt"
 else
     DRV=$ARG
@@ -77,8 +81,14 @@ med_of() {   # median of the runs' warm medians
     for f in "$OUT"/$1_[0-9]*.log; do grep -a "warm solves" "$f" | sed -E 's/.*median ([0-9.]+) ms.*/\1/'; done |
         sort -g | awk '{a[NR]=$1} END {if(NR) print a[int((NR+1)/2)]; else print "nan"}'
 }
+min_of() {   # best warm solve over all runs
+    for f in "$OUT"/$1_[0-9]*.log; do grep -a "warm solves" "$f" | sed -E 's/.*min ([0-9.]+) ms.*/\1/'; done |
+        sort -g | head -n 1
+}
 OFF=$(med_of off); ON=$(med_of on)
 awk -v a="$OFF" -v b="$ON" 'BEGIN {printf "    warm median over rounds: off %.2f ms, on %.2f ms, change %+.2f ms (%+.1f%%)\n", a, b, b-a, a>0?100*(b-a)/a:0}' |
+    tee -a "$OUT/summary.txt"
+awk -v a="$(min_of off)" -v b="$(min_of on)" 'BEGIN {printf "    best warm solve:         off %.2f ms, on %.2f ms, change %+.2f ms (%+.1f%%)\n", a, b, b-a, a>0?100*(b-a)/a:0}' |
     tee -a "$OUT/summary.txt"
 
 echo; echo "=== 2. bitwise (x_hash of the first solve and every step)" | tee -a "$OUT/summary.txt"
