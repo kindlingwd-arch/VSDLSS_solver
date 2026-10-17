@@ -86,9 +86,9 @@ min_of() {   # best warm solve over all runs
         sort -g | head -n 1
 }
 OFF=$(med_of off); ON=$(med_of on)
-awk -v a="$OFF" -v b="$ON" 'BEGIN {printf "    warm median over rounds: off %.2f ms, on %.2f ms, change %+.2f ms (%+.1f%%)\n", a, b, b-a, a>0?100*(b-a)/a:0}' |
+awk -v a="$OFF" -v b="$ON" 'BEGIN {printf "    warm median over rounds: off %.2f ms, on %.2f ms, change %+.2f ms (%+.1f%%)\n", a, b, b-a, (a>0?100*(b-a)/a:0)}' |
     tee -a "$OUT/summary.txt"
-awk -v a="$(min_of off)" -v b="$(min_of on)" 'BEGIN {printf "    best warm solve:         off %.2f ms, on %.2f ms, change %+.2f ms (%+.1f%%)\n", a, b, b-a, a>0?100*(b-a)/a:0}' |
+awk -v a="$(min_of off)" -v b="$(min_of on)" 'BEGIN {printf "    best warm solve:         off %.2f ms, on %.2f ms, change %+.2f ms (%+.1f%%)\n", a, b, b-a, (a>0?100*(b-a)/a:0)}' |
     tee -a "$OUT/summary.txt"
 
 echo; echo "=== 2. bitwise (x_hash of the first solve and every step)" | tee -a "$OUT/summary.txt"
