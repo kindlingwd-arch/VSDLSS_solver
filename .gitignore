@@ -62,6 +62,7 @@
 /bench_overlap
 /export_pipeline
 /nb_stats
+/fp32_probe
 /bench_tail
 /bench_core
 /bench_history
