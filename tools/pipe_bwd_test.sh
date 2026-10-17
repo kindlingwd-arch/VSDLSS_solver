@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # A/B of the backward pipeline (VSDLSS_PIPE_BWD=1) in the transient solve.
+# Builds transient_driver itself, then runs the comparison.
 #
-#   make transient_driver METIS=1 [BLAS=1 BLAS_LIBS=...]    (as before)
 #   cd <data directory with diag.txt data.txt b_vector.txt x_vector.txt 1b_vector.txt ...>
-#   bash pipe_bwd_test.sh <path to transient_driver> [threads=32] [steps=5] [rounds=3]
+#   bash <source>/tools/pipe_bwd_test.sh <source directory> [threads=32] [steps=5] [rounds=3]
+#
+# Build: in <source directory>: make transient_driver $BUILD after removing
+# the old objects (flags may differ).  BUILD defaults to "METIS=1", plus
+# "BLAS=1 BLAS_LIBS=..." for MKL when $MKLROOT holds libmkl_rt (or
+# OpenBLAS when libopenblas is installed and MKLROOT is unset); set BUILD to
+# override, e.g. BUILD="METIS=1 BLAS=1 BLAS_LIBS='-L/opt/mkl/lib -lmkl_rt'".
+# A path to an already built transient_driver instead of the directory skips
+# the build.
 #
 # 1. Timing: `rounds` pairs of runs, pipeline off / on (order alternated per
 #    round against drift), without the trace (it reads /proc on every line).
@@ -13,19 +21,42 @@
 #    line); with the pipeline, "core" + "reduce backward" become
 #    "core + tail backward" + "reduce backward (blocks)".
 # OMP_PROC_BIND / OMP_PLACES etc. are taken from the caller's environment.
-# Output: pipe_bwd_test_<time>/  (one .log per run + summary.txt)
+# Output: pipe_bwd_test_<time>/  (build.log, one .log per run, summary.txt)
 set -u
-DRV=${1:?usage: bash pipe_bwd_test.sh <transient_driver> [threads] [steps] [rounds]}
+ARG=${1:?usage: bash pipe_bwd_test.sh <source directory | transient_driver> [threads] [steps] [rounds]}
 T=${2:-32}; STEPS=${3:-5}; ROUNDS=${4:-3}
-[ -x "$DRV" ] || { echo "not executable: $DRV"; exit 1; }
 for f in diag.txt data.txt b_vector.txt x_vector.txt 1b_vector.txt; do [ -f "$f" ] || { echo "missing $f in $(pwd)"; exit 1; }; done
 OUT=pipe_bwd_test_$(date +%m%d_%H%M); mkdir -p "$OUT"
 {
   echo "### $(date)  $(hostname)"
   lscpu | grep -E "Model name|^CPU\(s\)|Socket|NUMA node\(s\)"
-  echo "driver: $DRV  threads: $T  steps: $STEPS  rounds: $ROUNDS"
+  echo "input: $ARG  threads: $T  steps: $STEPS  rounds: $ROUNDS"
   echo "env: OMP_PROC_BIND=${OMP_PROC_BIND:-} OMP_PLACES=${OMP_PLACES:-} VSDLSS_INTERLEAVE=${VSDLSS_INTERLEAVE:-}"
 } | tee "$OUT/summary.txt"
+
+if [ -d "$ARG" ]; then
+    SRC=$(cd "$ARG" && pwd)
+    [ -f "$SRC/Makefile" ] && [ -f "$SRC/src/vsdlss_reduction.c" ] || { echo "not a source directory: $SRC"; exit 1; }
+    grep -q vsdlss_reduce_core_bwd_pipelined "$SRC/src/vsdlss_reduction.c" ||
+        { echo "the sources in $SRC have no backward pipeline: copy the overlay package first"; exit 1; }
+    if [ -z "${BUILD+x}" ]; then
+        BUILD="METIS=1"
+        MKLRT=""; [ -n "${MKLROOT:-}" ] && MKLRT=$(find "$MKLROOT" -name 'libmkl_rt.so*' 2>/dev/null | head -n 1)
+        if [ -n "$MKLRT" ]; then D=$(dirname "$MKLRT"); BUILD="METIS=1 BLAS=1 BLAS_LIBS='-L$D -lmkl_rt -Wl,-rpath,$D'"
+        elif [ -z "${MKLROOT:-}" ] && ldconfig -p 2>/dev/null | grep -q libopenblas; then BUILD="METIS=1 BLAS=1 BLAS_LIBS=-lopenblas"; fi
+    fi
+    echo "build: make -C $SRC transient_driver $BUILD   (log: $OUT/build.log)" | tee -a "$OUT/summary.txt"
+    rm -f "$SRC/libvsdlss.a" "$SRC"/src/*.o "$SRC/transient_driver"
+    if ! eval make -C "\"$SRC\"" -j"$(nproc)" transient_driver $BUILD > "$OUT/build.log" 2>&1; then
+        { echo "    BUILD FAILED"; tail -n 15 "$OUT/build.log" | sed 's/^/    | /'; } | tee -a "$OUT/summary.txt"; exit 1
+    fi
+    DRV=$SRC/transient_driver
+    grep -E "^(cc|gcc|g\+\+|c\+\+).*transient_driver" "$OUT/build.log" | tail -n 1 | cut -c1-300 | sed 's/^/    /' | tee -a "$OUT/summary.txt"
+else
+    DRV=$ARG
+fi
+[ -x "$DRV" ] || { echo "not executable: $DRV"; exit 1; }
+grep -aq X_HASH "$DRV" || echo "    note: $DRV has no X_HASH (old driver): the bitwise check will fail" | tee -a "$OUT/summary.txt"
 
 run() {   # run <name> <pipe 0/1> <trace 0/1> <steps>
     local name=$1 pipe=$2 trace=$3 steps=$4
