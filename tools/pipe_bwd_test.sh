@@ -7,8 +7,9 @@
 #
 # Build: in <source directory>: make transient_driver $BUILD after removing
 # the old objects (flags may differ).  BUILD defaults to "METIS=1", plus
-# "BLAS=1 BLAS_LIBS=..." for MKL when $MKLROOT holds libmkl_rt (or
-# OpenBLAS when libopenblas is installed and MKLROOT is unset); set BUILD to
+# "BLAS=1 BLAS_LIBS=..." for MKL when libmkl_rt is found ($MKLROOT, ldconfig,
+# oneAPI / conda places, LD_LIBRARY_PATH, /opt /usr /home), else OpenBLAS
+# when installed; set BUILD to
 # override, e.g. BUILD="METIS=1 BLAS=1 BLAS_LIBS='-L/opt/mkl/lib -lmkl_rt'".
 # A path to an already built transient_driver instead of the directory skips
 # the build.
@@ -44,9 +45,20 @@ if [ -d "$ARG" ]; then
         { echo "the sources in $SRC have no backward pipeline: copy the overlay package first"; exit 1; }
     if [ -z "${BUILD+x}" ]; then
         BUILD="METIS=1"
-        MKLRT=""; [ -n "${MKLROOT:-}" ] && MKLRT=$(find "$MKLROOT" -name 'libmkl_rt.so*' 2>/dev/null | head -n 1)
+        # libmkl_rt: $MKLROOT, the loader cache, the usual oneAPI / conda / pip
+        # places, LD_LIBRARY_PATH, then a bounded search of /opt /usr /home
+        MKLRT=""
+        [ -n "${MKLROOT:-}" ] && MKLRT=$(find "$MKLROOT" -name 'libmkl_rt.so*' 2>/dev/null | head -n 1)
+        [ -z "$MKLRT" ] && MKLRT=$(ldconfig -p 2>/dev/null | awk '/libmkl_rt\.so/ {print $NF; exit}')
+        if [ -z "$MKLRT" ]; then
+            for d in ${LD_LIBRARY_PATH//:/ } /opt/intel/oneapi/mkl/latest/lib /opt/intel/oneapi/mkl/latest/lib/intel64 \
+                     /opt/intel/mkl/lib/intel64 ${CONDA_PREFIX:+$CONDA_PREFIX/lib} "$HOME"/.local/lib; do
+                for f in "$d"/libmkl_rt.so*; do [ -e "$f" ] && { MKLRT=$f; break 2; }; done
+            done
+        fi
+        [ -z "$MKLRT" ] && MKLRT=$(timeout 60 find /opt /usr /home -maxdepth 8 -name 'libmkl_rt.so*' 2>/dev/null | head -n 1)
         if [ -n "$MKLRT" ]; then D=$(dirname "$MKLRT"); BUILD="METIS=1 BLAS=1 BLAS_LIBS='-L$D -lmkl_rt -Wl,-rpath,$D'"
-        elif [ -z "${MKLROOT:-}" ] && ldconfig -p 2>/dev/null | grep -q libopenblas; then BUILD="METIS=1 BLAS=1 BLAS_LIBS=-lopenblas"; fi
+        elif ldconfig -p 2>/dev/null | grep -q libopenblas; then BUILD="METIS=1 BLAS=1 BLAS_LIBS=-lopenblas"; fi
     fi
     echo "build: make -C $SRC transient_driver $BUILD   (log: $OUT/build.log)" | tee -a "$OUT/summary.txt"
     rm -f "$SRC/libvsdlss.a" "$SRC"/src/*.o "$SRC/transient_driver"
