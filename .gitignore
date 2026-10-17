@@ -57,6 +57,7 @@
 /build/
 /bench_components
 /bench_phase
+/bench_overlap
 /bench_tail
 /bench_core
 /bench_history
