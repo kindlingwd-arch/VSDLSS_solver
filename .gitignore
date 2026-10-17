@@ -61,6 +61,7 @@
 /bench_phase
 /bench_overlap
 /export_pipeline
+/nb_stats
 /bench_tail
 /bench_core
 /bench_history
