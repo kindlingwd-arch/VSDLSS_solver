@@ -142,3 +142,4 @@ cd /tmp/v && gcc -O2 -fPIC -shared -Wl,-Bsymbolic -Iinclude -std=c11 -fopenmp \
   - 调用方直接按内部顺序组装右端项、读取解，省掉 gather / scatter（约 57 ms）；
   - NUMA 本地化（`VSDLSS_TAIL_NUMA=1` 实验版，待服务器实测，未合并）；
   - 改为按图划分分块，以缩短分解时间。
+- **试过、收益很小的**：求解各段的数据流流水线。回代侧原型（`VSDLSS_PIPE_BWD=1`，默认关闭）在 6100 万结点用例上每网只省约 2 ms；用接口响应解耦是负收益（[overlap-pipeline](solve-overlap-pipeline-20261017.md)）。
