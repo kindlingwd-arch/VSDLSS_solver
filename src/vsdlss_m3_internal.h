@@ -266,6 +266,7 @@ extern csi vsdlss_reduce_tail_min; /* smallest sequential tail given a level sch
 extern csi vsdlss_reduce_tail_grain; /* records per thread per level of the scheduled tail (tests: lower it) */
 extern csi vsdlss_reduce_tail_order_grain; /* same, for building the level order (tests: lower it) */
 extern csi vsdlss_reduce_tail_windows; /* window schedule K (default 64), 0 = levels (tests: set it) */
+extern csi vsdlss_reduce_prefetch;   /* replay software prefetch distance: -1 = VSDLSS_PREFETCH (default 0, off) (tests: set it) */
 extern int vsdlss_m3_pipe_bwd;      /* backward pipeline: -1 = VSDLSS_PIPE_BWD (default off), 0 / 1 (tests: set it) */
 extern long vsdlss_reduce_bwd_pipe_runs; /* tests: calls of vsdlss_reduce_core_bwd_pipelined */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */

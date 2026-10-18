@@ -461,6 +461,77 @@ static int blocks_valid(const vsdlss_reduction *r)
 static vsdlss_status status_of(int bad)
 { return bad==0?VSDLSS_OK:(bad&1)?VSDLSS_ERR_INVALID:VSDLSS_ERR_NONFINITE; }
 
+/* Software prefetch of the replays (VSDLSS_PREFETCH=P, default 0 = off):
+ * the relabelled replays touch work[nb[o]] / x[nb[o]] in neighbour order,
+ * so the entry P neighbour slots ahead is prefetched (forward: for writing,
+ * backward: for reading).  The records themselves stream and are left to
+ * the hardware prefetcher.  Only adds prefetch hints: the same bits. */
+csi vsdlss_reduce_prefetch = -1;
+static csi prefetch_dist(void)
+{
+    csi v=__atomic_load_n(&vsdlss_reduce_prefetch,__ATOMIC_RELAXED);
+    if(v<0) {
+        const char *e=getenv("VSDLSS_PREFETCH");
+        v=e&&*e?(csi)atoll(e):0; if(v<0) v=0;
+        __atomic_store_n(&vsdlss_reduce_prefetch,v,__ATOMIC_RELAXED);
+    }
+    return v;
+}
+
+/* forward_range / forward_range_defer of a relabelled segment with the
+ * prefetch: entries up to o + P (within the segment) are requested before
+ * the record at o is applied.  buf/bit/slot NULL: no deferred updates. */
+static void forward_range_pf(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
+                             double *restrict work, double *restrict saved,
+                             const uint64_t *restrict bit, const uint32_t *restrict slot,
+                             double *restrict buf, csi P)
+{
+    const uint32_t *restrict nb=g->nb;
+    const double *restrict val=g->val;
+    const uint8_t *restrict deg=g->deg; const csi k0=g->k0, nbn=g->nbn;
+    csi p=o;
+    for(const csi e=o+P<nbn?o+P:nbn;p<e;p++) __builtin_prefetch(work+nb[p],1,3);
+    for(csi i=i0;i<i1;i++) {
+        const csi d=deg[i];
+        const double s=work[k0+i];
+        if(saved) saved[i]=s;
+        if(bit) {
+            for(csi j=0;j<d;j++,o++) {
+                double update=val[o]*s;
+                if((bit[o>>6]>>(o&63))&1) buf[*slot++]=update; else work[nb[o]]-=update;
+            }
+        } else {
+            for(csi j=0;j<d;j++,o++) { double update=val[o]*s; work[nb[o]]-=update; }
+        }
+        for(const csi e=o+P<nbn?o+P:nbn;p<e;p++) __builtin_prefetch(work+nb[p],1,3);
+    }
+}
+
+/* backward_range of a relabelled segment with the prefetch (descending:
+ * entries down to o - P are requested before the record ending at o). */
+static int backward_range_pf(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
+                             const double *restrict saved, double *restrict x, csi P)
+{
+    const uint32_t *restrict nb=g->nb;
+    const double *restrict piv=g->piv, *restrict val=g->val;
+    const uint8_t *restrict deg=g->deg;
+    int ok=1;
+    csi q=o;
+    for(const csi e=o>P?o-P:0;q>e;) { q--; __builtin_prefetch(x+nb[q],0,3); }
+    for(csi i=i1;i>i0;) {
+        i--;
+        csi d=deg[i], v_=g->k0+i;
+        o-=d;
+        const double *v=val+o; const uint32_t *w=nb+o;
+        double value=(saved?saved[i]:x[v_])/piv[i];
+        for(csi j=0;j<d;j++) { double update=v[j]*x[w[j]]; value-=update; }
+        ok&=isfinite(value)!=0;
+        x[v_]=value;
+        for(const csi e=o>P?o-P:0;q>e;) { q--; __builtin_prefetch(x+nb[q],0,3); }
+    }
+    return ok;
+}
+
 /* Packed replay of one segment (saved points at the segment's first
  * record).  Same operations, in the same order, as forward_record /
  * backward_record. */
@@ -470,6 +541,7 @@ static inline void forward_range(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
 {
     const uint32_t *restrict nb=g->nb;
     const double *restrict val=g->val;
+    if(!g->head && prefetch_dist()) { forward_range_pf(g,i0,i1,o,work,saved,NULL,NULL,NULL,prefetch_dist()); return; }
     if(!g->head) {                     /* relabelled: vertex k0+i, 1-byte degrees */
         const uint8_t *restrict deg=g->deg; const csi k0=g->k0;
         for(csi i=i0;i<i1;i++) {
@@ -503,6 +575,7 @@ static inline void forward_range_defer(const vsdlss_pk_seg *g, csi i0, csi i1, c
                                        const uint64_t *restrict bit, const uint32_t *restrict slot,
                                        double *restrict buf)
 {
+    if(!g->head && prefetch_dist()) { forward_range_pf(g,i0,i1,o,work,saved,bit,slot,buf,prefetch_dist()); return; }
     const uint32_t *restrict nb=g->nb;
     const double *restrict val=g->val;
     for(csi i=i0;i<i1;i++) {
@@ -521,6 +594,7 @@ static inline void forward_range_defer(const vsdlss_pk_seg *g, csi i0, csi i1, c
 static inline int backward_range(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
                                  const double *restrict saved, double *restrict x)
 {
+    if(!g->head && prefetch_dist()) return backward_range_pf(g,i0,i1,o,saved,x,prefetch_dist());
     const uint32_t *restrict nb=g->nb;
     const double *restrict piv=g->piv, *restrict val=g->val;
     int ok=1;
