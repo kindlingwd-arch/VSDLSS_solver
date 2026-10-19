@@ -21,4 +21,15 @@ void *vsdlss_big_malloc(size_t bytes);
 void *vsdlss_big_calloc(size_t count, size_t size);
 void *vsdlss_big_malloc_aligned(size_t align, size_t bytes);  /* align: power of 2, >= sizeof(void*) */
 void vsdlss_parallel_observe(void); /* master thread only */
+/* NUMA interleave of large arrays (see vsdlss_parallel.c): active when
+ * VSDLSS_NUMA_INTERLEAVE is not 0 (default on) and the machine has more
+ * than one memory node.  vsdlss_numa_spread interleaves the whole pages of
+ * a range of at least 1 MiB; move also migrates pages already placed.  The
+ * vsdlss_big_* allocators apply it.  Tests: vsdlss_numa_interleave (-1 =
+ * environment, 0, 1, 2 = also on a one-node machine) and the byte count
+ * vsdlss_numa_spread_bytes. */
+int vsdlss_numa_interleave_active(void);
+void vsdlss_numa_spread(void *p, size_t bytes, int move);
+extern int vsdlss_numa_interleave;
+extern long vsdlss_numa_spread_bytes;
 #endif

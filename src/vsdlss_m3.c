@@ -480,6 +480,48 @@ static idxmap core_map_of(const vsdlss_m3_component_factor *cf)
 { idxmap m={cf->core_map32,cf->core_map}; return m; }
 
 /* VSDLSS_TRACE: bytes held by the factor, by kind. */
+/* NUMA interleave (vsdlss_numa_spread) of the factor's large arrays that
+ * the solves stream, once the factorization has filled them: the records,
+ * the core panels and indices, the maps and the solve workspace.  Pages
+ * already placed are migrated; arrays from the vsdlss_big_* allocators
+ * already follow the policy and are left as they are. */
+static void spread_factor(const vsdlss_m3_factor *f)
+{
+    if(!vsdlss_numa_interleave_active() || f->disk_mode) return;
+    const csi n=f->n;
+    if(f->inv32) vsdlss_numa_spread(f->inv32,(size_t)n*4,1);
+    if(f->inv64) vsdlss_numa_spread(f->inv64,(size_t)n*8,1);
+    if(f->components->vertices) vsdlss_numa_spread(f->components->vertices,(size_t)n*sizeof(csi),1);
+    for(csi c=0;c<f->count;c++) {
+        const vsdlss_m3_component_factor *cf=f->component+c;
+        const vsdlss_reduction *r=cf->reduction;
+        const csi cn=cf->n;
+        if(cf->map32) vsdlss_numa_spread(cf->map32,(size_t)cn*4,1);
+        if(cf->gather) vsdlss_numa_spread(cf->gather,(size_t)cn*sizeof(csi),1);
+        if(cf->ws_local) vsdlss_numa_spread(cf->ws_local,(size_t)cn*sizeof(double),1);
+        if(r) {
+            if(cf->ws_saved && r->records) vsdlss_numa_spread(cf->ws_saved,(size_t)r->count*sizeof(double),1);
+            if(cf->ws_core) vsdlss_numa_spread(cf->ws_core,(size_t)r->core_n*sizeof(double),1);
+            if(cf->core_map32) vsdlss_numa_spread(cf->core_map32,(size_t)r->core_n*4,1);
+            if(cf->core_map) vsdlss_numa_spread(cf->core_map,(size_t)r->core_n*sizeof(csi),1);
+            for(csi q=0;q<r->pk_count;q++) {
+                const vsdlss_pk_seg *g=r->pk+q;
+                if(g->head) vsdlss_numa_spread(g->head,(size_t)g->count*4,1);
+                if(g->deg) vsdlss_numa_spread(g->deg,(size_t)g->count,1);
+                vsdlss_numa_spread(g->piv,(size_t)g->count*8,1);
+                vsdlss_numa_spread(g->nb,(size_t)g->nbn*4,1);
+                vsdlss_numa_spread(g->val,(size_t)g->nbn*8,1);
+            }
+            if(r->records) vsdlss_numa_spread(r->records,(size_t)r->count*sizeof(vsdlss_elim_record),1);
+        }
+        const vsdlss_sn_factor *L=cf->numeric;
+        if(L) {
+            vsdlss_numa_spread(L->panel,(size_t)L->panel_offset[L->count]*sizeof(double),1);
+            vsdlss_numa_spread(L->row_index,(size_t)L->row_ptr[L->count]*sizeof(vsdlss_sni),1);
+        }
+    }
+}
+
 static void trace_factor_bytes(const vsdlss_m3_factor *f)
 {
     double mb=1.0/(1<<20), L=0, ridx=0, meta=0, replay=0, maps=0, ws=0, tables=0;
@@ -625,6 +667,8 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     if(status!=VSDLSS_OK) goto fail;
     vsdlss_release_free_memory(1);
     TRACE("maps+inverse+trim",t0);
+    spread_factor(factor);
+    TRACE("numa interleave",t0);
     if(trace_on()) trace_factor_bytes(factor);
     *out=factor; return VSDLSS_OK;
 fail:

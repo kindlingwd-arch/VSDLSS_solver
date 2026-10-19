@@ -991,6 +991,41 @@ static int test_reduction_tail_levels(void)
     return 0;
 }
 
+/* NUMA interleave of the factor's arrays (forced on, also on a one-node
+ * machine): the mbind calls succeed and the solutions keep their bits. */
+static int test_numa_interleave(void)
+{
+    const int saved=vsdlss_numa_interleave;
+    const csi G=300;
+    test_edge *edge=malloc((size_t)(2*G*G)*sizeof(*edge)); csi e=0, n=G*G;
+    CHECK(edge);
+    for(csi y=0;y<G;y++) for(csi x=0;x<G;x++) {
+        if(x+1<G) edge[e++]=(test_edge){y*G+x,y*G+x+1,1.0+0.01*(double)(e%7)};
+        if(y+1<G) edge[e++]=(test_edge){y*G+x,(y+1)*G+x,0.5+0.01*(double)(e%5)};
+    }
+    vsdlss *A=make_laplacian(n,edge,e); CHECK(A); free(edge);
+    double *b=malloc((size_t)n*8), *ref=malloc((size_t)n*8), *x=malloc((size_t)n*8);
+    CHECK(b&&ref&&x);
+    for(csi i=0;i<n;i++) b[i]=cos(0.11*(double)i);
+    long spread=0;
+    for(int on=0;on<3;on+=2) {
+        vsdlss_m3_factor *f=NULL;
+        vsdlss_numa_interleave=on;
+        const long before=vsdlss_numa_spread_bytes;
+        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        void *big=vsdlss_big_malloc((size_t)4<<20); CHECK(big); memset(big,1,(size_t)4<<20); free(big);
+        CHECK(vsdlss_m3_solve(f,b,on?x:ref)==VSDLSS_OK);
+        if(on) { spread=vsdlss_numa_spread_bytes-before; CHECK(memcmp(x,ref,(size_t)n*8)==0); }
+        else CHECK(vsdlss_numa_spread_bytes==before);
+        vsdlss_m3_factor_free(f);
+    }
+    vsdlss_numa_interleave=saved;
+    free(b); free(ref); free(x); vsdlss_spfree(A);
+    if(spread>0) printf("numa interleave: %ld bytes interleaved, same bits\n",spread);
+    else printf("numa interleave: mbind unavailable here (no bytes interleaved), same bits\n");
+    return 0;
+}
+
 /* Backward pipeline (VSDLSS_PIPE_BWD): the core solve with the tail's
  * backward replay released by finished supernodes gives the bits of the
  * separate passes, at 1/2/4 threads and with the tree top in order and by
@@ -1278,6 +1313,7 @@ int main(void)
 {
     CHECK(test_reduction_tail_levels()==0);
     CHECK(test_pipe_bwd()==0);
+    CHECK(test_numa_interleave()==0);
     CHECK(test_reduction_tail_order_threads()==0);
     CHECK(test_reduction_tombstones()==0);
     CHECK(test_interleaved_components_and_extract()==0);

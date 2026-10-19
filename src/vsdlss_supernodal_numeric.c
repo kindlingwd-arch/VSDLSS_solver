@@ -125,6 +125,7 @@ static double *panel_alloc(csi count, void **block)
 #if defined(__linux__) && defined(MADV_HUGEPAGE)
     (void)madvise(p, bytes & ~(HUGE_ALIGN - 1), MADV_HUGEPAGE);
 #endif
+    vsdlss_numa_spread(p, bytes, 0);            /* before the zeroing touches it */
     {
         const size_t chunk = HUGE_ALIGN;
         csi chunks = (csi)((bytes + chunk - 1) / chunk);
