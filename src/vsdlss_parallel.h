@@ -32,4 +32,14 @@ int vsdlss_numa_interleave_active(void);
 void vsdlss_numa_spread(void *p, size_t bytes, int move);
 extern int vsdlss_numa_interleave;
 extern long vsdlss_numa_spread_bytes;
+/* Placement by user (VSDLSS_NUMA_PLACE=1, default off; tests:
+ * vsdlss_numa_place -1/0/1, with vsdlss_numa_interleave = 2 also on one
+ * node): vsdlss_numa_bind prefers node for the whole pages of a range of at
+ * least 1 MiB and moves them; vsdlss_numa_node_here is the calling thread's
+ * node (-1 unknown). */
+int vsdlss_numa_place_active(void);
+int vsdlss_numa_node_here(void);
+void vsdlss_numa_bind(void *p, size_t bytes, int node);
+extern int vsdlss_numa_place;
+extern long vsdlss_numa_place_bytes;
 #endif

@@ -183,6 +183,10 @@ typedef struct vsdlss_m3_component_factor {
      * private buffers. */
     double *ws_local, *ws_saved, *ws_core;
     atomic_int ws_busy;
+    /* VSDLSS_NUMA_PLACE: set once the component's arrays were moved to the
+     * node of the thread solving it (numa_node, -1 unknown). */
+    atomic_int numa_placed;
+    int numa_node;
 } vsdlss_m3_component_factor;
 
 struct vsdlss_m3_factor {

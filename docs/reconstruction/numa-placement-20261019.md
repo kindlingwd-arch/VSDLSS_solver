@@ -62,5 +62,15 @@
 1. 生产运行立即加上 `VSDLSS_INTERLEAVE=1`。
 2. （可选，需要 root）关闭自动 NUMA 平衡后再跑一次 A 组，确认缺页是主因：
    `sudo sysctl kernel.numa_balancing=0`，测完恢复为 1。
-3. 在库内对大块内存（`vsdlss_big_malloc` 等）设置交错策略，做成默认行为或开关，并用 `tools/ab_test.sh` 验证。
-4. 之后再评估按使用者放置。
+3. 已实现，待服务器验证：
+   - **库内自动交错**（`VSDLSS_NUMA_INTERLEAVE`，默认开启，`0` 关闭）：在多结点机器上，库的大块分配函数和 core 面板分配在页面被写入前设置交错策略；M3 分解结束时，把求解要反复读取的所有大数组（消元记录、core 面板和下标、映射表、求解工作向量）交错一次，已放置的页面会迁移。
+   - **按使用者放置**（`VSDLSS_NUMA_PLACE=1`，默认关闭）：第一次求解时，由求解某个网的线程查询自己所在的结点，把这个网独有的数组迁移到该结点（`MPOL_PREFERRED`）；两个网共用的数组保持交错。需要绑核（`OMP_PROC_BIND=spread`、`OMP_PLACES=cores`）才有意义。迁移是一次性开销，计入第一次求解。
+   - 两者都只改变内存放在哪里，结果逐位不变（`test_m3` 的 `test_numa_interleave`）。
+4. 服务器上一次对比四种设置：
+
+   ```bash
+   bash <源码目录>/tools/ab_test.sh <源码目录> 32 10 3 \
+       "VSDLSS_NUMA_INTERLEAVE=0" "" "VSDLSS_INTERLEAVE=1" "VSDLSS_NUMA_PLACE=1"
+   ```
+
+   依次是旧行为（首次写入）、库内交错、整个进程交错、库内交错加按使用者放置。
