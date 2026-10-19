@@ -144,3 +144,4 @@ cd /tmp/v && gcc -O2 -fPIC -shared -Wl,-Bsymbolic -Iinclude -std=c11 -fopenmp \
   - 改为按图划分分块，以缩短分解时间。
 - **试过、收益很小的**：求解各段的数据流流水线。回代侧原型（`VSDLSS_PIPE_BWD=1`，默认关闭）在 6100 万结点用例上每网只省约 2 ms；用接口响应解耦是负收益（[overlap-pipeline](solve-overlap-pipeline-20261017.md)）。
 - **下一步的设计**：求解器接管时间步进，加上跨时间步融合，以及 FP32 因子、NUMA 放置等待测方向，见 [transient-stepping-design](transient-stepping-design-20261018.md)。
+- **讨论过的全部求解加速思路及是否有效**：见 [solve-strategy-catalog](solve-strategy-catalog-20261019.md)。

@@ -7,6 +7,8 @@
 - 还在等服务器数据的方向；
 - 主方案：求解器接管时间步进，加上跨时间步融合。包括数学原理、算法、接口、实施步骤和前提条件。
 
+所有讨论过的思路及结论的完整清单见 [solve-strategy-catalog-20261019](solve-strategy-catalog-20261019.md)。
+
 相关记录：[solve-overlap-pipeline-20261017](solve-overlap-pipeline-20261017.md)（流水线实验）、[prefix-scan-feasibility-20261017](prefix-scan-feasibility-20261017.md)、[tail-replay-optimization-20261011](tail-replay-optimization-20261011.md)。
 
 ## 1. 现状与下限
