@@ -2348,3 +2348,214 @@ vsdlss_status vsdlss_reduce_consume(vsdlss **A, vsdlss_reduction **out)
     if(st!=VSDLSS_OK) return st;
     return vsdlss_reduce_run(in,out);
 }
+
+/* ---- Transient stepping with cross-step fusion (vsdlss_m3_transient) ----
+ *
+ * A step solves A x_{k+1} = b_{k+1} with b_{k+1} = Ch x_k + s_{k+1}.  On a
+ * blocked reduction whose tail is one window (its chunks are connected
+ * components that meet only at core vertices), a unit -- a tail chunk or a
+ * block -- can replay its backward pass of step k and, right after, its
+ * forward pass of step k+1 while its records are still in cache: the backward
+ * pass gives x_k at the unit's vertices, and their b_{k+1} needs nothing
+ * else (Ch diagonal there).  Two vectors: x holds x_k, w the work vector
+ * (the forward pass of step k left each record's pivot value s_i in w at its
+ * vertex, which the backward pass reads; the core RHS at the core vertices).
+ *
+ * Every entry must see the serial replay's operations in the same order:
+ * block updates of a vertex before tail updates, b_{k+1} assigned before any
+ * update.  So a unit's forward pass waits ("late") until all backward passes
+ * are done when it (or a vertex it updates) is special (a vertex whose
+ * b_{k+1} needs other vertices' x_k: two-terminal capacitors, values from
+ * the caller's callback), and a chunk also when a block updates one of its
+ * vertices or a core vertex it updates directly.  The deferred core updates
+ * go to a buffer and are subtracted last, in elimination order, as in the
+ * solve.  Each record's arithmetic is that of vsdlss_reduce_forward_inplace
+ * / vsdlss_reduce_backward_inplace, so the steps are bitwise those of
+ * solving each b_{k+1} separately. */
+struct vsdlss_tr_plan {
+    unsigned char *late_chunk, *late_block;
+    double *buf;            /* deferred core updates of the tail (tail_core_slots) */
+    csi chunks, late_chunks, late_blocks;
+};
+
+void vsdlss_reduce_tr_plan_free(vsdlss_tr_plan *p)
+{
+    if(!p) return;
+    free(p->late_chunk); free(p->late_block); free(p->buf); free(p);
+}
+
+int vsdlss_reduce_tr_fusable(const vsdlss_reduction *r)
+{
+    if(!r || r->records || !r->pk || !pk_blocked(r) || !r->tail_windows || r->tail_levels!=1 ||
+       !r->tail_core_bit || !r->tail_level || !r->tail_chunk_rec || !r->tail_chunk_nb) return 0;
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    if(g->count!=r->tail_chunk_rec[r->tail_level[1]] || r->tail_level[0]!=0) return 0;
+    for(csi q=0;q<r->pk_count;q++) if(r->pk[q].count && (r->pk[q].head || !r->pk[q].deg)) return 0;
+    return 1;
+}
+
+vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned char *special,
+                                    vsdlss_tr_plan **out)
+{
+    if(!out) return VSDLSS_ERR_INVALID;
+    *out=NULL;
+    if(!vsdlss_reduce_tr_fusable(r) || !special) return VSDLSS_ERR_UNSUPPORTED;
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    const csi n=r->n, t0=g->k0, cnt=r->count, chunks=r->tail_level[1];
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
+    vsdlss_tr_plan *p=(vsdlss_tr_plan *)calloc(1,sizeof(*p));
+    unsigned char *touch=(unsigned char *)calloc((size_t)(n-t0>0?n-t0:1),1);   /* tail/core vertex updated by a block */
+    if(!p || !touch) { free(touch); vsdlss_reduce_tr_plan_free(p); return VSDLSS_ERR_OOM; }
+    p->chunks=chunks;
+    p->late_chunk=(unsigned char *)calloc((size_t)(chunks?chunks:1),1);
+    p->late_block=(unsigned char *)calloc((size_t)r->blocks,1);
+    p->buf=(double *)malloc((size_t)(r->tail_core_slots?r->tail_core_slots:1)*sizeof(double));
+    if(!p->late_chunk || !p->late_block || !p->buf) { free(touch); vsdlss_reduce_tr_plan_free(p); return VSDLSS_ERR_OOM; }
+    for(csi b=0;b<r->blocks;b++) {
+        const vsdlss_pk_seg *s=r->pk+b; int late=0;
+        for(csi i=0;i<s->count && !late;i++) late=special[s->k0+i]!=0;
+        for(csi o=0;o<s->nbn;o++) {
+            const csi u=s->nb[o];
+            late|=special[u]!=0;
+            if(u>=t0) touch[u-t0]=1;
+        }
+        p->late_block[b]=(unsigned char)late; p->late_blocks+=late;
+    }
+    const uint64_t *bit=r->tail_core_bit;
+    csi why[3]={0,0,0};       /* first reason: special vertex, vertex updated by a block, direct core update */
+    for(csi c=0;c<chunks;c++) {
+        int late=0;
+        for(csi i=cr[c];i<cr[c+1] && !late;i++) late=special[t0+i]?1:touch[i]?2:0;
+        for(csi o=cn[c];o<cn[c+1] && !late;o++) {
+            const csi u=g->nb[o];
+            if(u>=cnt && !((bit[o>>6]>>(o&63))&1) && (special[u] || touch[u-t0])) late=3;   /* direct core update */
+        }
+        if(late) why[late-1]++;
+        p->late_chunk[c]=(unsigned char)(late!=0); p->late_chunks+=late!=0;
+    }
+    if(getenv("VSDLSS_TRACE")) {
+        /* how many chunks each block updates (a block of one chunk could run
+         * inside that chunk's task) */
+        csi one=0, more=0;
+        int32_t *chunk_of=(int32_t *)malloc((size_t)(g->count?g->count:1)*sizeof(int32_t));
+        if(chunk_of) {
+            for(csi c=0;c<chunks;c++) for(csi i=cr[c];i<cr[c+1];i++) chunk_of[i]=(int32_t)c;
+            for(csi b=0;b<r->blocks;b++) {
+                const vsdlss_pk_seg *s=r->pk+b; int32_t first=-1; int many=0;
+                for(csi o=0;o<s->nbn && !many;o++) {
+                    const csi u=s->nb[o];
+                    if(u<t0 || u>=cnt) continue;
+                    if(first<0) first=chunk_of[u-t0]; else many=chunk_of[u-t0]!=first;
+                }
+                if(first>=0) { one+=!many; more+=many; }
+            }
+            free(chunk_of);
+        }
+        fprintf(stderr,"vsdlss trace: transient fusion: %lld chunks, late %lld (special %lld, updated by a block %lld, "
+                "direct core update %lld); blocks late %lld of %lld; blocks updating tail vertices of one chunk %lld, of several %lld\n",
+                (long long)chunks,(long long)p->late_chunks,(long long)why[0],(long long)why[1],(long long)why[2],
+                (long long)p->late_blocks,(long long)r->blocks,(long long)one,(long long)more);
+    }
+    free(touch);
+    *out=p;
+    return VSDLSS_OK;
+}
+
+void vsdlss_reduce_tr_counts(const vsdlss_tr_plan *p, csi *units, csi *late)
+{
+    if(units) *units=p?p->chunks:0;
+    if(late) *late=p?p->late_chunks+p->late_blocks:0;
+}
+
+/* backward_range of a relabelled segment reading the pivot values from w and
+ * writing x (the same arithmetic as reading them from x in place). */
+static inline int backward_range_tr(const vsdlss_pk_seg *g, csi i0, csi i1, csi o,
+                                    const double *restrict w, double *restrict x)
+{
+    const uint32_t *restrict nb=g->nb; const uint8_t *restrict deg=g->deg;
+    const double *restrict piv=g->piv, *restrict val=g->val;
+    const csi k0=g->k0;
+    int ok=1;
+    for(csi i=i1;i>i0;) {
+        i--;
+        const csi d=deg[i], v_=k0+i;
+        o-=d;
+        const double *v=val+o; const uint32_t *ww=nb+o;
+        double value=w[v_]/piv[i];
+        for(csi j=0;j<d;j++) { double update=v[j]*x[ww[j]]; value-=update; }
+        ok&=isfinite(value)!=0;
+        x[v_]=value;
+    }
+    return ok;
+}
+
+/* w[v] = d[v] x[v] + s[v] for the non-special vertices of [lo, hi). */
+static inline void tr_rhs(csi lo, csi hi, const double *restrict x, double *restrict w,
+                          const double *restrict d, const double *restrict s, const unsigned char *restrict special)
+{
+    for(csi v=lo;v<hi;v++) if(!special[v]) w[v]=d[v]*x[v]+s[v];
+}
+
+vsdlss_status vsdlss_reduce_tr_step_a(const vsdlss_reduction *r, const vsdlss_tr_plan *p, double *x, double *w,
+                                      const double *d, const double *s, const unsigned char *special, int next)
+{
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb, *cc=r->tail_chunk_core, chunks=p->chunks, t0=g->k0;
+    const uint64_t *bit=r->tail_core_bit;
+    int ok=1, nt=vsdlss_parallel_width((double)r->n*4);
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(&:ok))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(csi c=0;c<chunks;c++) {
+            ok&=backward_range_tr(g,cr[c],cr[c+1],cn[c+1],w,x);
+            if(!next) continue;
+            tr_rhs(t0+cr[c],t0+cr[c+1],x,w,d,s,special);
+            if(!p->late_chunk[c])
+                forward_range_defer(g,cr[c],cr[c+1],cn[c],w,NULL,bit,r->tail_core_slot+cc[c],p->buf);
+        }
+        VSDLSS_OMP(omp for schedule(dynamic,1))
+        for(csi b=0;b<r->blocks;b++) {
+            const vsdlss_pk_seg *sg=r->pk+b;
+            ok&=backward_range_tr(sg,0,sg->count,sg->nbn,w,x);
+            if(!next) continue;
+            tr_rhs(sg->k0,sg->k0+sg->count,x,w,d,s,special);
+            if(!p->late_block[b]) forward_range(sg,0,sg->count,0,w,NULL);
+        }
+    }
+    return ok?VSDLSS_OK:VSDLSS_ERR_NONFINITE;
+}
+
+vsdlss_status vsdlss_reduce_tr_step_b(const vsdlss_reduction *r, const vsdlss_tr_plan *p, double *w)
+{
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb, *cc=r->tail_chunk_core, chunks=p->chunks;
+    const uint64_t *bit=r->tail_core_bit;
+    const csi *gp=r->tail_core_ptr; const uint32_t *gu=r->tail_core_upd;
+    int nt=vsdlss_parallel_width((double)r->n*4);
+    (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+        VSDLSS_OMP(omp master)
+        vsdlss_parallel_observe();
+        if(p->late_blocks) {
+            VSDLSS_OMP(omp for schedule(dynamic,1))
+            for(csi b=0;b<r->blocks;b++)
+                if(p->late_block[b]) forward_range(r->pk+b,0,r->pk[b].count,0,w,NULL);
+        }
+        if(p->late_chunks) {
+            VSDLSS_OMP(omp for schedule(dynamic,1))
+            for(csi c=0;c<chunks;c++)
+                if(p->late_chunk[c]) forward_range_defer(g,cr[c],cr[c+1],cn[c],w,NULL,bit,r->tail_core_slot+cc[c],p->buf);
+        }
+        VSDLSS_OMP(omp for schedule(static))
+        for(csi k=0;k<r->tail_core_groups;k++) {
+            const csi v=g->nb[gu[k]]; double a=w[v];
+            for(csi q=gp[k];q<gp[k+1];q++) a-=p->buf[q];
+            w[v]=a;
+        }
+    }
+    return VSDLSS_OK;
+}

@@ -118,6 +118,22 @@ M3 对应入口为 `vsdlss_factorize_m3`、`vsdlss_m3_solve` 和 `vsdlss_m3_fact
 
 更详细的证据边界、审计和路线见 `docs/reconstruction/`。
 
+## 瞬态步进（求解器接管时间步进）
+
+后向欧拉、固定步长时，`vsdlss_m3_transient_*` 由求解器自己推进 A x_{k+1} = (C/h) x_k + s_{k+1}，全程使用打包顺序，没有收集和写回。
+
+```c
+vsdlss_m3_transient *T;
+vsdlss_m3_transient_create(F, Ch /* C/h，上三角 CSC */, nsrc, src_node, ndep, dep_node, &T);
+vsdlss_m3_transient_start(T, x0);                       /* 直流初值 */
+vsdlss_m3_transient_run(T, nsteps, src /* nsteps × nsrc */, cb, ctx);   /* cb：每步拿解、给 dep 值 */
+```
+
+能融合的分量，会把第 k 步回代和第 k+1 步前代按单元交错执行，消元记录每步只从内存读一遍（`VSDLSS_TR_FUSE=0` 关闭）。
+每一步的解和"按同一公式算 b、逐步求解"逐位一致。
+本机合成网格（252 万结点级，4 线程）上每步 53 → 30–39 ms（现在的用法 → 新接口）。
+`make bench_tr` 可以复测，设计与实现见 [transient-stepping-impl-20261019](docs/reconstruction/transient-stepping-impl-20261019.md)。
+
 ## M4 多列磁盘求解
 
 ```bash

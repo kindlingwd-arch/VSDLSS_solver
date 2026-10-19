@@ -145,6 +145,46 @@ vsdlss_status vsdlss_m3_internal_order(const vsdlss_m3_factor *factor, csi *perm
 vsdlss_status vsdlss_m3_solve_internal(const vsdlss_m3_factor *factor,
                                        const double *rhs, double *solution);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
+/* Transient stepping inside the solver (backward Euler, fixed step).  The
+ * factor is of A = G + C/h; each step solves A x_{k+1} = Ch x_k + s_{k+1}
+ * with Ch = C/h given once as upper CSC in the caller's numbering
+ * (diagonal: grounded capacitors; off-diagonal: two-terminal capacitors,
+ * within one component).  src_node: the nodes that get source values every
+ * step (duplicates add up).  dep_node: nodes whose next right-hand side
+ * depends on state the caller keeps (e.g. package RL); their values come
+ * from the callback.  The right-hand side is
+ *   b[v] = Ch[v][v] x[v] (+ Ch[v][u] x[u], partners u ascending in packed
+ *          order) + s[v],
+ * s[v] = 0.0 + the step's source values at v (registration order) + the dep
+ * values at v (dep order); each step's solution is bitwise that of solving
+ * this b with vsdlss_m3_solve_packed.  Everything stays in packed order (no
+ * gather or scatter per step), and where the factor allows it the backward
+ * pass of a step and the forward pass of the next share one read of the
+ * low-degree records (VSDLSS_TR_FUSE=0 turns that off; same results).
+ *
+ * start: x0 = solution at step 0 (caller order).  run: nsteps steps, row s of
+ * src (nsrc values, src[s*nsrc + j] at src_node[j]) for step k+1+s.  After
+ * every step k (and once for the starting state) cb(ctx, k, x, dep_next) gets
+ * the solution in packed order (valid during the call; read node i at
+ * vsdlss_m3_export_packed_slots' slot i) and, if ndep > 0, fills the ndep
+ * values for step k+1.  get: the latest solution (caller order), all nodes
+ * (nidx < 0) or the listed ones.  After a failed run, start again.  The
+ * factor must stay alive and unmodified; not concurrent with other calls on
+ * the same factor.  info: components fused, tail chunks, units run late. */
+typedef struct vsdlss_m3_transient vsdlss_m3_transient;
+vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *factor, const vsdlss *Ch,
+                                         csi nsrc, const csi *src_node, csi ndep,
+                                         const csi *dep_node, vsdlss_m3_transient **out);
+vsdlss_status vsdlss_m3_transient_start(vsdlss_m3_transient *T, const double *x0);
+vsdlss_status vsdlss_m3_transient_run(vsdlss_m3_transient *T, csi nsteps, const double *src,
+                                      void (*cb)(void *ctx, csi k, const double *x_packed,
+                                                 double *dep_next),
+                                      void *ctx);
+vsdlss_status vsdlss_m3_transient_get(const vsdlss_m3_transient *T, csi nidx,
+                                      const csi *node, double *out);
+vsdlss_status vsdlss_m3_transient_info(const vsdlss_m3_transient *T, csi *fused_components,
+                                       csi *units, csi *late_units);
+void vsdlss_m3_transient_free(vsdlss_m3_transient *T);
 /* M4: panel mode (width cap 8), scalar fallback for very small budgets.
  * Private temporary disk factor; no original-format compatibility.
  * budget bounds numeric/solve workspace and resident metadata, excluding
