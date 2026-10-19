@@ -991,6 +991,50 @@ static int test_reduction_tail_levels(void)
     return 0;
 }
 
+/* NUMA interleave and placement of the factor's arrays (forced on, also
+ * on a one-node machine): the mbind calls succeed, every component is
+ * placed on its first solve, and the solutions keep their bits. */
+static int test_numa_interleave(void)
+{
+    const int saved=vsdlss_numa_interleave;
+    const csi G=300;
+    test_edge *edge=malloc((size_t)(2*G*G)*sizeof(*edge)); csi e=0, n=G*G;
+    CHECK(edge);
+    for(csi y=0;y<G;y++) for(csi x=0;x<G;x++) {
+        if(x+1<G) edge[e++]=(test_edge){y*G+x,y*G+x+1,1.0+0.01*(double)(e%7)};
+        if(y+1<G) edge[e++]=(test_edge){y*G+x,(y+1)*G+x,0.5+0.01*(double)(e%5)};
+    }
+    vsdlss *A=make_laplacian(n,edge,e); CHECK(A); free(edge);
+    double *b=malloc((size_t)n*8), *ref=malloc((size_t)n*8), *x=malloc((size_t)n*8);
+    CHECK(b&&ref&&x);
+    for(csi i=0;i<n;i++) b[i]=cos(0.11*(double)i);
+    const int saved_place=vsdlss_numa_place;
+    long spread=0, placed=0;
+    for(int mode=0;mode<3;mode++) {                 /* off, interleave, interleave + placement */
+        vsdlss_m3_factor *f=NULL;
+        vsdlss_numa_interleave=mode?2:0; vsdlss_numa_place=mode==2;
+        const long before=vsdlss_numa_spread_bytes, pbefore=vsdlss_numa_place_bytes;
+        CHECK(vsdlss_factorize_m3(A,5,&f)==VSDLSS_OK);
+        void *big=vsdlss_big_malloc((size_t)4<<20); CHECK(big); memset(big,1,(size_t)4<<20); free(big);
+        for(int rep=0;rep<2;rep++) {                /* the first solve places, the second reuses */
+            CHECK(vsdlss_m3_solve(f,b,mode?x:ref)==VSDLSS_OK);
+            if(mode) CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        if(mode==1) spread=vsdlss_numa_spread_bytes-before;
+        if(mode==2) {
+            placed=vsdlss_numa_place_bytes-pbefore;
+            for(csi c=0;c<f->count;c++) CHECK(atomic_load(&f->component[c].numa_placed)==1);
+        }
+        if(!mode) CHECK(vsdlss_numa_spread_bytes==before && vsdlss_numa_place_bytes==pbefore);
+        vsdlss_m3_factor_free(f);
+    }
+    vsdlss_numa_interleave=saved; vsdlss_numa_place=saved_place;
+    free(b); free(ref); free(x); vsdlss_spfree(A);
+    if(spread>0) printf("numa interleave / placement: %ld / %ld bytes, same bits\n",spread,placed);
+    else printf("numa interleave / placement: mbind unavailable here (no bytes moved), same bits\n");
+    return 0;
+}
+
 /* Backward pipeline (VSDLSS_PIPE_BWD): the core solve with the tail's
  * backward replay released by finished supernodes gives the bits of the
  * separate passes, at 1/2/4 threads and with the tree top in order and by
@@ -999,6 +1043,7 @@ static int test_pipe_bwd(void)
 {
     const csi saved_blk=vsdlss_reduce_block, saved_win=vsdlss_reduce_tail_windows, saved_min=vsdlss_reduce_tail_min;
     const int saved_relabel=vsdlss_m3_relabel, saved_pipe=vsdlss_m3_pipe_bwd, saved_br=vsdlss_top_branches;
+    const csi saved_pf=vsdlss_reduce_prefetch;
     const csi G=150, S=3;
     test_edge *edge=malloc((size_t)(2*G*(G-1)*(S+1))*sizeof(*edge)); csi e=0, n=G*G;
     CHECK(edge);
@@ -1024,8 +1069,8 @@ static int test_pipe_bwd(void)
         int ok=0;
         for(csi c=0;c<f->count;c++) ok|=f->component[c].core_contig && vsdlss_reduce_bwd_pipe_ok(f->component[c].reduction,f->component[c].numeric);
         CHECK(ok);
-        for(int pipe=0;pipe<2;pipe++) {
-            vsdlss_m3_pipe_bwd=pipe;
+        for(int pipe=0;pipe<4;pipe++) {             /* 2, 3: with the replay prefetch */
+            vsdlss_m3_pipe_bwd=pipe&1; vsdlss_reduce_prefetch=pipe&2?24:0;
             for(int rep=0;rep<2;rep++) {                /* the second solve reuses the cached structure */
                 CHECK(vsdlss_m3_solve_many(f,2,b,n,first?ref:x,n)==VSDLSS_OK);
                 if(first) { CHECK(vsdlss_backward_error(A,ref,b,&eta)==VSDLSS_OK && eta<1e-13); first=0; }
@@ -1038,9 +1083,10 @@ static int test_pipe_bwd(void)
     CHECK(vsdlss_reduce_bwd_pipe_runs>runs0);
     vsdlss_reduce_block=saved_blk; vsdlss_reduce_tail_windows=saved_win; vsdlss_reduce_tail_min=saved_min;
     vsdlss_m3_relabel=saved_relabel; vsdlss_m3_pipe_bwd=saved_pipe; vsdlss_top_branches=saved_br;
+    vsdlss_reduce_prefetch=saved_pf;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     free(b); free(ref); free(x); vsdlss_spfree(A);
-    printf("backward pipeline: same bits as the separate core solve and tail replay (1/2/4 threads, top in order / by branches)\n");
+    printf("backward pipeline, replay prefetch: same bits as the plain solve (1/2/4 threads, top in order / by branches)\n");
     return 0;
 }
 
@@ -1276,6 +1322,7 @@ int main(void)
 {
     CHECK(test_reduction_tail_levels()==0);
     CHECK(test_pipe_bwd()==0);
+    CHECK(test_numa_interleave()==0);
     CHECK(test_reduction_tail_order_threads()==0);
     CHECK(test_reduction_tombstones()==0);
     CHECK(test_interleaved_components_and_extract()==0);

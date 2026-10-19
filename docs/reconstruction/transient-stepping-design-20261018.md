@@ -7,6 +7,8 @@
 - 还在等服务器数据的方向；
 - 主方案：求解器接管时间步进，加上跨时间步融合。包括数学原理、算法、接口、实施步骤和前提条件。
 
+所有讨论过的思路及结论的完整清单见 [solve-strategy-catalog-20261019](solve-strategy-catalog-20261019.md)。
+
 相关记录：[solve-overlap-pipeline-20261017](solve-overlap-pipeline-20261017.md)（流水线实验）、[prefix-scan-feasibility-20261017](prefix-scan-feasibility-20261017.md)、[tail-replay-optimization-20261011](tail-replay-optimization-20261011.md)。
 
 ## 1. 现状与下限
@@ -155,7 +157,7 @@ void vsdlss_m3_transient_free(vsdlss_m3_transient *);
 | P2 | b 在回代时顺手算出；写回并入回代 | 再省几 ms | 小 |
 | P3 | 块并行段融合 | 合成数据上明显，线上用例影响小 | 约 1 周 |
 | P4 | 尾部连通块融合 | 约 90–100 ms | 约 1 周 |
-| P5（可选） | FP32 因子 | 约 70 ms | 1–2 周 |
+| ~~P5（可选）~~ | ~~FP32 因子~~（2026-10-19 关闭，见 [solve-strategy-catalog](solve-strategy-catalog-20261019.md) 第 2 节） | — | — |
 
 每个阶段都和逐步求解对比结果和速度，在服务器上逐项做 A/B 验证。
 
