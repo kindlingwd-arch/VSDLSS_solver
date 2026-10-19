@@ -122,7 +122,45 @@ VSDLSS_TRACE=1 ./bench_tr text:/path/to/case 6 32 20   # 真实用例，同时�
 
 参数：Ch = TR_CH × diag(A)（默认 0.1），电流源占 TR_SRC（默认 30%）的结点。
 
-## 5. 待服务器确认
+## 5. 公开基准：IBM 瞬态电源网格 ibmpg1t–6t
+
+`test/bench_ibmpg_tr.c`（`make bench_ibmpg_tr`）读取 IBM 瞬态网表（Nassif，ASP-DAC 2008，托管在 <https://web.ece.ucsb.edu/~lip/PGBenchmarks/ibmpgbench.html>，不随仓库分发），用新接口做后向欧拉，并做三层检查：
+
+1. 三种做法逐位一致：手工逐步（按接口公式算 b，再调用 `solve_packed_inplace`）、新接口不融合、新接口融合；
+2. 和官方波形比较（`.print` 列出的 20 个结点、每个时间点）；
+3. 每步耗时。
+
+```bash
+make bench_ibmpg_tr
+./bench_ibmpg_tr ibmpg1t.spice.bz2 ibmpg1t.output.bz2
+PG_BLOCK=2048 PG_TAILMIN=16 VSDLSS_TRACE=1 ./bench_ibmpg_tr ibmpg1t.spice.bz2 ibmpg1t.output.bz2   # 小用例也走融合
+```
+
+网表结构（ibmpg1t）和建模方式：
+
+| 元件 | 内容 | 处理 |
+|---|---|---|
+| R（大写） | 栅格导线 | G |
+| r（小写） | 封装电阻 0.25 Ω，decap 的串联电阻 | G |
+| c | decap：VDD 侧"n1 —r— _Z_ —c— 地"（接地）；**GND 侧"地 —r— _Z_ —c— n0"（两端电容，3381 个）** | C/h 同时进 A 和 Ch；两端电容是 Ch 的非对角项 |
+| l | 封装电感 1 nH，"栅格 —r— _X_ —l— _Y_ —v— 地"，277 个 | 伴随模型：h/L 进 A；历史电流作为 dep 结点，由回调维护 |
+| v | 焊盘 0 V / 1.8 V（Dirichlet）；大写 V 是 0 V 过孔短路（合并结点） | 焊盘对应的项作为常数电流源 |
+| i | `pulse(i1, i2, td, tr, tf, pw, per)` 负载电流 | 每步按 t_{k+1} 求值 |
+| `.tran 10p 10n` | 1000 步 | |
+
+x₀ 是直流解（电容开路、电感短路，电流源取 t=0 时刻的值），电感的初始电流在直流解上用 KCL 求出。
+
+ibmpg1t 的结果（本机，1 线程）：
+
+- 2.5 万个未知数，Ch 有 3381 个非对角项，277 个 dep 结点。
+- **三种做法逐位一致**。在 `PG_BLOCK=2048 PG_TAILMIN=16` 下，一个分量走了融合（另一个分量的尾部是 3 个窗口，不满足融合条件），结果同样逐位一致。
+- **和官方波形比较**：t=0（直流）最大误差 0.0004 mV；全程最大误差 1.08 mV，出现在 t=0.25 ns 电流快速跳变处。官方没有说明积分方法，这个量级符合"官方用梯形法、这里用后向欧拉"带来的 O(h) 差别。
+- 每步约 0.5 ms，规模太小，耗时没有参考价值。
+- 这个用例的 GND 侧 decap 是两端电容，加上封装电感，几乎所有单元都有特殊结点、都要晚做。它适合用来压力测试非对角项和 dep 结点的处理路径。你们网表的 decap 都接地，融合条件更好。
+
+ibmpg2t–6t 的网表压缩后分别为 1.6 / 10.3 / 12.2 / 15.2 / 25.4 MB，可以用同一个程序测试。
+
+## 6. 待服务器确认
 
 1. 在线上用例上跑 `VSDLSS_TRACE=1 ./bench_tr text:... 6 32 20`，记录：
    - 每步耗时（现在约 165 ms，设计估计 P1 约 130 ms，P4 约 90–100 ms）；
