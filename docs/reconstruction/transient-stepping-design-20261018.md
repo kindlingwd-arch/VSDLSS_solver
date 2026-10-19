@@ -157,7 +157,7 @@ void vsdlss_m3_transient_free(vsdlss_m3_transient *);
 | P2 | b 在回代时顺手算出；写回并入回代 | 再省几 ms | 小 |
 | P3 | 块并行段融合 | 合成数据上明显，线上用例影响小 | 约 1 周 |
 | P4 | 尾部连通块融合 | 约 90–100 ms | 约 1 周 |
-| P5（可选） | FP32 因子 | 约 70 ms | 1–2 周 |
+| ~~P5（可选）~~ | ~~FP32 因子~~（2026-10-19 关闭，见 [solve-strategy-catalog](solve-strategy-catalog-20261019.md) 第 2 节） | — | — |
 
 每个阶段都和逐步求解对比结果和速度，在服务器上逐项做 A/B 验证。
 

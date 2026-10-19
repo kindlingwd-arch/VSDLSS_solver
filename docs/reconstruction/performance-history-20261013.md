@@ -143,6 +143,6 @@ cd /tmp/v && gcc -O2 -fPIC -shared -Wl,-Bsymbolic -Iinclude -std=c11 -fopenmp \
   - NUMA 本地化（`VSDLSS_TAIL_NUMA=1` 实验版，待服务器实测，未合并）；
   - 改为按图划分分块，以缩短分解时间。
 - **试过、收益很小的**：求解各段的数据流流水线。回代侧原型（`VSDLSS_PIPE_BWD=1`，默认关闭）在 6100 万结点用例上每网只省约 2 ms；用接口响应解耦是负收益（[overlap-pipeline](solve-overlap-pipeline-20261017.md)）。
-- **下一步的设计**：求解器接管时间步进，加上跨时间步融合，以及 FP32 因子、NUMA 放置等待测方向，见 [transient-stepping-design](transient-stepping-design-20261018.md)。
-- **NUMA**：运行时加 `VSDLSS_INTERLEAVE=1`，6100 万结点用例每步 563 → 151 ms（避开内核自动 NUMA 平衡造成的缺页），见 [numa-placement](numa-placement-20261019.md)。
+- **下一步的设计**：求解器接管时间步进，加上跨时间步融合，以及 NUMA 放置等方向（FP32 因子已关闭），见 [transient-stepping-design](transient-stepping-design-20261018.md)。
+- **NUMA**：运行时加 `VSDLSS_INTERLEAVE=1`，6100 万结点用例每步 563 → 151 ms（避开内核自动 NUMA 平衡造成的缺页）；再加按使用者放置 `VSDLSS_NUMA_PLACE=1`，trace 每步约 140 ms（最快 135 ms），见 [numa-placement](numa-placement-20261019.md)。
 - **讨论过的全部求解加速思路及是否有效**：见 [solve-strategy-catalog](solve-strategy-catalog-20261019.md)。

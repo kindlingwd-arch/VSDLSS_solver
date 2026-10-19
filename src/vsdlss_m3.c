@@ -480,6 +480,71 @@ static idxmap core_map_of(const vsdlss_m3_component_factor *cf)
 { idxmap m={cf->core_map32,cf->core_map}; return m; }
 
 /* VSDLSS_TRACE: bytes held by the factor, by kind. */
+/* The large arrays only component cf's solve streams (records, core panels
+ * and indices, its maps and solve workspace), each passed to op (interleave
+ * or bind to a node). */
+static void component_arrays(const vsdlss_m3_component_factor *cf, void (*op)(void *, size_t, int), int arg)
+{
+    const vsdlss_reduction *r=cf->reduction;
+    const csi cn=cf->n;
+    if(cf->map32) op(cf->map32,(size_t)cn*4,arg);
+    if(cf->gather) op(cf->gather,(size_t)cn*sizeof(csi),arg);
+    if(cf->ws_local) op(cf->ws_local,(size_t)cn*sizeof(double),arg);
+    if(r) {
+        if(cf->ws_saved && r->records) op(cf->ws_saved,(size_t)r->count*sizeof(double),arg);
+        if(cf->ws_core) op(cf->ws_core,(size_t)r->core_n*sizeof(double),arg);
+        if(cf->core_map32) op(cf->core_map32,(size_t)r->core_n*4,arg);
+        if(cf->core_map) op(cf->core_map,(size_t)r->core_n*sizeof(csi),arg);
+        for(csi q=0;q<r->pk_count;q++) {
+            const vsdlss_pk_seg *g=r->pk+q;
+            if(g->head) op(g->head,(size_t)g->count*4,arg);
+            if(g->deg) op(g->deg,(size_t)g->count,arg);
+            op(g->piv,(size_t)g->count*8,arg);
+            op(g->nb,(size_t)g->nbn*4,arg);
+            op(g->val,(size_t)g->nbn*8,arg);
+        }
+        if(r->records) op(r->records,(size_t)r->count*sizeof(vsdlss_elim_record),arg);
+        if(r->tail_core_buf) op(r->tail_core_buf,(size_t)(r->tail_core_slots?r->tail_core_slots:1)*sizeof(double),arg);
+    }
+    const vsdlss_sn_factor *L=cf->numeric;
+    if(L) {
+        op(L->panel,(size_t)L->panel_offset[L->count]*sizeof(double),arg);
+        op(L->row_index,(size_t)L->row_ptr[L->count]*sizeof(vsdlss_sni),arg);
+    }
+}
+
+/* NUMA interleave (vsdlss_numa_spread) of the factor's large arrays that
+ * the solves stream, once the factorization has filled them.  Pages
+ * already placed are migrated; arrays from the vsdlss_big_* allocators
+ * already follow the policy and are left as they are. */
+static void spread_factor(const vsdlss_m3_factor *f)
+{
+    if(!vsdlss_numa_interleave_active() || f->disk_mode) return;
+    const csi n=f->n;
+    if(f->inv32) vsdlss_numa_spread(f->inv32,(size_t)n*4,1);
+    if(f->inv64) vsdlss_numa_spread(f->inv64,(size_t)n*8,1);
+    if(f->components->vertices) vsdlss_numa_spread(f->components->vertices,(size_t)n*sizeof(csi),1);
+    for(csi c=0;c<f->count;c++) component_arrays(f->component+c,vsdlss_numa_spread,1);
+}
+
+/* VSDLSS_NUMA_PLACE: on the first solve, the thread that runs component c
+ * moves the component's own arrays to its memory node (the arrays shared by
+ * all components stay interleaved).  With bound threads each component's
+ * team stays on one socket, so its solve reads local memory only. */
+static void place_component(const vsdlss_m3_factor *f, csi c)
+{
+    vsdlss_m3_component_factor *cf=(vsdlss_m3_component_factor *)(f->component+c);
+    if(f->disk_mode || !vsdlss_numa_place_active() || atomic_exchange(&cf->numa_placed,1)) return;
+    const int node=vsdlss_numa_node_here();
+    cf->numa_node=node;
+    if(node<0) return;
+    double t0=trace_now();
+    const long before=vsdlss_numa_place_bytes;
+    component_arrays(cf,vsdlss_numa_bind,node);
+    if(trace_on()) fprintf(stderr,"vsdlss trace: numa place: component %lld -> node %d, %.0f MiB moved in %.3f s\n",
+                           (long long)c,node,(double)(vsdlss_numa_place_bytes-before)/(1<<20),trace_now()-t0);
+}
+
 static void trace_factor_bytes(const vsdlss_m3_factor *f)
 {
     double mb=1.0/(1<<20), L=0, ridx=0, meta=0, replay=0, maps=0, ws=0, tables=0;
@@ -625,6 +690,8 @@ static vsdlss_status factorize_shared(const vsdlss *A, int order,
     if(status!=VSDLSS_OK) goto fail;
     vsdlss_release_free_memory(1);
     TRACE("maps+inverse+trim",t0);
+    spread_factor(factor);
+    TRACE("numa interleave",t0);
     if(trace_on()) trace_factor_bytes(factor);
     *out=factor; return VSDLSS_OK;
 fail:
@@ -745,6 +812,7 @@ static vsdlss_status solve_local(void *vctx, csi c)
     double *local=x->inplace?x->out+x->f->components->offset[c]:w->local, *core_b=w->core;
     vsdlss_status status; int bad=0;
     int gt=vsdlss_parallel_width((double)cn*4); (void)gt;
+    place_component(x->f,c);
     double t0=trace_now(), tl=vsdlss_ledger_level()?vsdlss_ledger_now():0;
     if(x->inplace || x->pregathered) {
         /* checked (in place) or filled (two-pass gather, internal copy) by
