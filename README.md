@@ -118,6 +118,39 @@ M3 对应入口为 `vsdlss_factorize_m3`、`vsdlss_m3_solve` 和 `vsdlss_m3_fact
 
 更详细的证据边界、审计和路线见 `docs/reconstruction/`。
 
+## ECO 低秩修改
+
+ECO 只改动少量原有元件（电导变化、对地电导变化、删去元件）时，`vsdlss_m3_modify` 直接把 A 的因子改成 A + ΔA 的因子，不必重新分解：
+
+```c
+/* 结点 a、b 之间电导改变 dg；结点 c 对地电导改变 dc */
+csi row[] = {a, a, b, c}, col[] = {b, a, b, c};
+double delta[] = {-dg, dg, dg, dc};
+vsdlss_status s = vsdlss_m3_modify(factor, 4, row, col, delta, NULL);
+/* VSDLSS_ERR_UNSUPPORTED（新增连接等结构变化）时改为重新分解 */
+```
+
+做法是 Davis–Hager 的 Cholesky 更新/降秩：低度消元记录用 C1 方法，core 超节点用双曲旋转，按 64 项一批处理。全有或全无，出错时因子不变。
+252 万结点合成网格（METIS，4 线程）：1 条电导 5 ms、10 条电导 + 5 个对地修改 28 ms（一次求解约 32 ms），重新分解约 2.8 s；修改后对 A + ΔA 的后向误差为 2.6e-16。
+`make bench_eco` 可以在真实用例上复测。设计、限制和验证见 [eco-modify-20261018](docs/reconstruction/eco-modify-20261018.md)。
+
+## 瞬态步进（求解器接管时间步进）
+
+后向欧拉、固定步长时，`vsdlss_m3_transient_*` 由求解器自己推进 A x_{k+1} = (C/h) x_k + s_{k+1}，全程使用打包顺序，没有收集和写回。
+
+```c
+vsdlss_m3_transient *T;
+vsdlss_m3_transient_create(F, Ch /* C/h，上三角 CSC */, nsrc, src_node, ndep, dep_node, &T);
+vsdlss_m3_transient_start(T, x0);                       /* 直流初值 */
+vsdlss_m3_transient_run(T, nsteps, src /* nsteps × nsrc */, cb, ctx);   /* cb：每步拿解、给 dep 值 */
+```
+
+能融合的分量，会把第 k 步回代和第 k+1 步前代按单元交错执行，消元记录每步只从内存读一遍（`VSDLSS_TR_FUSE`：1 自动，默认；0 关闭；2 总是）。
+每一步的解和"按同一公式算 b、逐步求解"逐位一致。
+本机合成网格（252 万结点级，4 线程）上每步 53 → 30–39 ms（现在的用法 → 新接口）。
+线上 6100 万结点用例（82% 的结点有电流源）收益有限：和现在的用法持平，融合无收益；即使仿真器直接按打包顺序写电流源，上限也只有 −8%。
+用仿真器转储复测：`tools/tr_replay_test.sh`。`make bench_tr` 可以复测合成网格，设计与实现见 [transient-stepping-impl-20261019](docs/reconstruction/transient-stepping-impl-20261019.md)。
+
 ## M4 多列磁盘求解
 
 ```bash
