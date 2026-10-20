@@ -56,7 +56,7 @@
 | 方向 | 已有证据 | 预计收益 | 工具 |
 |---|---|---|---|
 | FP32 因子（单精度存储，双精度计算） | 本机：相对误差 1.4e-7（只有非对角部分用单精度）、2.3e-7（全部用单精度）；修正一步后 5.5e-12 | 每步快 15–20%（字节少 35–50%） | `tools/fp32_probe_test.sh` |
-| NUMA 数据放置 | 你们实测：交错分布（B）比按首次写入（A）快，单插槽（C）比 A 慢。说明受带宽限制，而且数据集中在一个插槽的内存上 | 先用 `VSDLSS_INTERLEAVE=1` 直接拿到 B 的收益；按使用者放置数据可能更多 | `tools/numa_test.sh` |
+| NUMA 数据放置 | 已实测并合入 main（2026-10-19）：交错分布 563 → 151 ms/步，主因是避开内核自动 NUMA 平衡的缺页，而不是数据集中在一个插槽；再加按使用者放置，trace 约 140 ms/步 | 生产运行用 `VSDLSS_INTERLEAVE=1 VSDLSS_NUMA_PLACE=1` | [numa-placement](numa-placement-20261019.md)、`tools/numa_ab.sh` |
 | core 树顶主干拆分 | 本机 4 核（每网 2 线程）：四种设置无差别 | 估计每网 1–3 ms | `tools/ab_test.sh` |
 
 ## 4. 主方案：求解器接管时间步进 + 跨时间步融合
@@ -157,7 +157,7 @@ void vsdlss_m3_transient_free(vsdlss_m3_transient *);
 | P2 | b 在回代时顺手算出；写回并入回代 | 再省几 ms | 小 |
 | P3 | 块并行段融合 | 合成数据上明显，线上用例影响小 | 约 1 周 |
 | P4 | 尾部连通块融合 | 约 90–100 ms | 约 1 周 |
-| ~~P5（可选）~~ | ~~FP32 因子~~（2026-10-19 关闭，见 [solve-strategy-catalog](solve-strategy-catalog-20261019.md) 第 2 节） | — | — |
+| ~~P5（可选）~~ | ~~FP32 因子~~（2026-10-19 关闭，见 [solve-strategy-catalog](solve-strategy-catalog-20261019.md) 第 3 节） | — | — |
 
 每个阶段都和逐步求解对比结果和速度，在服务器上逐项做 A/B 验证。
 
