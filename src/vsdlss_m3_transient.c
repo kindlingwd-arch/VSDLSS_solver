@@ -31,12 +31,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-int vsdlss_m3_transient_fuse = -1;       /* -1: VSDLSS_TR_FUSE (default on); tests set 0 / 1 */
+/* Fusion: 0 off, 1 (default) where at most half of a component's records are
+ * in late units (with more, the late units' second pass costs what fusion
+ * saves: measured on ibmpg3t, 4 threads, 66 -> 86 ms per step), 2 always.
+ * -1: VSDLSS_TR_FUSE. */
+int vsdlss_m3_transient_fuse = -1;
 long vsdlss_m3_transient_fused_steps;    /* tests: fused component iterations */
 
-static int fuse_on(void)
+static int fuse_mode(void)
 {
-    if(vsdlss_m3_transient_fuse<0) { const char *e=getenv("VSDLSS_TR_FUSE"); vsdlss_m3_transient_fuse=e&&*e?atoi(e)!=0:1; }
+    if(vsdlss_m3_transient_fuse<0) { const char *e=getenv("VSDLSS_TR_FUSE"); vsdlss_m3_transient_fuse=e&&*e?atoi(e):1; }
     return vsdlss_m3_transient_fuse;
 }
 
@@ -47,6 +51,7 @@ typedef struct {
     csi nsp, *sp;                /* special vertices, ascending (local) */
     csi *op, *oc; double *ov;    /* their off-diagonal partners (local, ascending) and Ch values */
     double *core;                /* non-contiguous core: gathered core vector */
+    double *spb;                 /* right-hand sides of the special vertices (separate steps) */
 } tr_comp;
 
 struct vsdlss_m3_transient {
@@ -89,7 +94,7 @@ void vsdlss_m3_transient_free(vsdlss_m3_transient *T)
     if(T->comp) for(csi c=0;c<T->f->count;c++) {
         tr_comp *q=T->comp+c;
         vsdlss_reduce_tr_plan_free(q->plan);
-        free(q->special); free(q->sp); free(q->op); free(q->oc); free(q->ov); free(q->core);
+        free(q->special); free(q->sp); free(q->op); free(q->oc); free(q->ov); free(q->core); free(q->spb);
     }
     free(T->comp); free(T->x); free(T->w); free(T->s); free(T->d); free(T->slot);
     free(T->srcpos); free(T->srcord); free(T->reset); free(T->deppos); free(T->dep);
@@ -206,15 +211,24 @@ vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *f, const vsdlss
             for(;t<hi && pr[t].a-off==q->sp[a];t++) { q->oc[q->op[a+1]]=pr[t].b-off; q->ov[q->op[a+1]]=pr[t].v; q->op[a+1]++; }
         }
         const vsdlss_reduction *r=cf->reduction;
-        if(fuse_on() && cf->core_contig && (r->core_n==0 || cf->numeric) && vsdlss_reduce_tr_fusable(r)) {
+        const int mode=fuse_mode();
+        if(mode && cf->core_contig && (r->core_n==0 || cf->numeric) && vsdlss_reduce_tr_fusable(r)) {
             st=vsdlss_reduce_tr_plan(r,q->special,&q->plan);
-            if(st==VSDLSS_OK) q->fused=1;
-            else if(st!=VSDLSS_ERR_UNSUPPORTED) goto fail;
+            if(st==VSDLSS_OK) {
+                csi rec=0, late=0;
+                vsdlss_reduce_tr_counts(q->plan,NULL,NULL,&rec,&late);
+                if(mode==1 && 2*late>rec) { vsdlss_reduce_tr_plan_free(q->plan); q->plan=NULL; }
+                else q->fused=1;
+            } else if(st!=VSDLSS_ERR_UNSUPPORTED) goto fail;
             st=VSDLSS_OK;
         }
         if(!q->fused && r->core_n && !cf->core_contig) {
             q->core=(double *)malloc((size_t)r->core_n*sizeof(double));
             if(!q->core) goto oom;
+        }
+        if(!q->fused) {
+            q->spb=(double *)malloc((size_t)(q->nsp?q->nsp:1)*sizeof(double));
+            if(!q->spb) goto oom;
         }
     }
     free(pr); free(ps);
@@ -259,12 +273,19 @@ static inline double rhs_special(const tr_comp *q, csi a, const double *x, const
     for(csi t=q->op[a];t<q->op[a+1];t++) b+=q->ov[t]*x[q->oc[t]];
     return b+s[v];
 }
+/* w[v] = b[v] at the special vertices (in parallel: each writes its own) */
+static void rhs_specials(const tr_comp *q, const double *x, double *w, const double *d, const double *s)
+{
+    int nt=vsdlss_parallel_width((double)q->nsp*16); (void)nt;
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
+    for(csi a=0;a<q->nsp;a++) w[q->sp[a]]=rhs_special(q,a,x,d,s);
+}
 static void rhs_all(const tr_comp *q, csi cn, const double *x, double *w, const double *d, const double *s)
 {
     int nt=vsdlss_parallel_width((double)cn*2); (void)nt;
     VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
     for(csi v=0;v<cn;v++) w[v]=d[v]*x[v]+s[v];
-    for(csi a=0;a<q->nsp;a++) w[q->sp[a]]=rhs_special(q,a,x,d,s);
+    rhs_specials(q,x,w,d,s);
 }
 
 static vsdlss_status core_finite(const double *v, csi m)
@@ -275,16 +296,25 @@ static vsdlss_status core_finite(const double *v, csi m)
     return bad?VSDLSS_ERR_NONFINITE:VSDLSS_OK;
 }
 
-/* One separate step of component c: w = b, solved in place, copied to x (the
- * arithmetic of vsdlss_m3_solve_packed_inplace). */
+/* One separate step of component c, in place on x (the arithmetic of
+ * vsdlss_m3_solve_packed_inplace on b): the special vertices' b first (they
+ * read other entries of x), then b = d x + s elsewhere, then the solve. */
 static vsdlss_status solve_separate(vsdlss_m3_transient *T, csi c)
 {
     const vsdlss_m3_component_factor *cf=T->f->component+c;
     const tr_comp *q=T->comp+c;
     const vsdlss_reduction *r=cf->reduction;
     const csi off=T->f->components->offset[c], cn=cf->n, core=r->core_n;
-    double *x=T->x+off, *w=T->w+off;
-    rhs_all(q,cn,x,w,T->d+off,T->s+off);
+    double *w=T->x+off; const double *d=T->d+off, *s=T->s+off;
+    {
+        int nt=vsdlss_parallel_width((double)q->nsp*16); (void)nt;
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
+        for(csi a=0;a<q->nsp;a++) q->spb[a]=rhs_special(q,a,w,d,s);
+        nt=vsdlss_parallel_width((double)cn*2);
+        VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
+        for(csi v=0;v<cn;v++) w[v]=d[v]*w[v]+s[v];
+        for(csi a=0;a<q->nsp;a++) w[q->sp[a]]=q->spb[a];
+    }
     vsdlss_status st=vsdlss_reduce_forward_inplace(r,w,NULL);
     if(st!=VSDLSS_OK) return st;
     if(core) {
@@ -298,9 +328,7 @@ static vsdlss_status solve_separate(vsdlss_m3_transient *T, csi c)
             for(csi k=0;k<core;k++) w[core_vertex(cf,k)]=q->core[k];
         }
     }
-    if((st=vsdlss_reduce_backward_inplace(r,NULL,w))!=VSDLSS_OK) return st;
-    memcpy(x,w,(size_t)cn*sizeof(double));
-    return VSDLSS_OK;
+    return vsdlss_reduce_backward_inplace(r,NULL,w);
 }
 
 /* Before the first iteration: fused components run the forward pass of the
@@ -353,7 +381,7 @@ static vsdlss_status phase_b(void *vt, csi c)
     const vsdlss_m3_component_factor *cf=T->f->component+c;
     const csi off=T->f->components->offset[c];
     const double *x=T->x+off, *d=T->d+off, *s=T->s+off; double *w=T->w+off;
-    for(csi a=0;a<q->nsp;a++) w[q->sp[a]]=rhs_special(q,a,x,d,s);
+    rhs_specials(q,x,w,d,s);
     return vsdlss_reduce_tr_step_b(cf->reduction,q->plan,w);
 }
 
@@ -423,7 +451,7 @@ vsdlss_status vsdlss_m3_transient_info(const vsdlss_m3_transient *T, csi *fused_
     if(!T) return VSDLSS_ERR_INVALID;
     csi fc=0, u=0, l=0;
     for(csi c=0;c<T->f->count;c++) if(T->comp[c].fused) {
-        csi a, b; vsdlss_reduce_tr_counts(T->comp[c].plan,&a,&b); fc++; u+=a; l+=b;
+        csi a, b; vsdlss_reduce_tr_counts(T->comp[c].plan,&a,&b,NULL,NULL); fc++; u+=a; l+=b;
     }
     if(fused_components) *fused_components=fc;
     if(units) *units=u;

@@ -160,7 +160,9 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
  * this b with vsdlss_m3_solve_packed.  Everything stays in packed order (no
  * gather or scatter per step), and where the factor allows it the backward
  * pass of a step and the forward pass of the next share one read of the
- * low-degree records (VSDLSS_TR_FUSE=0 turns that off; same results).
+ * low-degree records (VSDLSS_TR_FUSE: 1 = where at most half of a
+ * component's records must wait, the default; 0 = off; 2 = always; same
+ * results).
  *
  * start: x0 = solution at step 0 (caller order).  run: nsteps steps, row s of
  * src (nsrc values, src[s*nsrc + j] at src_node[j]) for step k+1+s.  After

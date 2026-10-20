@@ -373,7 +373,7 @@ typedef struct vsdlss_tr_plan vsdlss_tr_plan;
 int vsdlss_reduce_tr_fusable(const vsdlss_reduction *);
 vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *, const unsigned char *special, vsdlss_tr_plan **);
 void vsdlss_reduce_tr_plan_free(vsdlss_tr_plan *);
-void vsdlss_reduce_tr_counts(const vsdlss_tr_plan *, csi *units, csi *late);
+void vsdlss_reduce_tr_counts(const vsdlss_tr_plan *, csi *units, csi *late, csi *records, csi *late_records);
 vsdlss_status vsdlss_reduce_tr_step_a(const vsdlss_reduction *, const vsdlss_tr_plan *, double *x, double *w,
                                       const double *d, const double *s, const unsigned char *special, int next);
 vsdlss_status vsdlss_reduce_tr_step_b(const vsdlss_reduction *, const vsdlss_tr_plan *, double *w);

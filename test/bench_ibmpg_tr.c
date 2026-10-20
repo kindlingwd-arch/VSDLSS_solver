@@ -6,7 +6,9 @@
  *        PG_STEPS=n (default: all steps of .tran), PG_BLOCK=n (reduction
  *        block, default 65536; smaller gives small cases blocks and a
  *        fusable tail), PG_TAILMIN=n (smallest scheduled tail, default
- *        4096), PG_BATCH=n (steps per run
+ *        4096), PG_FUSE=1|2 (fusion of "tr+fuse": automatic, the default,
+ *        or always), PG_ROUNDS=n (rounds of the three ways, order rotated,
+ *        best time each; default 3), PG_BATCH=n (steps per run
  *        call, default all)
  * The benchmarks are published at
  * https://web.ece.ucsb.edu/~lip/PGBenchmarks/ibmpgbench.html (Nassif, ASP-DAC
@@ -175,6 +177,7 @@ int main(int argc,char **argv)
     vsdlss_set_num_threads(threads);
     if((e=getenv("PG_BLOCK"))) vsdlss_reduce_block=atol(e);   /* smaller block: blocks and a tail (fusion) on small cases */
     if((e=getenv("PG_TAILMIN"))) vsdlss_reduce_tail_min=atol(e);  /* smallest tail given a window schedule (default 4096) */
+    const int fuse_sel=(e=getenv("PG_FUSE"))?atoi(e):1;          /* "tr+fuse" mode: 1 automatic, 2 always */
     double t0=now();
     elist R={0},C={0},L={0},V={0}; isrc *I=NULL; csi nI=0,capI=0;
     double h=0,tstop=0; char **pnames=NULL; csi npn=0;
@@ -324,11 +327,16 @@ int main(int argc,char **argv)
     csi *slot=malloc((size_t)(n?n:1)*sizeof(csi)); vsdlss_m3_export_packed_slots(F,slot,n);
 
     /* ---- three ways ---- */
-    double *rec[3], tm[3]; const char *name[3]={"manual","tr","tr+fuse"};
+    double *rec[3], tm[3]={1e300,1e300,1e300}; const char *name[3]={"manual","tr","tr+fuse"};
+    /* PG_ROUNDS rounds, the order of the three rotated every round (this
+     * laptop's timings drift by 15% and more between consecutive runs of the
+     * same code); best time per way, and every round must repeat its bits */
+    const int rounds=(e=getenv("PG_ROUNDS"))&&atoi(e)>0?atoi(e):3; int stable[3]={1,1,1};
+    double *tmp=calloc((size_t)((steps+1)*(npn?npn:1)),8);
     for(int m=0;m<3;m++) rec[m]=calloc((size_t)((steps+1)*(npn?npn:1)),8);
     const csi batch=(e=getenv("PG_BATCH"))&&atol(e)>0?atol(e):steps;
-    for(int m=0;m<3;m++){
-        cbctx cx={&P,slot,malloc((size_t)(L.m?L.m:1)*8),npn,out_u,out_fix,rec[m],steps};
+    for(int r=0;r<rounds;r++) for(int i=0;i<3;i++){ const int m=(i+r)%3;
+        cbctx cx={&P,slot,malloc((size_t)(L.m?L.m:1)*8),npn,out_u,out_fix,r?tmp:rec[m],steps};
         memcpy(cx.il,P.il0,(size_t)L.m*8);
         if(m==0){
             /* the interface's b formula by hand, one packed solve per step */
@@ -354,10 +362,10 @@ int main(int argc,char **argv)
                 double *t=x; x=w; w=t;
                 on_step(&cx,k+1,x,dv);
             }
-            tm[m]=now()-t0;
+            { double tt=now()-t0; if(tt<tm[m]) tm[m]=tt; }
             free(x);free(w);free(s);free(d);free(dv);free(pc);free(pu);free(fl);free(pv);
         } else {
-            vsdlss_m3_transient_fuse=m==2;
+            vsdlss_m3_transient_fuse=m==2?fuse_sel:0;
             vsdlss_m3_transient *T=NULL;
             if(vsdlss_m3_transient_create(F,Ch,P.nsrc,P.src,P.ndep,P.dep,&T)!=VSDLSS_OK) die("transient create failed");
             csi fc,u,l; vsdlss_m3_transient_info(T,&fc,&u,&l);
@@ -367,14 +375,16 @@ int main(int argc,char **argv)
             for(csi done=0;done<steps;){ csi s=steps-done<batch?steps-done:batch;
                 if(vsdlss_m3_transient_run(T,s,sv+done*P.nsrc,on_step,&cx)!=VSDLSS_OK) die("transient run failed");
                 done+=s; }
-            tm[m]=now()-t0;
+            { double tt=now()-t0; if(tt<tm[m]) tm[m]=tt; }
             vsdlss_m3_transient_free(T);
         }
         free(cx.il);
+        if(r && memcmp(tmp,rec[m],(size_t)((steps+1)*npn)*8)) stable[m]=0;
     }
     for(int m=0;m<3;m++)
-        printf("%-8s %8.3f ms per step%s\n",name[m],1e3*tm[m]/(double)steps,
-               m?(memcmp(rec[m],rec[0],(size_t)((steps+1)*npn)*8)?"  DIFFERS from manual":"  bitwise = manual"):"");
+        printf("%-8s %8.3f ms per step (best of %d rounds)%s%s\n",name[m],1e3*tm[m]/(double)steps,rounds,
+               m?(memcmp(rec[m],rec[0],(size_t)((steps+1)*npn)*8)?"  DIFFERS from manual":"  bitwise = manual"):"",
+               stable[m]?"":"  NOT REPEATABLE across rounds");
 
     /* ---- published waveforms ---- */
     f=zopen(argv[2]); csi cur=-1, cmp=0, cmp0=0; double maxd=0, maxd0=0, vmin=1e300, vmax=-1e300; csi worst=-1; double worst_t=0;

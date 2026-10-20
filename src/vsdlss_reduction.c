@@ -2376,6 +2376,7 @@ struct vsdlss_tr_plan {
     unsigned char *late_chunk, *late_block;
     double *buf;            /* deferred core updates of the tail (tail_core_slots) */
     csi chunks, late_chunks, late_blocks;
+    csi records, late_records;     /* records of all units, of the late ones */
 };
 
 void vsdlss_reduce_tr_plan_free(vsdlss_tr_plan *p)
@@ -2420,6 +2421,7 @@ vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned ch
             if(u>=t0) touch[u-t0]=1;
         }
         p->late_block[b]=(unsigned char)late; p->late_blocks+=late;
+        p->records+=s->count; if(late) p->late_records+=s->count;
     }
     const uint64_t *bit=r->tail_core_bit;
     csi why[3]={0,0,0};       /* first reason: special vertex, vertex updated by a block, direct core update */
@@ -2432,6 +2434,7 @@ vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned ch
         }
         if(late) why[late-1]++;
         p->late_chunk[c]=(unsigned char)(late!=0); p->late_chunks+=late!=0;
+        p->records+=cr[c+1]-cr[c]; if(late) p->late_records+=cr[c+1]-cr[c];
     }
     if(getenv("VSDLSS_TRACE")) {
         /* how many chunks each block updates (a block of one chunk could run
@@ -2461,10 +2464,12 @@ vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned ch
     return VSDLSS_OK;
 }
 
-void vsdlss_reduce_tr_counts(const vsdlss_tr_plan *p, csi *units, csi *late)
+void vsdlss_reduce_tr_counts(const vsdlss_tr_plan *p, csi *units, csi *late, csi *records, csi *late_records)
 {
     if(units) *units=p?p->chunks:0;
     if(late) *late=p?p->late_chunks+p->late_blocks:0;
+    if(records) *records=p?p->records:0;
+    if(late_records) *late_records=p?p->late_records:0;
 }
 
 /* backward_range of a relabelled segment reading the pivot values from w and

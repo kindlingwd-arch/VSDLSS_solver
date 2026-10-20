@@ -295,7 +295,8 @@ int main(void)
     vsdlss_reduce_tail_order_grain=4; vsdlss_reorder_min=64;
     sys S=build();
     for(int th=1;th<=4;th*=4) {
-        scenario(&S,1,64,th,1,1);       /* fused */
+        scenario(&S,1,64,th,2,1);       /* fused (forced) */
+        scenario(&S,1,64,th,1,0);       /* automatic: fused or not, the same bits */
         scenario(&S,1,64,th,0,0);       /* the same, unfused */
         scenario(&S,0,64,th,1,0);       /* not relabelled: unfused path */
         scenario(&S,1,0,th,1,0);        /* level tail: unfused path */
