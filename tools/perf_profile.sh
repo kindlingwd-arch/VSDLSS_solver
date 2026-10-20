@@ -110,10 +110,17 @@ else
     else
         sleep 2
         "$PERF" stat -p $PID -e "$EV" -- sleep "$SECS" > "$OUT/perf_stat.txt" 2>&1
-        # user-mode cycles only: perf_event_paranoid = 2 forbids sampling the kernel, and
-        # old perf (3.10) does not fall back to :u by itself (perf stat does)
-        "$PERF" record -e cycles:u -F 499 -p $PID -o "$OUT/perf.data" -- sleep "$SECS" > "$OUT/perf_record.log" 2>&1
         kill $PID 2>/dev/null; wait $PID 2>/dev/null
+        # Sampling: attaching (-p) opens one event per thread and CPU on old perf
+        # (33 threads x 256 CPUs: "Too many events are opened"), so a second
+        # bench_phase runs under perf record instead (one inherited event).  The
+        # factorization is sampled too: its functions (METIS, vsdlss_reduce_run,
+        # supernodal factorization) are told apart in the table.  User-mode cycles:
+        # perf_event_paranoid = 2 forbids the kernel, and perf 3.10 does not fall back.
+        reps=""; for i in $(seq 1 8); do reps="$reps $T"; done
+        say "    perf record: a second bench_phase ($reps threads) under perf, factorization included"
+        "$PERF" record -e cycles:u -F 199 -o "$OUT/perf.data" -- env VSDLSS_INTERLEAVE=1 "$PH" text:. 6 "$reps" 64 \
+            > "$OUT/perf_record.log" 2>&1
         say "    perf stat (all threads, $SECS s of solves):"
         grep -E "^ +[0-9,.]+ +[A-Za-z_]|insn per cycle|seconds time elapsed" "$OUT/perf_stat.txt" | sed 's/^/    /' | tee -a "$S"
         # --no-children only exists from perf 3.16 (CentOS 7 ships 3.10): fall back without it
@@ -129,7 +136,7 @@ else
         done
         [ -s "$OUT/perf.data" ] || { say "    perf record wrote nothing:"; tail -n 5 "$OUT/perf_record.log" | sed 's/^/    | /' | tee -a "$S"; }
         [ -s "$OUT/perf_top.txt" ] || "$PERF" report -i "$OUT/perf.data" --stdio -g none --sort symbol 2>&1 | head -n 5 | sed 's/^/    | /' | tee -a "$S"
-        say "    functions by share of cycles (no children; libgomp / gomp_* / do_spin = waiting at barriers):"
+        say "    functions by share of cycles (libgomp / gomp_* / do_spin = waiting at barriers; METIS, *factor*, reduce_run = the factorization):"
         sed 's/^/    /' "$OUT/perf_top.txt" | tee -a "$S"
         say "    by library:"
         sed 's/^/    /' "$OUT/perf_dso.txt" | tee -a "$S"
