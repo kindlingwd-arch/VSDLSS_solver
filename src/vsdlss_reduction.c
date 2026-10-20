@@ -2395,7 +2395,113 @@ int vsdlss_reduce_tr_fusable(const vsdlss_reduction *r)
     return 1;
 }
 
-vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned char *special,
+/* Unit sizes for the trace: bytes of a unit's records (degree byte, pivot,
+ * 4-byte neighbour and 8-byte multiplier per entry) plus the four packed
+ * vectors x, w, d, s at its vertices -- what one fused backward + forward
+ * keeps in cache. */
+static double tr_unit_bytes(csi count, csi entries) { return (double)count*(9.0+32.0)+(double)entries*12.0; }
+
+static int cmp_dbl(const void *a, const void *b)
+{ const double x=*(const double *)a, y=*(const double *)b; return x<y?-1:x>y; }
+
+static double pct(const double *v, csi m, double q) { return m?v[(csi)((double)(m-1)*q+0.5)]:0.0; }
+
+/* VSDLSS_TRACE: why units are late (records, per reason; a unit may have
+ * several), the unit sizes, and how many records would fuse right away --
+ * as now, without rule 4 (ordered deferral of a chunk's direct core updates
+ * as well), and also with every block that updates the tail vertices of one
+ * chunk only run inside that chunk's task -- in all units and in units
+ * whose footprint fits 512 KiB (L2 of a Zen 2 core) / 4 MiB (its share of L3). */
+static void tr_plan_trace(const vsdlss_reduction *r, const vsdlss_tr_plan *p, const unsigned char *why)
+{
+    const vsdlss_pk_seg *g=r->pk+r->blocks;
+    const csi t0=g->k0, cnt=r->count, chunks=p->chunks, nb=r->blocks;
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
+    int32_t *chunk_of=(int32_t *)malloc((size_t)(g->count?g->count:1)*sizeof(int32_t));
+    int32_t *only=(int32_t *)malloc((size_t)(nb?nb:1)*sizeof(int32_t));   /* the one chunk a block updates, -1 none, -2 several */
+    unsigned char *multi=(unsigned char *)calloc((size_t)(chunks?chunks:1),1);   /* updated by a block of several chunks */
+    double *cb=(double *)malloc((size_t)(chunks?chunks:1)*sizeof(double)), *mb=(double *)malloc((size_t)(chunks?chunks:1)*sizeof(double));
+    double *bb=(double *)malloc((size_t)(nb?nb:1)*sizeof(double)), *sorted=(double *)malloc((size_t)((chunks>nb?chunks:nb)+1)*sizeof(double));
+    csi *mrec=(csi *)calloc((size_t)(chunks?chunks:1),sizeof(csi));
+    if(!chunk_of || !only || !multi || !cb || !mb || !bb || !sorted || !mrec) goto out;
+    for(csi c=0;c<chunks;c++) for(csi i=cr[c];i<cr[c+1];i++) chunk_of[i]=(int32_t)c;
+    csi one=0, more=0;
+    for(csi b=0;b<nb;b++) {
+        const vsdlss_pk_seg *s=r->pk+b; int32_t first=-1; int many=0;
+        for(csi o=0;o<s->nbn && !many;o++) {
+            const csi u=s->nb[o];
+            if(u<t0 || u>=cnt) continue;
+            if(first<0) first=chunk_of[u-t0]; else many=chunk_of[u-t0]!=first;
+        }
+        only[b]=many?-2:first;
+        if(first>=0) { one+=!many; more+=many; }
+        if(many) for(csi o=0;o<s->nbn;o++) { const csi u=s->nb[o]; if(u>=t0 && u<cnt) multi[chunk_of[u-t0]]=1; }
+        bb[b]=tr_unit_bytes(s->count,s->nbn);
+    }
+    for(csi c=0;c<chunks;c++) { cb[c]=tr_unit_bytes(cr[c+1]-cr[c],cn[c+1]-cn[c]); mb[c]=cb[c]; }
+    for(csi b=0;b<nb;b++) if(only[b]>=0) { mb[only[b]]+=bb[b]; mrec[only[b]]+=r->pk[b].count; }
+    /* late records per reason (why: bit 1 special, 2 vertex updated by a block, 4 direct core update) */
+    csi lr[3]={0,0,0}, lc[3]={0,0,0}, brec=0, blate=0, crec=0;
+    double bytes=0;
+    for(csi c=0;c<chunks;c++) bytes+=cb[c];
+    for(csi b=0;b<nb;b++) bytes+=bb[b];
+    for(csi c=0;c<chunks;c++) {
+        const csi m=cr[c+1]-cr[c]; crec+=m;
+        for(int k=0;k<3;k++) if(why[c]>>k&1) { lr[k]+=m; lc[k]++; }
+    }
+    for(csi b=0;b<nb;b++) { brec+=r->pk[b].count; if(p->late_block[b]) blate+=r->pk[b].count; }
+    const double tot=(double)(crec+brec)>0?(double)(crec+brec):1.0;
+    fprintf(stderr,"vsdlss trace: transient fusion records: %lld in %lld units (tail chunks %lld, blocks %lld), %.1f MiB of records + vectors; "
+            "late %lld (%.1f%%): chunks with a special vertex %lld (%lld chunks), with a vertex updated by a block %lld (%lld), "
+            "with a direct core update a block also makes %lld (%lld); late blocks %lld\n",
+            (long long)(crec+brec),(long long)(chunks+nb),(long long)crec,(long long)brec,
+            bytes/1048576,(long long)p->late_records,100.0*(double)p->late_records/tot,
+            (long long)lr[0],(long long)lc[0],(long long)lr[1],(long long)lc[1],(long long)lr[2],(long long)lc[2],(long long)blate);
+    /* fusable records under three rules: now, without rule 4, and with single-chunk blocks merged */
+    const double cap[2]={512.0*1024,4096.0*1024};
+    double fus[3][3]={{0}};   /* [scenario][all, <=512 KiB, <=4 MiB] */
+    for(int sc=0;sc<3;sc++) {
+        for(csi c=0;c<chunks;c++) {
+            const unsigned char w_=why[c];
+            const int late=sc==0?w_!=0:sc==1?(w_&3)!=0:((w_&1) || ((w_&2) && multi[c]));
+            if(late) continue;
+            const double m=(double)(cr[c+1]-cr[c])+(sc==2?(double)mrec[c]:0.0), by=sc==2?mb[c]:cb[c];
+            fus[sc][0]+=m; for(int k=0;k<2;k++) if(by<=cap[k]) fus[sc][1+k]+=m;
+        }
+        for(csi b=0;b<nb;b++) {
+            if(p->late_block[b]) continue;
+            if(sc==2 && only[b]>=0) {
+                const unsigned char w_=why[only[b]];
+                if(!((w_&1) || ((w_&2) && multi[only[b]]))) continue;     /* counted with its chunk */
+            }
+            const double m=(double)r->pk[b].count;
+            fus[sc][0]+=m; for(int k=0;k<2;k++) if(bb[b]<=cap[k]) fus[sc][1+k]+=m;
+        }
+    }
+    fprintf(stderr,"vsdlss trace: transient fusion potential (records fused right away: all units / footprint <= 512 KiB / <= 4 MiB): "
+            "now %.1f%% / %.1f%% / %.1f%%; ordered deferral of direct core updates %.1f%% / %.1f%% / %.1f%%; "
+            "and single-chunk blocks run with their chunk %.1f%% / %.1f%% / %.1f%%\n",
+            100*fus[0][0]/tot,100*fus[0][1]/tot,100*fus[0][2]/tot,100*fus[1][0]/tot,100*fus[1][1]/tot,100*fus[1][2]/tot,
+            100*fus[2][0]/tot,100*fus[2][1]/tot,100*fus[2][2]/tot);
+    /* sizes */
+    double big[2][2]={{0}};   /* [chunks, blocks][> 512 KiB, > 4 MiB] records */
+    for(csi c=0;c<chunks;c++) { sorted[c]=cb[c]; for(int k=0;k<2;k++) if(cb[c]>cap[k]) big[0][k]+=(double)(cr[c+1]-cr[c]); }
+    qsort(sorted,(size_t)chunks,sizeof(double),cmp_dbl);
+    fprintf(stderr,"vsdlss trace: transient fusion unit footprint (KiB): tail chunks median %.0f, p90 %.0f, p99 %.0f, max %.0f; "
+            "records in chunks > 512 KiB %.1f%%, > 4 MiB %.1f%% of the chunk records",
+            pct(sorted,chunks,0.5)/1024,pct(sorted,chunks,0.9)/1024,pct(sorted,chunks,0.99)/1024,chunks?sorted[chunks-1]/1024:0.0,
+            100*big[0][0]/(crec?(double)crec:1.0),100*big[0][1]/(crec?(double)crec:1.0));
+    for(csi b=0;b<nb;b++) { sorted[b]=bb[b]; for(int k=0;k<2;k++) if(bb[b]>cap[k]) big[1][k]+=(double)r->pk[b].count; }
+    qsort(sorted,(size_t)nb,sizeof(double),cmp_dbl);
+    fprintf(stderr,"; blocks median %.0f, max %.0f, records in blocks > 512 KiB %.1f%%, > 4 MiB %.1f%%; "
+            "blocks updating tail vertices of one chunk %lld, of several %lld\n",
+            pct(sorted,nb,0.5)/1024,nb?sorted[nb-1]/1024:0.0,100*big[1][0]/(brec?(double)brec:1.0),100*big[1][1]/(brec?(double)brec:1.0),
+            (long long)one,(long long)more);
+out:
+    free(chunk_of); free(only); free(multi); free(cb); free(mb); free(bb); free(sorted); free(mrec);
+}
+
+vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned char *special, int bound,
                                     vsdlss_tr_plan **out)
 {
     if(!out) return VSDLSS_ERR_INVALID;
@@ -2406,12 +2512,13 @@ vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned ch
     const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
     vsdlss_tr_plan *p=(vsdlss_tr_plan *)calloc(1,sizeof(*p));
     unsigned char *touch=(unsigned char *)calloc((size_t)(n-t0>0?n-t0:1),1);   /* tail/core vertex updated by a block */
-    if(!p || !touch) { free(touch); vsdlss_reduce_tr_plan_free(p); return VSDLSS_ERR_OOM; }
+    unsigned char *why=(unsigned char *)calloc((size_t)(chunks?chunks:1),1);   /* reasons a chunk is late (bits) */
+    if(!p || !touch || !why) { free(touch); free(why); vsdlss_reduce_tr_plan_free(p); return VSDLSS_ERR_OOM; }
     p->chunks=chunks;
     p->late_chunk=(unsigned char *)calloc((size_t)(chunks?chunks:1),1);
     p->late_block=(unsigned char *)calloc((size_t)r->blocks,1);
     p->buf=(double *)malloc((size_t)(r->tail_core_slots?r->tail_core_slots:1)*sizeof(double));
-    if(!p->late_chunk || !p->late_block || !p->buf) { free(touch); vsdlss_reduce_tr_plan_free(p); return VSDLSS_ERR_OOM; }
+    if(!p->late_chunk || !p->late_block || !p->buf) { free(touch); free(why); vsdlss_reduce_tr_plan_free(p); return VSDLSS_ERR_OOM; }
     for(csi b=0;b<r->blocks;b++) {
         const vsdlss_pk_seg *s=r->pk+b; int late=0;
         for(csi i=0;i<s->count && !late;i++) late=special[s->k0+i]!=0;
@@ -2424,42 +2531,35 @@ vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *r, const unsigned ch
         p->records+=s->count; if(late) p->late_records+=s->count;
     }
     const uint64_t *bit=r->tail_core_bit;
-    csi why[3]={0,0,0};       /* first reason: special vertex, vertex updated by a block, direct core update */
+    csi first[3]={0,0,0};     /* first reason: special vertex, vertex updated by a block, direct core update */
     for(csi c=0;c<chunks;c++) {
-        int late=0;
-        for(csi i=cr[c];i<cr[c+1] && !late;i++) late=special[t0+i]?1:touch[i]?2:0;
-        for(csi o=cn[c];o<cn[c+1] && !late;o++) {
+        unsigned char w_=0;
+        for(csi i=cr[c];i<cr[c+1];i++) w_|=(unsigned char)((special[t0+i]?1:0)|(touch[i]?2:0));
+        for(csi o=cn[c];o<cn[c+1];o++) {
             const csi u=g->nb[o];
-            if(u>=cnt && !((bit[o>>6]>>(o&63))&1) && (special[u] || touch[u-t0])) late=3;   /* direct core update */
+            if(u>=cnt && !((bit[o>>6]>>(o&63))&1)) w_|=(unsigned char)((special[u]?1:0)|(touch[u-t0]?4:0));   /* direct core update */
         }
-        if(late) why[late-1]++;
-        p->late_chunk[c]=(unsigned char)(late!=0); p->late_chunks+=late!=0;
+        why[c]=w_;
+        const int late=w_!=0;
+        if(late) first[(w_&1)?0:(w_&2)?1:2]++;
+        p->late_chunk[c]=(unsigned char)late; p->late_chunks+=late;
         p->records+=cr[c+1]-cr[c]; if(late) p->late_records+=cr[c+1]-cr[c];
     }
     if(getenv("VSDLSS_TRACE")) {
-        /* how many chunks each block updates (a block of one chunk could run
-         * inside that chunk's task) */
-        csi one=0, more=0;
-        int32_t *chunk_of=(int32_t *)malloc((size_t)(g->count?g->count:1)*sizeof(int32_t));
-        if(chunk_of) {
-            for(csi c=0;c<chunks;c++) for(csi i=cr[c];i<cr[c+1];i++) chunk_of[i]=(int32_t)c;
-            for(csi b=0;b<r->blocks;b++) {
-                const vsdlss_pk_seg *s=r->pk+b; int32_t first=-1; int many=0;
-                for(csi o=0;o<s->nbn && !many;o++) {
-                    const csi u=s->nb[o];
-                    if(u<t0 || u>=cnt) continue;
-                    if(first<0) first=chunk_of[u-t0]; else many=chunk_of[u-t0]!=first;
-                }
-                if(first>=0) { one+=!many; more+=many; }
-            }
-            free(chunk_of);
-        }
         fprintf(stderr,"vsdlss trace: transient fusion: %lld chunks, late %lld (special %lld, updated by a block %lld, "
-                "direct core update %lld); blocks late %lld of %lld; blocks updating tail vertices of one chunk %lld, of several %lld\n",
-                (long long)chunks,(long long)p->late_chunks,(long long)why[0],(long long)why[1],(long long)why[2],
-                (long long)p->late_blocks,(long long)r->blocks,(long long)one,(long long)more);
+                "direct core update %lld); blocks late %lld of %lld\n",
+                (long long)chunks,(long long)p->late_chunks,(long long)first[0],(long long)first[1],(long long)first[2],
+                (long long)p->late_blocks,(long long)r->blocks);
+        tr_plan_trace(r,p,why);
     }
-    free(touch);
+    /* Upper bound for timing only (VSDLSS_TR_FUSE=3): every unit fuses right
+     * away.  Breaks the order of section 6 of the design note: the results are
+     * NOT those of solving each step (late chunks miss block updates). */
+    if(bound) {
+        memset(p->late_chunk,0,(size_t)(chunks?chunks:1)); memset(p->late_block,0,(size_t)r->blocks);
+        p->late_chunks=p->late_blocks=p->late_records=0;
+    }
+    free(touch); free(why);
     *out=p;
     return VSDLSS_OK;
 }
