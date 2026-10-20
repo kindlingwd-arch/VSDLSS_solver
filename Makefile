@@ -59,7 +59,7 @@ LIBSRCS := src/vsdlss.c src/vsdlss_status.c src/vsdlss_matrix.c \
            src/vsdlss_mld_partition.c src/vsdlss_mld.c src/vsdlss_ordering.c \
            src/vsdlss_factor.c src/vsdlss_io.c src/vsdlss_text_io.c src/vsdlss_components.c \
            src/vsdlss_reduction.c src/vsdlss_supernodal_symbolic.c \
-           src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m4.c \
+           src/vsdlss_supernodal_numeric.c src/vsdlss_sn_reorder.c src/vsdlss_m3.c src/vsdlss_m3_modify.c src/vsdlss_m3_transient.c src/vsdlss_m4.c \
            src/vsdlss_panel.c src/vsdlss_m4_panel.c src/vsdlss_parallel.c \
            src/vsdlss_dense.c src/vsdlss_simd.c src/vsdlss_ledger.c
 LIBOBJS := $(LIBSRCS:.c=.o)
@@ -132,14 +132,14 @@ sanitizers:
 	$(MAKE) clean
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) \
 	  CFLAGS='-O1 -g -Wall -Wextra -Werror -Iinclude -std=c11 -fsanitize=address,undefined -fno-omit-frame-pointer' \
-	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal test-solve-kv test-relabel
+	  LDLIBS='test/sanitizer_options.c -lm -fsanitize=address,undefined' test-unit test-io test-ordering test-mld test-m3 test-m4 test-m4-panels test-amd test-kernels test-parallel test-small test-reduced-dag test-supernodal test-solve-kv test-relabel test-modify test-transient
 
 src/%.o: src/%.c include/vsdlss.h src/vsdlss_text_io.h src/vsdlss_internal.h src/vsdlss_m3_internal.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h src/vsdlss_dense.h src/vsdlss_ledger.h src/vsdlss_simd.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -c -o $@ $<
 
 clean:
 	rm -rf build/metis
-	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_overlap export_pipeline nb_stats fp32_probe bench_tail bench_history bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
+	rm -f libvsdlss.a quickstart transient_driver vsdlss_solve vsdlss_solver test_solver test_io test_ordering test_mld test_m3 test_m4 test_m4_panels test_amd test_kernels test_parallel test_small test_reduced_dag test_supernodal test_modify bench_eco test_transient bench_tr bench_powergrid bench_pg_profile bench_parallel bench_m3 bench_sn bench_pg_solve bench_phase bench_overlap export_pipeline nb_stats fp32_probe bench_tail bench_history bench_core bench_perm2_only bench_perm3 bench_ibmpg bench_ibmpg_tr bench_tr_replay gen_tr_dump bench_dense bench_cholmod bench_pardiso test_simd test_omp_tsan_probe src/*.o test_sparse.*
 
 test_m4: test/test_m4.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m4_internal.h src/vsdlss_parallel.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_m4.c $(LIBSRCS) $(LDLIBS)
@@ -387,3 +387,31 @@ test_relabel: test/test_relabel.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_inte
 test-relabel: test_relabel
 	./test_relabel
 test: test-relabel
+
+# Low-rank modification of an M3 factor (ECO, vsdlss_m3_modify); see
+# docs/reconstruction/eco-modify-20261018.md.
+test_modify: test/test_modify.c test/m3_test_alloc.c test/m3_test_alloc.h $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_modify.c test/m3_test_alloc.c $(LIBSRCS) $(LDLIBS) \
+	  -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
+test-modify: test_modify
+	./test_modify
+test: test-modify
+bench_eco: test/bench_eco.c test/bench_input.h $(LIBSRCS) include/vsdlss.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_eco.c $(LIBSRCS) $(LDLIBS)
+# Transient stepping inside the solver (vsdlss_m3_transient); see
+# docs/reconstruction/transient-stepping-impl-20261019.md.
+test_transient: test/test_transient.c test/m3_test_alloc.c test/m3_test_alloc.h $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/test_transient.c test/m3_test_alloc.c $(LIBSRCS) $(LDLIBS) \
+	  -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=free
+test-transient: test_transient
+	./test_transient
+test: test-transient
+bench_tr: test/bench_tr.c test/bench_input.h $(LIBSRCS) include/vsdlss.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_tr.c $(LIBSRCS) $(LDLIBS)
+bench_ibmpg_tr: test/bench_ibmpg_tr.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_ibmpg_tr.c $(LIBSRCS) $(LDLIBS)
+# Replay of a transient text dump (bench_tr_replay) and a synthetic dump to try it (gen_tr_dump).
+bench_tr_replay: test/bench_tr_replay.c test/bench_input.h $(LIBSRCS) include/vsdlss.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_tr_replay.c $(LIBSRCS) $(LDLIBS)
+gen_tr_dump: test/gen_tr_dump.c test/bench_input.h $(LIBSRCS) include/vsdlss.h
+	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/gen_tr_dump.c $(LIBSRCS) $(LDLIBS)

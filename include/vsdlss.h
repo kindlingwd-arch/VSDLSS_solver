@@ -144,7 +144,73 @@ vsdlss_status vsdlss_m3_export_packed_slots(const vsdlss_m3_factor *factor,
 vsdlss_status vsdlss_m3_internal_order(const vsdlss_m3_factor *factor, csi *perm);
 vsdlss_status vsdlss_m3_solve_internal(const vsdlss_m3_factor *factor,
                                        const double *rhs, double *solution);
+/* Low-rank modification (ECO): turn the factor of A into the factor of
+ * A + dA in place, without refactoring.  dA is symmetric, given as nz
+ * triplets (row[t], col[t], delta[t]) in the caller's numbering, either
+ * triangle, duplicates summed; e.g. a conductance change dg between nodes a
+ * and b is (a,b,-dg), (a,a,+dg), (b,b,+dg), and a change dg to ground at a
+ * is (a,a,+dg).  Off-diagonal entries must couple nodes already coupled in
+ * the factor (existing elements; new couplings change the structure:
+ * VSDLSS_ERR_UNSUPPORTED, refactor instead).  The work follows the
+ * elimination-tree path of each changed node, normally well below one
+ * solve.  All or nothing: on any error the factor is unchanged --
+ * VSDLSS_ERR_NOT_POSDEF when A + dA is not (numerically) positive definite,
+ * VSDLSS_ERR_UNSUPPORTED for structural changes, couplings across
+ * components, disk-mode factors.  Solutions afterwards solve A + dA to the
+ * accuracy of an update/downdate, not bitwise those of a new factorization;
+ * check the backward error and refactor after many modifications.  The
+ * packed order and slots do not change.  Not concurrent with solves or
+ * other calls on the same factor.  stats (optional) receives the work. */
+typedef struct vsdlss_m3_modify_stats {
+    csi updates, downdates;             /* rank-1 terms applied */
+    csi record_columns, core_columns;   /* factor columns rewritten (with repeats) */
+} vsdlss_m3_modify_stats;
+vsdlss_status vsdlss_m3_modify(vsdlss_m3_factor *factor, csi nz, const csi *row,
+                               const csi *col, const double *delta,
+                               vsdlss_m3_modify_stats *stats);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
+/* Transient stepping inside the solver (backward Euler, fixed step).  The
+ * factor is of A = G + C/h; each step solves A x_{k+1} = Ch x_k + s_{k+1}
+ * with Ch = C/h given once as upper CSC in the caller's numbering
+ * (diagonal: grounded capacitors; off-diagonal: two-terminal capacitors,
+ * within one component).  src_node: the nodes that get source values every
+ * step (duplicates add up).  dep_node: nodes whose next right-hand side
+ * depends on state the caller keeps (e.g. package RL); their values come
+ * from the callback.  The right-hand side is
+ *   b[v] = Ch[v][v] x[v] (+ Ch[v][u] x[u], partners u ascending in packed
+ *          order) + s[v],
+ * s[v] = 0.0 + the step's source values at v (registration order) + the dep
+ * values at v (dep order); each step's solution is bitwise that of solving
+ * this b with vsdlss_m3_solve_packed.  Everything stays in packed order (no
+ * gather or scatter per step), and where the factor allows it the backward
+ * pass of a step and the forward pass of the next share one read of the
+ * low-degree records (VSDLSS_TR_FUSE: 1 = where at most half of a
+ * component's records must wait, the default; 0 = off; 2 = always; same
+ * results).
+ *
+ * start: x0 = solution at step 0 (caller order).  run: nsteps steps, row s of
+ * src (nsrc values, src[s*nsrc + j] at src_node[j]) for step k+1+s.  After
+ * every step k (and once for the starting state) cb(ctx, k, x, dep_next) gets
+ * the solution in packed order (valid during the call; read node i at
+ * vsdlss_m3_export_packed_slots' slot i) and, if ndep > 0, fills the ndep
+ * values for step k+1.  get: the latest solution (caller order), all nodes
+ * (nidx < 0) or the listed ones.  After a failed run, start again.  The
+ * factor must stay alive and unmodified; not concurrent with other calls on
+ * the same factor.  info: components fused, tail chunks, units run late. */
+typedef struct vsdlss_m3_transient vsdlss_m3_transient;
+vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *factor, const vsdlss *Ch,
+                                         csi nsrc, const csi *src_node, csi ndep,
+                                         const csi *dep_node, vsdlss_m3_transient **out);
+vsdlss_status vsdlss_m3_transient_start(vsdlss_m3_transient *T, const double *x0);
+vsdlss_status vsdlss_m3_transient_run(vsdlss_m3_transient *T, csi nsteps, const double *src,
+                                      void (*cb)(void *ctx, csi k, const double *x_packed,
+                                                 double *dep_next),
+                                      void *ctx);
+vsdlss_status vsdlss_m3_transient_get(const vsdlss_m3_transient *T, csi nidx,
+                                      const csi *node, double *out);
+vsdlss_status vsdlss_m3_transient_info(const vsdlss_m3_transient *T, csi *fused_components,
+                                       csi *units, csi *late_units);
+void vsdlss_m3_transient_free(vsdlss_m3_transient *T);
 /* M4: panel mode (width cap 8), scalar fallback for very small budgets.
  * Private temporary disk factor; no original-format compatibility.
  * budget bounds numeric/solve workspace and resident metadata, excluding

@@ -103,6 +103,7 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
         free(factor->component[k].ws_saved);
         free(factor->component[k].ws_core);
         free(factor->component[k].core_map);
+        vsdlss_m3_eco_free(factor->component[k].eco);
         vsdlss_sn_factor_free(factor->component[k].numeric);
     }
     free(factor->component);
@@ -200,6 +201,10 @@ static void run_components(const vsdlss_m3_factor *f, int serial, component_fn f
         for(csi c=0;c<count;c++) if(!nbig || comp_size(f,c)<limit) res[c]=fn(ctx,c);
     }
 }
+
+void vsdlss_m3_run_components(const vsdlss_m3_factor *f, vsdlss_status (*fn)(void *, csi), void *ctx,
+                              vsdlss_status *res)
+{ run_components(f,f->disk_mode,fn,ctx,res); }
 
 /* Phase 1: this component's reduction input, built straight from the
  * weighted graph (no CSC copy of the component).  Large components are
