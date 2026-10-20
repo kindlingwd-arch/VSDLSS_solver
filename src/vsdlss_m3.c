@@ -201,6 +201,10 @@ static void run_components(const vsdlss_m3_factor *f, int serial, component_fn f
     }
 }
 
+void vsdlss_m3_run_components(const vsdlss_m3_factor *f, vsdlss_status (*fn)(void *, csi), void *ctx,
+                              vsdlss_status *res)
+{ run_components(f,f->disk_mode,fn,ctx,res); }
+
 /* Phase 1: this component's reduction input, built straight from the
  * weighted graph (no CSC copy of the component).  Large components are
  * renumbered in BFS order; small ones keep the ascending numbering.  (The

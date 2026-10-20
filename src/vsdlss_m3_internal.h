@@ -359,6 +359,28 @@ int vsdlss_reduce_bwd_pipe_ok(const vsdlss_reduction *, const vsdlss_sn_factor *
 vsdlss_status vsdlss_reduce_core_bwd_pipelined(const vsdlss_reduction *, const vsdlss_sn_factor *L,
                                                const double *saved, double *x);
 vsdlss_status vsdlss_reduce_backward_blocks_inplace(const vsdlss_reduction *, const double *saved, double *x);
+/* Transient stepping with cross-step fusion (vsdlss_m3_transient; see the
+ * comment in vsdlss_reduction.c).  fusable: a packed, relabelled, blocked
+ * reduction whose tail is one window.  plan: which units must run their
+ * forward pass after every backward pass (special[v] != 0: vertex v's next
+ * right-hand side needs other vertices' solution).  step_a: core solved in
+ * x (and w[core] = b_{k+1} at non-special core vertices), the tail chunks
+ * then the blocks run backward step k into x; with next != 0 each unit then
+ * sets w = d x + s at its non-special vertices and, unless late, runs
+ * forward step k+1.  step_b (after w is set at the special vertices): the
+ * late blocks, the late chunks, then the deferred core updates. */
+typedef struct vsdlss_tr_plan vsdlss_tr_plan;
+int vsdlss_reduce_tr_fusable(const vsdlss_reduction *);
+vsdlss_status vsdlss_reduce_tr_plan(const vsdlss_reduction *, const unsigned char *special, vsdlss_tr_plan **);
+void vsdlss_reduce_tr_plan_free(vsdlss_tr_plan *);
+void vsdlss_reduce_tr_counts(const vsdlss_tr_plan *, csi *units, csi *late, csi *records, csi *late_records);
+vsdlss_status vsdlss_reduce_tr_step_a(const vsdlss_reduction *, const vsdlss_tr_plan *, double *x, double *w,
+                                      const double *d, const double *s, const unsigned char *special, int next);
+vsdlss_status vsdlss_reduce_tr_step_b(const vsdlss_reduction *, const vsdlss_tr_plan *, double *w);
+/* run_components of vsdlss_m3.c: fn(ctx, c) for every component, large
+ * components concurrently on shares of the threads. */
+void vsdlss_m3_run_components(const vsdlss_m3_factor *, vsdlss_status (*fn)(void *, csi), void *ctx,
+                              vsdlss_status *res);
 /* Number of vsdlss_sn_solve_inplace calls so far that took the tree-parallel
  * schedule instead of the serial panel loop (kind 0), and of those, the ones
  * that ran the forward (1) / backward (2) tree top by branches.
