@@ -114,10 +114,18 @@ else
         kill $PID 2>/dev/null; wait $PID 2>/dev/null
         say "    perf stat (all threads, $SECS s of solves):"
         grep -E "^ +[0-9,.]+ +[A-Za-z_]|insn per cycle|seconds time elapsed" "$OUT/perf_stat.txt" | sed 's/^/    /' | tee -a "$S"
-        "$PERF" report -i "$OUT/perf.data" --stdio --no-children --sort symbol --percent-limit 0.5 2>/dev/null \
-            | grep -E "^ +[0-9]+\.[0-9]+%" | head -n 40 > "$OUT/perf_top.txt"
-        "$PERF" report -i "$OUT/perf.data" --stdio --no-children --sort dso 2>/dev/null \
-            | grep -E "^ +[0-9]+\.[0-9]+%" | head -n 10 > "$OUT/perf_dso.txt"
+        # --no-children only exists from perf 3.16 (CentOS 7 ships 3.10): fall back without it
+        for opt in "--no-children" ""; do
+            "$PERF" report -i "$OUT/perf.data" --stdio $opt -g none --sort symbol 2>/dev/null \
+                | grep -E "^ +[0-9]+\.[0-9]+%" | head -n 40 > "$OUT/perf_top.txt"
+            [ -s "$OUT/perf_top.txt" ] && break
+        done
+        for opt in "--no-children" ""; do
+            "$PERF" report -i "$OUT/perf.data" --stdio $opt -g none --sort dso 2>/dev/null \
+                | grep -E "^ +[0-9]+\.[0-9]+%" | head -n 10 > "$OUT/perf_dso.txt"
+            [ -s "$OUT/perf_dso.txt" ] && break
+        done
+        [ -s "$OUT/perf_top.txt" ] || "$PERF" report -i "$OUT/perf.data" --stdio -g none --sort symbol 2>&1 | head -n 5 | sed 's/^/    | /' | tee -a "$S"
         say "    functions by share of cycles (no children; libgomp / gomp_* / do_spin = waiting at barriers):"
         sed 's/^/    /' "$OUT/perf_top.txt" | tee -a "$S"
         say "    by library:"
