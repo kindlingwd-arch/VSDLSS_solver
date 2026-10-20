@@ -217,6 +217,22 @@ ibmpg1t–6t 全部结果（本机；三种做法在每个用例上都逐位一�
   - 合成转储上验证过：把保存的 `cdiag.txt` 放回转储目录重跑，验证结果完全相同；用保存的文件独立重算 b_1 = Ch·x_0 + s_1，相对误差 8e-17。
 - **四种做法**：orig（直接用转储的 b 求解）、manual（手写打包步进）、tr、tr+fuse。先逐步与转储比对并核对哈希，再交替计时（`PG_ROUNDS`）。第一次读文本后在 `<dir>/.trcache` 写二进制缓存（`TR_NOCACHE=1` 不写）。
 
+**一次跑完的服务器脚本** `tools/tr_replay_test.sh`（在转储目录下运行，csh 下同样用 `bash` 调用）：
+
+```bash
+bash <源码目录>/tools/tr_replay_test.sh <源码目录> 32 10 3
+```
+
+参数依次是线程数、步数和计时轮数。可选环境变量：`DT`、`TR_CH` / `TR_RTOL` / `TR_TOL`、`SAVE_FMT`（默认 `bin`）、`SKIP_UNIT=1`、`SKIP_SYNTH=1`、`BUILD`。脚本依次：
+
+1. 编译 `bench_tr_replay`、`gen_tr_dump`、`test_transient`（METIS，自动查找 MKL，和 `tools/ab_test.sh` 相同）；
+2. 跑单元测试；
+3. 生成合成转储并回放。小用例用 `PG_BLOCK=4096 PG_TAILMIN=16 PG_FUSE=2`，确保融合路径真的执行；
+4. 回放真实转储：保存反推出的输入到 `inputs/`，自动融合、带 trace、计时多轮。交叉验证判断盈余不可靠时，再用 `TR_CH=ratio` 跑一次（4b）；
+5. 强制融合（`PG_FUSE=2`）跑一轮，检查融合路径的逐位一致。如果融合没有真正执行，会注明这一项没有额外检查。
+
+线程绑核，内存用 `numactl --interleave=all`（装了的话）和 `VSDLSS_NUMA_PLACE=1`，即 NUMA 实验选出的 c5 设置。结果写在 `tr_replay_<时间>/summary.txt`，每步都给出 PASS / FAIL，并给出 orig、tr、tr+fuse 的每步时间和相对变化。orig 直接拿转储里的 b，不需要组装；其余三种每步都要组装 b = Ch·x + s。所以在小用例上 tr 可能比 orig 慢，大用例的收益来自省掉收集和写回。
+
 `test/gen_tr_dump.c` 生成同格式的合成转储，用于在没有仿真器的情况下验证：
 
 - 电路：电阻链网格，每结点 0.5–1.5 fF 接地电容，每 97 个结点一个焊盘（4 S 接 1 V），30% 结点有脉冲负载；
