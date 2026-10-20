@@ -1,5 +1,12 @@
 # 求解阶段的下一步：瞬态步进与跨时间步融合（设计文档，2026-10-18）
 
+> **实测结果（2026-10-20）：线上用例收益有限。** 本方案已实现并合入（#62）。在 6100 万结点用例上：
+> - 新接口和现在的用法持平；
+> - 融合没有收益；
+> - 即使仿真器直接按打包顺序写电流源，上限也只有 −8%。
+>
+> 下文第 4.6 节的估计（P1 约 130 ms，P4 约 90–100 ms）偏高，原因见 [transient-stepping-impl-20261019](transient-stepping-impl-20261019.md) 第 7 节：电流源稠密（82% 的结点），能融合的比例低，求解本身才是大头。
+
 本文汇总 10-17 至 10-18 关于"如何继续提升求解速度"的讨论：
 
 - 现在的瓶颈和下限；
@@ -128,18 +135,33 @@ C 是对角矩阵，$PCP^\top$ 只需在分解时把对角元素换一次顺序�
 
 每一步都要输出全部结点的电压，所以写回保留，但可以并入回代：每个结点的电压一算出来，就直接写到用户顺序的位置上，省掉单独的一遍。
 
-### 4.4 接口草案
+### 4.4 接口草案（2026-10-19 按前提确认结果修订）
 
 ```c
-vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *F,
-        const double *cdiag /* C_v，用户顺序 */, double h, vsdlss_m3_transient **T);
-vsdlss_status vsdlss_m3_transient_start(vsdlss_m3_transient *T, const double *b0);
-vsdlss_status vsdlss_m3_transient_step(vsdlss_m3_transient *T,
-        csi nsrc, const csi *src_node, const double *src_val);   /* 电流源：稀疏列表 */
+/* Ch = C/h：上三角 CSC，调用者编号。对角是接地电容（decap），
+ * 非对角是少量两端电容（如 PwlCap 的 n–out）。
+ * src_node：每步有电流源的结点（一次登记，可重复，重复项相加）。
+ * dep_node：右端项依赖上一步解的结点（有状态元件：封装 RL、SRC2 等），
+ *           每步由回调给出数值。 */
+vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *F, const vsdlss *Ch,
+        csi nsrc, const csi *src_node, csi ndep, const csi *dep_node,
+        vsdlss_m3_transient **T);
+vsdlss_status vsdlss_m3_transient_start(vsdlss_m3_transient *T, const double *x0);
+/* 连续推进 nsteps 步：src[s*nsrc + j] 是第 k+1+s 步 src_node[j] 的电流源。
+ * 每一步的解完成后调用 cb(ctx, k, x_packed, dep_next)：
+ *   x_packed 是第 k 步的解（打包顺序，调用期间有效）；
+ *   ndep > 0 时由回调填入第 k+1 步 dep_node 的数值。 */
+vsdlss_status vsdlss_m3_transient_run(vsdlss_m3_transient *T, csi nsteps, const double *src,
+        void (*cb)(void *ctx, csi k, const double *x_packed, double *dep_next), void *ctx);
 vsdlss_status vsdlss_m3_transient_get(const vsdlss_m3_transient *T,
         csi nidx, const csi *node, double *out);                 /* 全部或部分结点 */
 void vsdlss_m3_transient_free(vsdlss_m3_transient *);
 ```
+
+- **按批推进**：跨时间步融合要在第 k 步回代时就知道第 k+1 步的电流源，所以一次传入多步的电流源。电流源来自预先算好的波形，和解无关，仿真器可以提前算好。
+- **两端电容**：作为 Ch 的非对角项传入，由求解器按公式自己算；涉及的结点所在的连通块，放到所有回代完成之后再做前代（见 4.3 的 ④）。
+- **有状态元件**：每步完成时回调，仿真器用第 k 步的解更新元件状态，并给出第 k+1 步这些结点的右端项。涉及的结点同样放到最后。
+- **dt 变化、电源域切换导致 A 改变**：属于事件，事件后重新分解（或少量电导变化用 `vsdlss_m3_modify`），再重新 create。
 
 现有的 `vsdlss_m3_solve` 保持不变。新接口复用现有的分解、低度消元和 core 求解。
 
@@ -147,12 +169,14 @@ void vsdlss_m3_transient_free(vsdlss_m3_transient *);
 
 - 每条记录的算术和现在相同；依赖由 4.3 的顺序保证。
 - 对 core 的延后更新仍按消元顺序补减。
-- $b_{k+1}$ 的计算方式（先乘后除，还是先算 $C/h$）要和仿真器现在一致。对齐之后，新接口的每一步结果可以和"逐步调用 `vsdlss_m3_solve`"逐位比对，这作为回归测试。
+- $b_{k+1}$ 的计算方式固定为：$b[v] = Ch_{vv}\,x_k[v] + \sum_{u} Ch_{vu}\,x_k[u] + s[v]$，非对角项按 u 的内部位置升序累加；$s[v]$ 从 0 开始，先按登记顺序加电流源，再加回调给出的 dep 值。新接口的每一步结果和"按同一公式算 b、逐步调用 `vsdlss_m3_solve_packed`"逐位一致，这作为回归测试。
+- 和仿真器现在的结果不要求逐位一致：仿真器的 b 是各元件按遍历顺序累加的（例如结点电容是 `Cld*x/dt` 先乘后除），求解器内部无法复现这个顺序。和仿真器对比用误差阈值。
 
 ### 4.6 实施步骤与估算（未实测，按读取量的比例推算）
 
 | 阶段 | 内容 | 每步（现在约 165 ms） | 工作量 |
 |---|---|---|---|
+| P0 | 仿真器初始化时把元件结点号映射为打包顺序的 slot（`vsdlss_m3_export_packed_slots`），`eq.x`、`eq.b` 直接用 `vsdlss_m3_packed_buffer`；求解器不改 | 约 105 ms（省掉收集 34 ms 和写回 28 ms），结果逐位不变 | 仿真器侧，小 |
 | P1 | 新接口；全程使用内部顺序；电流源用稀疏列表；b 在内部单独算一遍 | 约 130 ms（省掉收集和仿真器组装；写回保留） | 约 1 周 |
 | P2 | b 在回代时顺手算出；写回并入回代 | 再省几 ms | 小 |
 | P3 | 块并行段融合 | 合成数据上明显，线上用例影响小 | 约 1 周 |
@@ -163,15 +187,22 @@ void vsdlss_m3_transient_free(vsdlss_m3_transient *);
 
 ### 4.7 前提条件
 
+2026-10-19 对照仿真器的元件 stamp 代码逐项确认（`stamp_dc` 只在初始化时执行一次；瞬态每步执行 `stamp_tr_step`，dt 变化时执行 `stamp_tr` 重新装配 A）：
+
 | 条件 | 状态 |
 |---|---|
-| 电容接地（C 对角） | 已确认；同一网内结点之间的耦合电容数量待查网表确认（VDD 与 GND 之间肯定没有，否则两网不会分成两个连通分量） |
-| 步长 h 固定 | 已确认 |
-| 电流源形式 | 每步给出"结点号 + 值"的稀疏列表 |
-| 输出 | 每步全部结点的电压 |
-| b 的计算公式和电容数据（用于逐位验证） | 待提供；没有时先用合成数据验证 |
+| 瞬态矩阵 SPD | **已确认**。MNA 形式的元件不出现在瞬态矩阵里 |
+| A 在步与步之间不变 | **已确认**。只在 dt 变化、电源域切换等事件时改变 |
+| 电容接地（C 对角） | **已确认**：没有耦合电容，decap cell 都接地（`b += Cld*x/dt`） |
+| 两端电容 | 只有少量 PwlCap：`in —g— n —(c(v)+Cl)— out`，加 in→out 的漏电流 i0；n 度为 2，会被低度消元消掉。作为 Ch 的非对角项处理 |
+| VDD/GND 两网分开 | **已确认**。PwlCap 不跨接两网，两网仍是两个连通分量 |
+| 有状态元件（封装 RL、SRC2、rc 宏模型） | 数量少，走 dep 结点 + 回调 |
+| 直流初值 | 直流矩阵（含 HUGE_G 钳位、InitNodeV、1e-6 接地项）只解一次，其解作为 x0 交给 start |
+| 步长 h 固定 | 代码支持 `dt_changed`；变化时按事件处理（重新分解后重新 create） |
+| 电流源形式 | 每步给出登记结点上的数值（`itable.lookup(t)`、实例引脚电流按 portion 分摊、PWL 电压源的焊盘项） |
+| 输出 | 每步回调给出打包顺序的完整解，调用者按 slot 读取需要的结点 |
 
-如果确实有少量耦合电容：两端在同一连通块内的，融合照常；跨块的，这些结点的 $b_{k+1}$ 等两边都回代完再算，相应前代推迟到最后补做。
+两端电容和 dep 结点：两端在同一连通块内的照常融合；其余的，这些结点的 $b_{k+1}$ 等所有回代完成再算，所在连通块的前代推迟到最后补做。
 
 ## 5. 其他更大的方向（未展开）
 
