@@ -34,7 +34,8 @@
 /* Fusion: 0 off, 1 (default) where at most half of a component's records are
  * in late units (with more, the late units' second pass costs what fusion
  * saves: measured on ibmpg3t, 4 threads, 66 -> 86 ms per step), 2 always.
- * -1: VSDLSS_TR_FUSE. */
+ * 3: upper bound for timing only -- always, and no unit late: the results
+ * are NOT those of solving each step.  -1: VSDLSS_TR_FUSE. */
 int vsdlss_m3_transient_fuse = -1;
 long vsdlss_m3_transient_fused_steps;    /* tests: fused component iterations */
 
@@ -214,7 +215,7 @@ vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *f, const vsdlss
         const vsdlss_reduction *r=cf->reduction;
         const int mode=fuse_mode();
         if(mode && cf->core_contig && (r->core_n==0 || cf->numeric) && vsdlss_reduce_tr_fusable(r)) {
-            st=vsdlss_reduce_tr_plan(r,q->special,&q->plan);
+            st=vsdlss_reduce_tr_plan(r,q->special,mode==3,&q->plan);
             if(st==VSDLSS_OK) {
                 csi rec=0, late=0;
                 vsdlss_reduce_tr_counts(q->plan,NULL,NULL,&rec,&late);

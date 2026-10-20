@@ -66,3 +66,6 @@
 /bench_tail
 /bench_core
 /bench_history
+bench_tr_replay
+gen_tr_dump
+test_transient

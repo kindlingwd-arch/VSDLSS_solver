@@ -13,7 +13,8 @@
  *     excess carries a cancellation error of about eps * G_vv / (C/dt)),
  *     TR_RTOL (b/x counts as step-independent within this relative
  *     difference, default 1e-9; raise it for text with few digits),
- *     PG_ROUNDS (timing rounds, default 3), PG_FUSE (1 automatic, 2 always),
+ *     PG_ROUNDS (timing rounds, default 3), PG_FUSE (1 automatic, 2 always,
+ *     3 upper bound for timing: no unit late, results not exact, not checked),
  *     PG_BLOCK / PG_TAILMIN (reduction block and smallest scheduled tail:
  *     let small cases take the fused path),
  *     TR_NOCACHE=1 (do not write the binary cache), TR_CHECK_CDIAG=file (the
@@ -404,11 +405,13 @@ int main(int argc, char **argv)
     for (int m = 0; m < W; m++) {
         double rel = 0; for (csi k = 1; k <= N; k++) if (xmx[m][k] > 0 && err[m][k] / xmx[m][k] > rel) rel = err[m][k] / xmx[m][k];
         int same = 1; if (m >= 2) for (csi k = 0; k <= N; k++) same &= hash[m][k] == hash[1][k];
+        if (m == 3 && fuse_sel == 3) { printf("  %-8s %.3e  upper bound (PG_FUSE=3: no unit late, not exact; bits not checked)\n", name[m], rel); continue; }
         printf("  %-8s %.3e%s\n", name[m], rel, m >= 2 ? (same ? "  bitwise = manual" : "  DIFFERS from manual") : "");
     }
     printf("timing (best of %d rounds, order rotated), per step:\n", rounds);
     for (int m = 0; m < W; m++) printf("  %-8s %8.2f ms%s\n", name[m], 1e3 * best[m] / (double)N,
-                                       m == 0 ? "  (solve only: the dumped b is given)" : m == 4 ? "  (sources given in packed order: no permutation in the step)" : "");
+                                       m == 0 ? "  (solve only: the dumped b is given)" : m == 4 ? "  (sources given in packed order: no permutation in the step)" :
+                                       m == 3 && fuse_sel == 3 ? "  (upper bound: every unit fused, not exact)" : "");
     vsdlss_m3_factor_free(F);
     return 0;
 }

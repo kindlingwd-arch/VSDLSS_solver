@@ -9,6 +9,10 @@
 #      (PG_FUSE=2), timed too: the bits and the speed of the fused path.  When the cross-check says
 #      the diagonal excess is not reliable (few digits in the text), step 4 is
 #      repeated with TR_CH=ratio.
+#   6. fusion upper bound (PG_FUSE=3, timing only): every unit fused right
+#      away, the late rules ignored (results not exact), against tr unfused;
+#      the trace lines "transient fusion records / potential / unit footprint"
+#      give the late records per reason and the unit sizes.
 #
 #   cd <dump directory: diag.txt data.txt x_vector.txt 1b_vector.txt 1x_vector.txt 2b_vector.txt ...>
 #   bash <source>/tools/tr_replay_test.sh <source directory> [threads=32] [steps=10] [rounds=3]
@@ -16,7 +20,8 @@
 #
 # Optional environment: DT (time step in seconds: capacitance statistics),
 # TR_CH / TR_RTOL / TR_TOL (see test/bench_tr_replay.c), SAVE_FMT (bin
-# (default) | txt: the saved sources), SKIP_UNIT=1, SKIP_SYNTH=1, SKIP_FUSE2=1, TR_PACKED=0
+# (default) | txt: the saved sources), SKIP_UNIT=1, SKIP_SYNTH=1, SKIP_FUSE2=1, SKIP_BOUND=1, SKIP_SAVE=1 (do not save the
+# reconstructed inputs in step 4), TR_PACKED=0
 # (leave out the packed-source way: it holds steps x n doubles), BUILD (make
 # variables, as tools/ab_test.sh).  Threads bound (OMP_PROC_BIND=spread,
 # OMP_PLACES=cores), memory as the NUMA runs chose: numactl --interleave=all
@@ -87,7 +92,7 @@ fi
 # extract the result lines of a replay log: check <log>
 check() {
     local log=$1
-    grep -aE "^# (numa|Ch from|cross-check|warning|capacitance|step 1:|sources|saved|factorize)|fused components|transient fusion" "$log" | sed 's/^/    /' | tee -a "$S"
+    grep -aE "^# (numa|Ch from|cross-check|warning|capacitance|step 1:|sources|saved|factorize)|fused components|transient fusion" "$log" | awk '!seen[$0]++' | sed 's/^/    /' | tee -a "$S"
     sed -n '/^validation/,/^timing/p' "$log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
     sed -n '/^timing/,$p' "$log" | grep -aE "^timing|^  (orig|manual|tr|tr\+fuse|packed-s) " | sed 's/^/    /' | tee -a "$S"
 }
@@ -128,7 +133,9 @@ fi
 # ---- 4. the real dump ----
 echo; say "=== 4. real dump: $nsteps steps, $ROUNDS timing rounds, fusion automatic, traced; inputs saved to $OUT/inputs"
 t0=$(date +%s)
-env TR_SAVE="$OUT/inputs" TR_SAVE_FMT="${SAVE_FMT:-bin}" PG_ROUNDS=$ROUNDS PG_FUSE=1 VSDLSS_TRACE=1 \
+SAVE_ARGS=(TR_SAVE="$OUT/inputs" TR_SAVE_FMT="${SAVE_FMT:-bin}")
+[ "${SKIP_SAVE:-0}" = 1 ] && SAVE_ARGS=()
+env ${SAVE_ARGS[@]+"${SAVE_ARGS[@]}"} PG_ROUNDS=$ROUNDS PG_FUSE=1 VSDLSS_TRACE=1 \
     $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real.log" 2>&1
 say "    ($(($(date +%s) - t0)) s, log real.log)"
 check "$OUT/real.log"; verdict "$OUT/real.log" "real dump"; speedup "$OUT/real.log"
@@ -144,10 +151,22 @@ echo; say "=== 5. real dump, forced fusion (PG_FUSE=2, $ROUNDS timing rounds: th
 if [ "${SKIP_FUSE2:-0}" = 1 ]; then say "    skipped"
 else
     env PG_ROUNDS=$ROUNDS PG_FUSE=2 VSDLSS_TRACE=1 TR_PACKED=0 $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real_fuse2.log" 2>&1
-    grep -aE "fused components" "$OUT/real_fuse2.log" | sed 's/^/    /' | tee -a "$S"
+    grep -aE "fused components|transient fusion" "$OUT/real_fuse2.log" | awk '!seen[$0]++' | sed 's/^/    /' | tee -a "$S"
     sed -n '/^validation/,/^timing/p' "$OUT/real_fuse2.log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
     verdict "$OUT/real_fuse2.log" "forced fusion"; fused_note "$OUT/real_fuse2.log"; speedup "$OUT/real_fuse2.log"
 fi
 
+echo; say "=== 6. real dump, fusion upper bound (PG_FUSE=3: no unit late -- timing only, results not exact)"
+if [ "${SKIP_BOUND:-0}" = 1 ]; then say "    skipped"
+else
+    env PG_ROUNDS=$ROUNDS PG_FUSE=3 VSDLSS_TRACE=1 TR_PACKED=0 $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real_bound.log" 2>&1
+    grep -aE "fused components|transient fusion" "$OUT/real_bound.log" | awk '!seen[$0]++' | sed 's/^/    /' | tee -a "$S"
+    sed -n '/^validation/,/^timing/p' "$OUT/real_bound.log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
+    sed -n '/^timing/,$p' "$OUT/real_bound.log" | grep -aE "^timing|^  (orig|manual|tr|tr\+fuse) " | sed 's/^/    /' | tee -a "$S"
+    sed -n '/^timing/,$p' "$OUT/real_bound.log" | awk '/^  (tr|tr\+fuse) / {t[$1]=$2}
+        END {if (t["tr"] > 0) printf "    upper bound of fusion: tr %.1f ms -> every unit fused %.1f ms per step (%+.1f%%)\n", t["tr"], t["tr+fuse"], 100*(t["tr+fuse"]-t["tr"])/t["tr"]}' | tee -a "$S"
+    fused_note "$OUT/real_bound.log"
+fi
+
 echo; say "Done. Please send: $S"
-say "(inputs for the simulator: $OUT/inputs -- cdiag.txt, x0.txt, src_nodes, <k>s, meta.txt; see test/bench_tr_replay.c save_inputs)"
+[ "${SKIP_SAVE:-0}" = 1 ] || say "(inputs for the simulator: $OUT/inputs -- cdiag.txt, x0.txt, src_nodes, <k>s, meta.txt; see test/bench_tr_replay.c save_inputs)"

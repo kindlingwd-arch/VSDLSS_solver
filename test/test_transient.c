@@ -242,6 +242,38 @@ static void scenario(const sys *S, int relabel, csi windows, int threads, int fu
     vsdlss_m3_factor_free(F);
 }
 
+/* VSDLSS_TR_FUSE=3 (timing upper bound): every unit fuses right away, no
+ * unit late; it must run, and the steps stay finite, but they need not be
+ * the bits of solving each step. */
+static void bound_mode(const sys *S, int threads)
+{
+    vsdlss_m3_relabel=1; vsdlss_reduce_tail_windows=64; vsdlss_set_num_threads(threads); vsdlss_m3_transient_fuse=3;
+    const csi n=S->n, K=S->K;
+    vsdlss_m3_factor *F=NULL; vsdlss_m3_transient *T=NULL;
+    CHECK(vsdlss_factorize_m3(S->A,5,&F)==VSDLSS_OK,"%s","bound factor");
+    if(!F) return;
+    csi *slot=malloc((size_t)n*sizeof(csi)); vsdlss_m3_export_packed_slots(F,slot,n);
+    double *x0=malloc((size_t)n*8);
+    for(csi g=0;g<n;g++) x0[g]=0.9+0.01*sin(0.31*(double)g);
+    CHECK(vsdlss_m3_transient_create(F,S->Ch,S->nsrc,S->src,S->ndep,S->dep,&T)==VSDLSS_OK,"%s","bound create");
+    if(T) {
+        csi fc=0, units=0, late=-1; vsdlss_m3_transient_info(T,&fc,&units,&late);
+        CHECK(fc>=1 && late==0,"bound: fused components %lld, late units %lld",(long long)fc,(long long)late);
+        CHECK(vsdlss_m3_transient_start(T,x0)==VSDLSS_OK,"%s","bound start");
+        cbctx cx={S,slot,calloc((size_t)((K+1)*n),8),0,0};
+        long fs0=vsdlss_m3_transient_fused_steps;
+        CHECK(vsdlss_m3_transient_run(T,K,S->srcv,on_step,&cx)==VSDLSS_OK,"%s","bound run");
+        CHECK(vsdlss_m3_transient_fused_steps>fs0,"%s","bound: no fused iteration");
+        int fin=1; for(csi t=0;t<(K+1)*n;t++) fin&=isfinite(cx.got[t])!=0;
+        CHECK(cx.seen==K+1 && fin,"bound: %lld callbacks, finite %d",(long long)cx.seen,fin);
+        free(cx.got);
+        vsdlss_m3_transient_free(T);
+    }
+    free(x0); free(slot);
+    vsdlss_m3_factor_free(F);
+    vsdlss_m3_transient_fuse=1;
+}
+
 static void misuse(const sys *S)
 {
     vsdlss_m3_relabel=1; vsdlss_reduce_tail_windows=64; vsdlss_set_num_threads(1); vsdlss_m3_transient_fuse=1;
@@ -313,6 +345,7 @@ int main(void)
         scenario(&S2,1,64,4,0,0);
         free(S2.src); free(S2.srcv);
     }
+    bound_mode(&S,1); bound_mode(&S,4);
     misuse(&S);
     if(fails) { fprintf(stderr,"%d failure(s)\n",fails); return 1; }
     printf("test_transient: ALL OK (n=%lld, %lld sources, %lld dep nodes, %lld steps)\n",
