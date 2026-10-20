@@ -183,11 +183,15 @@ typedef struct vsdlss_m3_component_factor {
      * private buffers. */
     double *ws_local, *ws_saved, *ws_core;
     atomic_int ws_busy;
+    /* vsdlss_m3_modify's index of the records (vertex -> position, neighbour
+     * offsets), built on the first modification; NULL until then. */
+    struct vsdlss_m3_eco *eco;
     /* VSDLSS_NUMA_PLACE: set once the component's arrays were moved to the
      * node of the thread solving it (numa_node, -1 unknown). */
     atomic_int numa_placed;
     int numa_node;
 } vsdlss_m3_component_factor;
+void vsdlss_m3_eco_free(struct vsdlss_m3_eco *);
 
 struct vsdlss_m3_factor {
     csi n, count;

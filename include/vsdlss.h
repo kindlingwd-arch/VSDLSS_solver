@@ -144,6 +144,30 @@ vsdlss_status vsdlss_m3_export_packed_slots(const vsdlss_m3_factor *factor,
 vsdlss_status vsdlss_m3_internal_order(const vsdlss_m3_factor *factor, csi *perm);
 vsdlss_status vsdlss_m3_solve_internal(const vsdlss_m3_factor *factor,
                                        const double *rhs, double *solution);
+/* Low-rank modification (ECO): turn the factor of A into the factor of
+ * A + dA in place, without refactoring.  dA is symmetric, given as nz
+ * triplets (row[t], col[t], delta[t]) in the caller's numbering, either
+ * triangle, duplicates summed; e.g. a conductance change dg between nodes a
+ * and b is (a,b,-dg), (a,a,+dg), (b,b,+dg), and a change dg to ground at a
+ * is (a,a,+dg).  Off-diagonal entries must couple nodes already coupled in
+ * the factor (existing elements; new couplings change the structure:
+ * VSDLSS_ERR_UNSUPPORTED, refactor instead).  The work follows the
+ * elimination-tree path of each changed node, normally well below one
+ * solve.  All or nothing: on any error the factor is unchanged --
+ * VSDLSS_ERR_NOT_POSDEF when A + dA is not (numerically) positive definite,
+ * VSDLSS_ERR_UNSUPPORTED for structural changes, couplings across
+ * components, disk-mode factors.  Solutions afterwards solve A + dA to the
+ * accuracy of an update/downdate, not bitwise those of a new factorization;
+ * check the backward error and refactor after many modifications.  The
+ * packed order and slots do not change.  Not concurrent with solves or
+ * other calls on the same factor.  stats (optional) receives the work. */
+typedef struct vsdlss_m3_modify_stats {
+    csi updates, downdates;             /* rank-1 terms applied */
+    csi record_columns, core_columns;   /* factor columns rewritten (with repeats) */
+} vsdlss_m3_modify_stats;
+vsdlss_status vsdlss_m3_modify(vsdlss_m3_factor *factor, csi nz, const csi *row,
+                               const csi *col, const double *delta,
+                               vsdlss_m3_modify_stats *stats);
 void vsdlss_m3_factor_free(vsdlss_m3_factor *factor);
 /* Transient stepping inside the solver (backward Euler, fixed step).  The
  * factor is of A = G + C/h; each step solves A x_{k+1} = Ch x_k + s_{k+1}

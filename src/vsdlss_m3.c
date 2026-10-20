@@ -103,6 +103,7 @@ void vsdlss_m3_factor_free(vsdlss_m3_factor *factor)
         free(factor->component[k].ws_saved);
         free(factor->component[k].ws_core);
         free(factor->component[k].core_map);
+        vsdlss_m3_eco_free(factor->component[k].eco);
         vsdlss_sn_factor_free(factor->component[k].numeric);
     }
     free(factor->component);

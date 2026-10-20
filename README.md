@@ -118,6 +118,22 @@ M3 对应入口为 `vsdlss_factorize_m3`、`vsdlss_m3_solve` 和 `vsdlss_m3_fact
 
 更详细的证据边界、审计和路线见 `docs/reconstruction/`。
 
+## ECO 低秩修改
+
+ECO 只改动少量原有元件（电导变化、对地电导变化、删去元件）时，`vsdlss_m3_modify` 直接把 A 的因子改成 A + ΔA 的因子，不必重新分解：
+
+```c
+/* 结点 a、b 之间电导改变 dg；结点 c 对地电导改变 dc */
+csi row[] = {a, a, b, c}, col[] = {b, a, b, c};
+double delta[] = {-dg, dg, dg, dc};
+vsdlss_status s = vsdlss_m3_modify(factor, 4, row, col, delta, NULL);
+/* VSDLSS_ERR_UNSUPPORTED（新增连接等结构变化）时改为重新分解 */
+```
+
+做法是 Davis–Hager 的 Cholesky 更新/降秩：低度消元记录用 C1 方法，core 超节点用双曲旋转，按 64 项一批处理。全有或全无，出错时因子不变。
+252 万结点合成网格（METIS，4 线程）：1 条电导 5 ms、10 条电导 + 5 个对地修改 28 ms（一次求解约 32 ms），重新分解约 2.8 s；修改后对 A + ΔA 的后向误差为 2.6e-16。
+`make bench_eco` 可以在真实用例上复测。设计、限制和验证见 [eco-modify-20261018](docs/reconstruction/eco-modify-20261018.md)。
+
 ## 瞬态步进（求解器接管时间步进）
 
 后向欧拉、固定步长时，`vsdlss_m3_transient_*` 由求解器自己推进 A x_{k+1} = (C/h) x_k + s_{k+1}，全程使用打包顺序，没有收集和写回。
