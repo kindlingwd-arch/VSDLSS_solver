@@ -41,9 +41,10 @@
  * (text with few significant digits makes the excess noise; then use
  * TR_CH=ratio or cdiag.txt).
  *
- * Then four ways: "orig" (the dumped b, vsdlss_m3_solve: the current usage),
+ * Then four ways (five: TR_PACKED): "orig" (the dumped b, vsdlss_m3_solve: the current usage),
  * "manual" (packed b by the interface's formula, vsdlss_m3_solve_packed_inplace),
- * "tr" (the interface, unfused), "tr+fuse".  A validation pass compares every
+ * "tr" (the interface, unfused), "tr+fuse", "packed-s" (sources already in packed
+ * order: the simulator stamping into b[slot[node]]).  A validation pass compares every
  * step with <k>x_vector.txt and checks manual / tr / tr+fuse bitwise (hash of
  * each step's solution); timing rounds follow (order rotated, best each).
  *
@@ -317,13 +318,28 @@ int main(int argc, char **argv)
         csi a = slot[Ch->i[p]], b = slot[j]; pu[pc[a] + fl[a]] = b; pw[pc[a] + fl[a]++] = Ch->x[p]; pu[pc[b] + fl[b]] = a; pw[pc[b] + fl[b]++] = Ch->x[p]; }
     for (csi p = 0; p < n; p++) for (csi a = pc[p] + 1; a < pc[p + 1]; a++) { csi u = pu[a]; double v = pw[a]; csi t = a; while (t > pc[p] && pu[t - 1] > u) { pu[t] = pu[t - 1]; pw[t] = pw[t - 1]; t--; } pu[t] = u; pw[t] = v; }
 
-    /* ---- the four ways ---- */
-    const char *name[4] = {"orig", "manual", "tr", "tr+fuse"};
-    uint64_t *hash[4]; double *err[4], *xmx[4], best[4] = {1e300, 1e300, 1e300, 1e300};
+    /* ---- the ways ---- */
+    /* "packed-s": the sources of every step already in packed order, as dense
+     * vectors (the simulator stamping its currents straight into b[slot[node]]):
+     * prepared outside the timing, then each step only b = Ch x + s in order and
+     * the packed solve.  N x n doubles; TR_PACKED=0 leaves it out. */
+    const int W = (e = getenv("TR_PACKED")) && !atoi(e) ? 4 : 5;
+    const char *name[5] = {"orig", "manual", "tr", "tr+fuse", "packed-s"};
+    uint64_t *hash[5]; double *err[5], *xmx[5], best[5] = {1e300, 1e300, 1e300, 1e300, 1e300};
     double *xu = malloc((size_t)n * 8), *xa = malloc((size_t)n * 8), *xb = malloc((size_t)n * 8), *s = calloc((size_t)n, 8);
-    for (int m = 0; m < 4; m++) { hash[m] = calloc((size_t)N + 1, 8); err[m] = calloc((size_t)N + 1, 8); xmx[m] = calloc((size_t)N + 1, 8); }
-    for (int r = -1; r < rounds; r++) for (int i = 0; i < 4; i++) {
-        const int m = r < 0 ? i : (i + r) % 4;
+    double *spk = NULL;
+    if (W == 5) {
+        spk = calloc((size_t)N * (size_t)n, 8);
+        if (!spk) die("TR_PACKED: out of memory for the packed sources (N x n doubles): set TR_PACKED=0");
+        for (csi k = 0; k < N; k++) {
+            double *row = spk + (size_t)k * (size_t)n; const double *v = sv + k * nsrc;
+            #pragma omp parallel for num_threads(threads) schedule(static)
+            for (csi j = 0; j < nsrc; j++) row[slot[src[j]]] = 0.0 + v[j];     /* distinct nodes: the manual way's s */
+        }
+    }
+    for (int m = 0; m < W; m++) { hash[m] = calloc((size_t)N + 1, 8); err[m] = calloc((size_t)N + 1, 8); xmx[m] = calloc((size_t)N + 1, 8); }
+    for (int r = -1; r < rounds; r++) for (int i = 0; i < W; i++) {
+        const int m = r < 0 ? i : (i + r) % W;
         vctx cx = {slot, n, N, xu, hash[m], err[m], xmx[m], r < 0};
         double tt = 0;
         if (m == 0) {                          /* the dumped b, caller order */
@@ -356,6 +372,20 @@ int main(int argc, char **argv)
                 if (r < 0) { double t2 = now(); on_step(&cx, k + 1, xa, NULL); t1 += now() - t2; }
             }
             tt = now() - t1;
+        } else if (m == 4) {                   /* packed b from packed sources: no permutation in the step */
+            #pragma omp parallel for num_threads(threads) schedule(static)
+            for (csi v = 0; v < n; v++) xa[slot[v]] = xsim[0][v];
+            double t1 = now();
+            if (r < 0) on_step(&cx, 0, xa, NULL);
+            for (csi k = 0; k < N; k++) {
+                const double *sp = spk + (size_t)k * (size_t)n;
+                #pragma omp parallel for num_threads(threads) schedule(static)
+                for (csi p = 0; p < n; p++) { double v = dpk[p] * xa[p]; for (csi a = pc[p]; a < pc[p + 1]; a++) v += pw[a] * xa[pu[a]]; xb[p] = v + sp[p]; }
+                if (vsdlss_m3_solve_packed_inplace(F, xb) != VSDLSS_OK) die("packed solve failed");
+                double *t = xa; xa = xb; xb = t;
+                if (r < 0) { double t2 = now(); on_step(&cx, k + 1, xa, NULL); t1 += now() - t2; }
+            }
+            tt = now() - t1;
         } else {
             vsdlss_m3_transient_fuse = m == 3 ? fuse_sel : 0;
             vsdlss_m3_transient *T = NULL;
@@ -371,13 +401,14 @@ int main(int argc, char **argv)
         if (r >= 0 && tt < best[m]) best[m] = tt;
     }
     printf("validation (every step against <k>x_vector.txt; max |x - x_dump| / max |x_dump| over the steps):\n");
-    for (int m = 0; m < 4; m++) {
+    for (int m = 0; m < W; m++) {
         double rel = 0; for (csi k = 1; k <= N; k++) if (xmx[m][k] > 0 && err[m][k] / xmx[m][k] > rel) rel = err[m][k] / xmx[m][k];
         int same = 1; if (m >= 2) for (csi k = 0; k <= N; k++) same &= hash[m][k] == hash[1][k];
         printf("  %-8s %.3e%s\n", name[m], rel, m >= 2 ? (same ? "  bitwise = manual" : "  DIFFERS from manual") : "");
     }
     printf("timing (best of %d rounds, order rotated), per step:\n", rounds);
-    for (int m = 0; m < 4; m++) printf("  %-8s %8.2f ms%s\n", name[m], 1e3 * best[m] / (double)N, m == 0 ? "  (solve only: the dumped b is given)" : "");
+    for (int m = 0; m < W; m++) printf("  %-8s %8.2f ms%s\n", name[m], 1e3 * best[m] / (double)N,
+                                       m == 0 ? "  (solve only: the dumped b is given)" : m == 4 ? "  (sources given in packed order: no permutation in the step)" : "");
     vsdlss_m3_factor_free(F);
     return 0;
 }

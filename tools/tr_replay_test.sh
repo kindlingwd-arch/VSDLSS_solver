@@ -16,7 +16,8 @@
 #
 # Optional environment: DT (time step in seconds: capacitance statistics),
 # TR_CH / TR_RTOL / TR_TOL (see test/bench_tr_replay.c), SAVE_FMT (bin
-# (default) | txt: the saved sources), SKIP_UNIT=1, SKIP_SYNTH=1, BUILD (make
+# (default) | txt: the saved sources), SKIP_UNIT=1, SKIP_SYNTH=1, SKIP_FUSE2=1, TR_PACKED=0
+# (leave out the packed-source way: it holds steps x n doubles), BUILD (make
 # variables, as tools/ab_test.sh).  Threads bound (OMP_PROC_BIND=spread,
 # OMP_PLACES=cores), memory as the NUMA runs chose: numactl --interleave=all
 # (when installed, else VSDLSS_INTERLEAVE=1: bench_tr_replay calls set_mempolicy
@@ -88,12 +89,13 @@ check() {
     local log=$1
     grep -aE "^# (numa|Ch from|cross-check|warning|capacitance|step 1:|sources|saved|factorize)|fused components|transient fusion" "$log" | sed 's/^/    /' | tee -a "$S"
     sed -n '/^validation/,/^timing/p' "$log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
-    sed -n '/^timing/,$p' "$log" | grep -aE "^timing|^  (orig|manual|tr|tr\+fuse) " | sed 's/^/    /' | tee -a "$S"
+    sed -n '/^timing/,$p' "$log" | grep -aE "^timing|^  (orig|manual|tr|tr\+fuse|packed-s) " | sed 's/^/    /' | tee -a "$S"
 }
-verdict() {   # verdict <log> <label>
-    local log=$1 label=$2 nb nd
+verdict() {   # verdict <log> <label>: tr, tr+fuse (and packed-s when present) bitwise = manual
+    local log=$1 label=$2 nb nd want=2
+    grep -aqE "^  packed-s " "$log" && want=3
     nb=$(grep -ac "bitwise = manual" "$log"); nd=$(grep -ac "DIFFERS from manual" "$log")
-    if grep -aq "^validation" "$log" && [ "$nb" -eq 2 ] && [ "$nd" -eq 0 ]; then say "    $label: PASS (tr and tr+fuse bitwise = manual)"
+    if grep -aq "^validation" "$log" && [ "$nb" -eq "$want" ] && [ "$nd" -eq 0 ]; then say "    $label: PASS ($nb ways bitwise = manual)"
     else say "    $label: FAIL ($nb bitwise, $nd differ$(grep -aq '^validation' "$log" || echo ', run did not finish'))"; tail -n 3 "$log" | sed 's/^/    | /' | tee -a "$S"; fi
 }
 fused_note() {   # fused_note <log>: did tr+fuse take the fused path at all
@@ -101,10 +103,12 @@ fused_note() {   # fused_note <log>: did tr+fuse take the fused path at all
         say "    note: tr+fuse fused no component (no scheduled tail, or every unit late): it ran the unfused path, so this checks nothing extra"
 }
 speedup() {   # speedup <log>
-    sed -n '/^timing/,$p' "$1" | awk '/^  (orig|manual|tr|tr\+fuse) / {t[$1]=$2}
-        END {if (t["orig"] > 0) printf "    per step: orig %.1f ms, manual %.1f, tr %.1f (%+.1f%% vs orig), tr+fuse %.1f (%+.1f%% vs orig, %+.1f%% vs tr)\n",
-             t["orig"], t["manual"], t["tr"], 100*(t["tr"]-t["orig"])/t["orig"], t["tr+fuse"], 100*(t["tr+fuse"]-t["orig"])/t["orig"], (t["tr"]>0?100*(t["tr+fuse"]-t["tr"])/t["tr"]:0)}' | tee -a "$S"
-    say "    (orig is handed the dumped b and does not build it; manual / tr / tr+fuse also build b = Ch x + s every step)"
+    sed -n '/^timing/,$p' "$1" | awk '/^  (orig|manual|tr|tr\+fuse|packed-s) / {t[$1]=$2}
+        END {if (t["orig"] > 0) { printf "    per step: orig %.1f ms, manual %.1f, tr %.1f (%+.1f%% vs orig), tr+fuse %.1f (%+.1f%% vs orig, %+.1f%% vs tr)\n",
+             t["orig"], t["manual"], t["tr"], 100*(t["tr"]-t["orig"])/t["orig"], t["tr+fuse"], 100*(t["tr+fuse"]-t["orig"])/t["orig"], (t["tr"]>0?100*(t["tr+fuse"]-t["tr"])/t["tr"]:0)
+             if ("packed-s" in t) printf "    sources in packed order (packed-s): %.1f ms per step (%+.1f%% vs orig)\n", t["packed-s"], 100*(t["packed-s"]-t["orig"])/t["orig"] }}' | tee -a "$S"
+    say "    (orig is handed the dumped b and does not build it; manual / tr / tr+fuse / packed-s also build b = Ch x + s every step;"
+    say "     packed-s gets its sources already in packed order, as if the simulator stamped them into b[slot[node]])"
 }
 
 # ---- 3. synthetic dump ----
@@ -137,10 +141,13 @@ if [ -z "${TR_CH:-}" ] && grep -aqE "excess is not reliable|warning: no node has
 fi
 
 echo; say "=== 5. real dump, forced fusion (PG_FUSE=2, $ROUNDS timing rounds: the bits and the speed of the fused path)"
-env PG_ROUNDS=$ROUNDS PG_FUSE=2 VSDLSS_TRACE=1 $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real_fuse2.log" 2>&1
-grep -aE "fused components|transient fusion" "$OUT/real_fuse2.log" | sed 's/^/    /' | tee -a "$S"
-sed -n '/^validation/,/^timing/p' "$OUT/real_fuse2.log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
-verdict "$OUT/real_fuse2.log" "forced fusion"; fused_note "$OUT/real_fuse2.log"; speedup "$OUT/real_fuse2.log"
+if [ "${SKIP_FUSE2:-0}" = 1 ]; then say "    skipped"
+else
+    env PG_ROUNDS=$ROUNDS PG_FUSE=2 VSDLSS_TRACE=1 TR_PACKED=0 $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real_fuse2.log" 2>&1
+    grep -aE "fused components" "$OUT/real_fuse2.log" | sed 's/^/    /' | tee -a "$S"
+    sed -n '/^validation/,/^timing/p' "$OUT/real_fuse2.log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
+    verdict "$OUT/real_fuse2.log" "forced fusion"; fused_note "$OUT/real_fuse2.log"; speedup "$OUT/real_fuse2.log"
+fi
 
 echo; say "Done. Please send: $S"
 say "(inputs for the simulator: $OUT/inputs -- cdiag.txt, x0.txt, src_nodes, <k>s, meta.txt; see test/bench_tr_replay.c save_inputs)"
