@@ -110,7 +110,9 @@ else
     else
         sleep 2
         "$PERF" stat -p $PID -e "$EV" -- sleep "$SECS" > "$OUT/perf_stat.txt" 2>&1
-        "$PERF" record -F 499 -g -p $PID -o "$OUT/perf.data" -- sleep "$SECS" > "$OUT/perf_record.log" 2>&1
+        # user-mode cycles only: perf_event_paranoid = 2 forbids sampling the kernel, and
+        # old perf (3.10) does not fall back to :u by itself (perf stat does)
+        "$PERF" record -e cycles:u -F 499 -p $PID -o "$OUT/perf.data" -- sleep "$SECS" > "$OUT/perf_record.log" 2>&1
         kill $PID 2>/dev/null; wait $PID 2>/dev/null
         say "    perf stat (all threads, $SECS s of solves):"
         grep -E "^ +[0-9,.]+ +[A-Za-z_]|insn per cycle|seconds time elapsed" "$OUT/perf_stat.txt" | sed 's/^/    /' | tee -a "$S"
@@ -125,6 +127,7 @@ else
                 | grep -E "^ +[0-9]+\.[0-9]+%" | head -n 10 > "$OUT/perf_dso.txt"
             [ -s "$OUT/perf_dso.txt" ] && break
         done
+        [ -s "$OUT/perf.data" ] || { say "    perf record wrote nothing:"; tail -n 5 "$OUT/perf_record.log" | sed 's/^/    | /' | tee -a "$S"; }
         [ -s "$OUT/perf_top.txt" ] || "$PERF" report -i "$OUT/perf.data" --stdio -g none --sort symbol 2>&1 | head -n 5 | sed 's/^/    | /' | tee -a "$S"
         say "    functions by share of cycles (no children; libgomp / gomp_* / do_spin = waiting at barriers):"
         sed 's/^/    /' "$OUT/perf_top.txt" | tee -a "$S"
