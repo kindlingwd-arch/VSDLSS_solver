@@ -6,7 +6,7 @@
 #   4. the real dump replayed: Ch and sources reconstructed and saved (TR_SAVE),
 #      every step checked against <k>x_vector.txt, orig / manual / tr / tr+fuse
 #      timed (fusion automatic, traced); then once more with forced fusion
-#      (PG_FUSE=2) for the bits of the fused path.  When the cross-check says
+#      (PG_FUSE=2), timed too: the bits and the speed of the fused path.  When the cross-check says
 #      the diagonal excess is not reliable (few digits in the text), step 4 is
 #      repeated with TR_CH=ratio.
 #
@@ -19,7 +19,8 @@
 # (default) | txt: the saved sources), SKIP_UNIT=1, SKIP_SYNTH=1, BUILD (make
 # variables, as tools/ab_test.sh).  Threads bound (OMP_PROC_BIND=spread,
 # OMP_PLACES=cores), memory as the NUMA runs chose: numactl --interleave=all
-# (when installed) and VSDLSS_NUMA_PLACE=1.
+# (when installed, else VSDLSS_INTERLEAVE=1: bench_tr_replay calls set_mempolicy
+# itself) and VSDLSS_NUMA_PLACE=1.
 # Output: tr_replay_<time>/  (build.log, one .log per run, inputs/ = the saved
 # Ch, x0, sources; summary.txt = the result to send back)
 set -u
@@ -33,14 +34,14 @@ OUT=$DUMP/tr_replay_$(date +%m%d_%H%M)
 mkdir -p "$OUT" 2>/dev/null || { OUT=$HOME/tr_replay_$(date +%m%d_%H%M); mkdir -p "$OUT"; }
 S=$OUT/summary.txt
 say() { echo "$@" | tee -a "$S"; }
-NUMA=""; command -v numactl >/dev/null 2>&1 && NUMA="numactl --interleave=all"
+NUMA=""; if command -v numactl >/dev/null 2>&1; then NUMA="numactl --interleave=all"; else export VSDLSS_INTERLEAVE=1; fi
 [ -w "$DUMP" ] || export TR_NOCACHE=1
 nsteps=0; while [ $nsteps -lt "$STEPS" ] && [ -f "$((nsteps + 1))b_vector.txt" ] && [ -f "$((nsteps + 1))x_vector.txt" ]; do nsteps=$((nsteps + 1)); done
 {
   echo "### $(date)  $(hostname)"
   lscpu | grep -E "Model name|^CPU\(s\)|Socket|NUMA node\(s\)"
   echo "source: $ARG  dump: $DUMP  threads: $T  steps: $nsteps of $STEPS requested  rounds: $ROUNDS"
-  echo "env: OMP_PROC_BIND=$OMP_PROC_BIND OMP_PLACES=$OMP_PLACES VSDLSS_NUMA_PLACE=$VSDLSS_NUMA_PLACE memory: ${NUMA:-first touch (numactl not found)}"
+  echo "env: OMP_PROC_BIND=$OMP_PROC_BIND OMP_PLACES=$OMP_PLACES VSDLSS_NUMA_PLACE=$VSDLSS_NUMA_PLACE memory: ${NUMA:-VSDLSS_INTERLEAVE=1 (numactl not found: bench_tr_replay interleaves itself)}"
   echo "     DT=${DT:-} TR_CH=${TR_CH:-} TR_RTOL=${TR_RTOL:-} TR_TOL=${TR_TOL:-} SAVE_FMT=${SAVE_FMT:-bin}${TR_NOCACHE:+ TR_NOCACHE=1 (dump directory not writable)}"
   echo "disk: $(df -h "$DUMP" | awk 'NR==2 {print $4 " free in " $6}')  (the binary cache .trcache needs about (2*steps+1) x n x 8 bytes plus the matrix)"
 } | tee "$S"
@@ -85,7 +86,7 @@ fi
 # extract the result lines of a replay log: check <log>
 check() {
     local log=$1
-    grep -aE "^# (Ch from|cross-check|warning|capacitance|step 1:|sources|saved|factorize)|fused components|transient fusion" "$log" | sed 's/^/    /' | tee -a "$S"
+    grep -aE "^# (numa|Ch from|cross-check|warning|capacitance|step 1:|sources|saved|factorize)|fused components|transient fusion" "$log" | sed 's/^/    /' | tee -a "$S"
     sed -n '/^validation/,/^timing/p' "$log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
     sed -n '/^timing/,$p' "$log" | grep -aE "^timing|^  (orig|manual|tr|tr\+fuse) " | sed 's/^/    /' | tee -a "$S"
 }
@@ -135,11 +136,11 @@ if [ -z "${TR_CH:-}" ] && grep -aqE "excess is not reliable|warning: no node has
     check "$OUT/real_ratio.log"; verdict "$OUT/real_ratio.log" "real dump, TR_CH=ratio"
 fi
 
-echo; say "=== 5. real dump, forced fusion (PG_FUSE=2, one round: the bits of the fused path, not its speed)"
-env PG_ROUNDS=1 PG_FUSE=2 VSDLSS_TRACE=1 $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real_fuse2.log" 2>&1
+echo; say "=== 5. real dump, forced fusion (PG_FUSE=2, $ROUNDS timing rounds: the bits and the speed of the fused path)"
+env PG_ROUNDS=$ROUNDS PG_FUSE=2 VSDLSS_TRACE=1 $NUMA "$R" "$DUMP" 6 "$T" > "$OUT/real_fuse2.log" 2>&1
 grep -aE "fused components|transient fusion" "$OUT/real_fuse2.log" | sed 's/^/    /' | tee -a "$S"
 sed -n '/^validation/,/^timing/p' "$OUT/real_fuse2.log" | grep -av '^timing' | sed 's/^/    /' | tee -a "$S"
-verdict "$OUT/real_fuse2.log" "forced fusion"; fused_note "$OUT/real_fuse2.log"
+verdict "$OUT/real_fuse2.log" "forced fusion"; fused_note "$OUT/real_fuse2.log"; speedup "$OUT/real_fuse2.log"
 
 echo; say "Done. Please send: $S"
 say "(inputs for the simulator: $OUT/inputs -- cdiag.txt, x0.txt, src_nodes, <k>s, meta.txt; see test/bench_tr_replay.c save_inputs)"

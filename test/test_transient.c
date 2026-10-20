@@ -301,6 +301,18 @@ int main(void)
         scenario(&S,0,64,th,1,0);       /* not relabelled: unfused path */
         scenario(&S,1,0,th,1,0);        /* level tail: unfused path */
     }
+    /* many sources, every node listed about 600 times in random order: enough
+     * work for the parallel scatter, whose chunk edges then fall inside runs
+     * of one position (each must still be summed in registration order) */
+    {
+        sys S2=S; S2.nsrc=400000;
+        S2.src=malloc((size_t)S2.nsrc*sizeof(csi)); S2.srcv=malloc((size_t)(S2.K*S2.nsrc)*8);
+        for(csi t=0;t<S2.nsrc;t++) S2.src[t]=S.src[irand(S.nsrc)];
+        for(csi t=0;t<S2.K*S2.nsrc;t++) S2.srcv[t]=1e-3*(urand()-0.3);
+        scenario(&S2,1,64,4,2,1);
+        scenario(&S2,1,64,4,0,0);
+        free(S2.src); free(S2.srcv);
+    }
     misuse(&S);
     if(fails) { fprintf(stderr,"%d failure(s)\n",fails); return 1; }
     printf("test_transient: ALL OK (n=%lld, %lld sources, %lld dep nodes, %lld steps)\n",

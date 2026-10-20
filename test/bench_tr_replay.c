@@ -19,7 +19,8 @@
  *     TR_NOCACHE=1 (do not write the binary cache), TR_CHECK_CDIAG=file (the
  *     true C/dt, e.g. gen_tr_dump's cdiag_true.txt: report the error of Ch),
  *     TR_SAVE=outdir (write the reconstructed Ch, x0 and sources: see
- *     save_inputs), TR_SAVE_FMT=bin (sources in binary)
+ *     save_inputs), TR_SAVE_FMT=bin (sources in binary), VSDLSS_INTERLEAVE=1
+ *     (interleave the process's memory over the NUMA nodes, without numactl)
  *
  * The matrix is A = G + C/dt.  Ch = C/dt is taken
  *   - from cdiag.txt when present, else
@@ -191,6 +192,7 @@ int main(int argc, char **argv)
     if ((e = getenv("PG_BLOCK"))) vsdlss_reduce_block = atol(e);       /* small cases: blocks and a fusable tail */
     if ((e = getenv("PG_TAILMIN"))) vsdlss_reduce_tail_min = atol(e);
     vsdlss_set_num_threads(threads);
+    interleave_memory();                 /* VSDLSS_INTERLEAVE=1 (bench_input.h): the dump vectors and sources are this program's memory */
     mkdir(pathf(".trcache", 0), 0755);
 
     double t0 = now();
@@ -333,14 +335,22 @@ int main(int argc, char **argv)
                 if (r < 0) { hash[m][k] = fnv(xa, n); double e2 = 0, mx = 0; for (csi v = 0; v < n; v++) { double d = fabs(xa[v] - xsim[k][v]); if (d > e2) e2 = d; if (fabs(xsim[k][v]) > mx) mx = fabs(xsim[k][v]); } err[m][k] = e2; xmx[m][k] = mx; }
             }
         } else if (m == 1) {                   /* packed b by the formula */
+            /* in parallel with the given threads (the source nodes are distinct: each
+             * position gets one source, 0.0 + value as in the interface) */
+            #pragma omp parallel for num_threads(threads) schedule(static)
             for (csi v = 0; v < n; v++) xa[slot[v]] = xsim[0][v];
             memset(s, 0, (size_t)n * 8);
             double t1 = now();
             if (r < 0) on_step(&cx, 0, xa, NULL);
             for (csi k = 0; k < N; k++) {
-                for (csi j = 0; j < nsrc; j++) s[slot[src[j]]] = 0.0;
-                for (csi j = 0; j < nsrc; j++) s[slot[src[j]]] += sv[k * nsrc + j];
-                for (csi p = 0; p < n; p++) { double v = dpk[p] * xa[p]; for (csi a = pc[p]; a < pc[p + 1]; a++) v += pw[a] * xa[pu[a]]; xb[p] = v + s[p]; }
+                const double *row = sv + k * nsrc;
+                #pragma omp parallel num_threads(threads)
+                {
+                    #pragma omp for schedule(static)
+                    for (csi j = 0; j < nsrc; j++) s[slot[src[j]]] = 0.0 + row[j];
+                    #pragma omp for schedule(static)
+                    for (csi p = 0; p < n; p++) { double v = dpk[p] * xa[p]; for (csi a = pc[p]; a < pc[p + 1]; a++) v += pw[a] * xa[pu[a]]; xb[p] = v + s[p]; }
+                }
                 if (vsdlss_m3_solve_packed_inplace(F, xb) != VSDLSS_OK) die("packed solve failed");
                 double *t = xa; xa = xb; xb = t;
                 if (r < 0) { double t2 = now(); on_step(&cx, k + 1, xa, NULL); t1 += now() - t2; }

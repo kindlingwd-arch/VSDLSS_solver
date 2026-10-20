@@ -60,7 +60,7 @@ struct vsdlss_m3_transient {
     int started, asked;          /* asked: the callback has given the dep values for step k+1 */
     double *x, *w, *s, *d;       /* packed order */
     csi *slot;                   /* caller node -> packed position when the factor has no inverse map */
-    csi nsrc, *srcpos, *srcord;  /* source positions; their order sorted by (position, index) */
+    csi nsrc, *srcpos, *srcord;  /* sources sorted by (position, index): srcord[t] the index, srcpos[t] its position */
     csi nreset, *reset;          /* positions of sources and dep nodes (s is rebuilt there) */
     csi ndep, *deppos; double *dep;
     tr_comp *comp;
@@ -182,6 +182,7 @@ vsdlss_status vsdlss_m3_transient_create(const vsdlss_m3_factor *f, const vsdlss
     for(csi j=0;j<nsrc;j++) T->srcord[j]=ps[j].i;
     for(csi j=0;j<ndep;j++) T->deppos[j]=packed_pos(T,dep_node[j]);
     for(csi j=0;j<nsrc;j++) ps[j].p=T->srcpos[j];
+    for(csi t=0;t<nsrc;t++) T->srcpos[t]=packed_pos(T,src_node[T->srcord[t]]);   /* from now on in sorted order */
     for(csi j=0;j<ndep;j++) ps[nsrc+j].p=T->deppos[j];
     for(csi j=0;j<nsrc+ndep;j++) ps[j].i=0;
     qsort(ps,(size_t)(nsrc+ndep),sizeof(pos_t),cmp_pos);
@@ -242,23 +243,50 @@ fail:
     return st;
 }
 
+static int all_finite(const double *v, csi m)
+{
+    int bad=0, nt=vsdlss_parallel_width((double)m*4); (void)nt;
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static) reduction(|:bad))
+    for(csi k=0;k<m;k++) bad|=!isfinite(v[k]);
+    return !bad;
+}
+
 vsdlss_status vsdlss_m3_transient_start(vsdlss_m3_transient *T, const double *x0)
 {
     if(!T || !x0) return VSDLSS_ERR_INVALID;
     const csi n=T->n;
-    for(csi g=0;g<n;g++) if(!isfinite(x0[g])) return VSDLSS_ERR_NONFINITE;
+    if(!all_finite(x0,n)) return VSDLSS_ERR_NONFINITE;
+    int nt=vsdlss_parallel_width((double)n*4); (void)nt;
+    VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
     for(csi g=0;g<n;g++) T->x[packed_pos(T,g)]=x0[g];
     memset(T->dep,0,(size_t)(T->ndep?T->ndep:1)*sizeof(double));
     T->k=0; T->started=1; T->asked=0;
     return VSDLSS_OK;
 }
 
-/* s for one step: sources (registration order per position), not the dep values. */
+/* s for one step: sources (registration order per position), not the dep
+ * values.  In parallel: the reset positions are distinct; the sorted sources
+ * are cut where the position changes, so every position is summed by one
+ * thread in registration order, as serially (server, 61M nodes with 50M
+ * sources: the serial loops took most of a step). */
 static void scatter_sources(vsdlss_m3_transient *T, const double *row)
 {
-    double *s=T->s;
-    for(csi t=0;t<T->nreset;t++) s[T->reset[t]]=0.0;
-    for(csi t=0;t<T->nsrc;t++) { const csi j=T->srcord[t]; s[T->srcpos[j]]+=row[j]; }
+    double *s=T->s; const csi *pos=T->srcpos, *ord=T->srcord, ns=T->nsrc, nr=T->nreset, *reset=T->reset;
+    int nt=vsdlss_parallel_width((double)(ns+nr)*4); (void)nt;
+    VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
+    {
+#ifdef _OPENMP
+        const int id=omp_get_thread_num(), nth=omp_get_num_threads();
+#else
+        const int id=0, nth=1;
+#endif
+        for(csi t=nr*id/nth;t<nr*(id+1)/nth;t++) s[reset[t]]=0.0;
+        VSDLSS_OMP(omp barrier)
+        csi lo=ns*id/nth, hi=ns*(id+1)/nth;
+        while(lo>0 && lo<ns && pos[lo]==pos[lo-1]) lo++;
+        while(hi>0 && hi<ns && pos[hi]==pos[hi-1]) hi++;
+        for(csi t=lo;t<hi;t++) s[pos[t]]+=row[ord[t]];
+    }
 }
 static void add_dep(vsdlss_m3_transient *T)
 {
@@ -322,9 +350,12 @@ static vsdlss_status solve_separate(vsdlss_m3_transient *T, csi c)
             if((st=vsdlss_sn_solve_inplace(cf->numeric,w+r->count))!=VSDLSS_OK) return st;
             if((st=core_finite(w+r->count,core))!=VSDLSS_OK) return st;
         } else {
+            int nt=vsdlss_parallel_width((double)core*4); (void)nt;
+            VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
             for(csi k=0;k<core;k++) q->core[k]=w[core_vertex(cf,k)];
             if((st=vsdlss_sn_solve_inplace(cf->numeric,q->core))!=VSDLSS_OK) return st;
             if((st=core_finite(q->core,core))!=VSDLSS_OK) return st;
+            VSDLSS_OMP(omp parallel for num_threads(nt) if(nt>1) schedule(static))
             for(csi k=0;k<core;k++) w[core_vertex(cf,k)]=q->core[k];
         }
     }
@@ -411,7 +442,7 @@ vsdlss_status vsdlss_m3_transient_run(vsdlss_m3_transient *T, csi nsteps, const 
                                       void *ctx)
 {
     if(!T || !T->started || nsteps<0 || (nsteps && T->nsrc && !src) || (T->ndep && !cb)) return VSDLSS_ERR_INVALID;
-    for(csi t=0;t<nsteps*T->nsrc;t++) if(!isfinite(src[t])) return VSDLSS_ERR_NONFINITE;
+    if(nsteps && !all_finite(src,nsteps*T->nsrc)) return VSDLSS_ERR_NONFINITE;
     if(!nsteps) return VSDLSS_OK;
     T->cb=cb; T->ctx=ctx;
     vsdlss_status st=VSDLSS_OK;
