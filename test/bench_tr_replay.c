@@ -17,7 +17,9 @@
  *     PG_BLOCK / PG_TAILMIN (reduction block and smallest scheduled tail:
  *     let small cases take the fused path),
  *     TR_NOCACHE=1 (do not write the binary cache), TR_CHECK_CDIAG=file (the
- *     true C/dt, e.g. gen_tr_dump's cdiag_true.txt: report the error of Ch)
+ *     true C/dt, e.g. gen_tr_dump's cdiag_true.txt: report the error of Ch),
+ *     TR_SAVE=outdir (write the reconstructed Ch, x0 and sources: see
+ *     save_inputs), TR_SAVE_FMT=bin (sources in binary)
  *
  * The matrix is A = G + C/dt.  Ch = C/dt is taken
  *   - from cdiag.txt when present, else
@@ -118,6 +120,47 @@ static uint64_t fnv(const double *x, csi n)
 
 static int cmpd2(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
 static double pctl(double *v, csi m, double q) { if (!m) return NAN; qsort(v, (size_t)m, 8, cmpd2); return v[(csi)(q * (double)(m - 1))]; }
+
+/* TR_SAVE=<outdir>: the reconstructed inputs of vsdlss_m3_transient, for a
+ * simulator or another test to reuse.  Caller (dump) node numbering, zero-based:
+ *   cdiag.txt      "i value": C/dt of node i without the pair capacitors (the
+ *                  format bench_tr_replay reads: copy it into a dump dir)
+ *   cpair.txt      "i j value": the pair capacitors (only when given)
+ *   x0.txt         "i value": the start state (the dump's x_vector.txt)
+ *   src_nodes.txt  one node per line: the nsrc nodes with a source
+ *   <k>s.txt       nsrc values, k = 1..N, line j for src_nodes line j:
+ *                  b_k = Ch x_{k-1} + s_k (scattered to the src nodes)
+ *   meta.txt       n, steps, nsrc, npair, where Ch came from, TR_TOL
+ * TR_SAVE_FMT=bin writes src_nodes.bin (int64) and <k>s.bin (double) instead
+ * of the text files (much smaller and faster at 10^7 nodes).  Values with 17
+ * significant digits: read back they are bit for bit the same. */
+static FILE *wopen(const char *out, const char *fmt, long long k)
+{
+    char name[256], p[4096]; snprintf(name, sizeof name, fmt, k); snprintf(p, sizeof p, "%s/%s", out, name);
+    FILE *f = fopen(p, "w"); if (!f) { perror(p); exit(1); }
+    return f;
+}
+static void save_inputs(const char *out, csi n, csi N, const double *c, csi npair, const csi *pa, const csi *pb, const double *pv,
+                        csi nsrc, const csi *src, const double *sv, const double *x0, const char *ch_from, double tol)
+{
+    const char *e = getenv("TR_SAVE_FMT"); const int bin = e && !strcmp(e, "bin");
+    double t0 = now(); FILE *f;
+    mkdir(out, 0755);
+    f = wopen(out, "cdiag.txt", 0); for (csi v = 0; v < n; v++) fprintf(f, "%lld %.17g\n", (long long)v, c[v]); fclose(f);
+    if (npair) { f = wopen(out, "cpair.txt", 0); for (csi q = 0; q < npair; q++) fprintf(f, "%lld %lld %.17g\n", (long long)pa[q], (long long)pb[q], pv[q]); fclose(f); }
+    f = wopen(out, "x0.txt", 0); for (csi v = 0; v < n; v++) fprintf(f, "%lld %.17g\n", (long long)v, x0[v]); fclose(f);
+    if (bin) {
+        f = wopen(out, "src_nodes.bin", 0); for (csi j = 0; j < nsrc; j++) { int64_t q = src[j]; fwrite(&q, 8, 1, f); } fclose(f);
+        for (csi k = 0; k < N; k++) { f = wopen(out, "%llds.bin", k + 1); fwrite(sv + k * nsrc, 8, (size_t)nsrc, f); fclose(f); }
+    } else {
+        f = wopen(out, "src_nodes.txt", 0); for (csi j = 0; j < nsrc; j++) fprintf(f, "%lld\n", (long long)src[j]); fclose(f);
+        for (csi k = 0; k < N; k++) { f = wopen(out, "%llds.txt", k + 1); for (csi j = 0; j < nsrc; j++) fprintf(f, "%.17g\n", sv[k * nsrc + j]); fclose(f); }
+    }
+    f = wopen(out, "meta.txt", 0);
+    fprintf(f, "n %lld\nsteps %lld\nnsrc %lld\nnpair %lld\nch %s\ntr_tol %g\nformat %s\n", (long long)n, (long long)N, (long long)nsrc, (long long)npair, ch_from, tol, bin ? "bin" : "txt");
+    fclose(f);
+    printf("# saved Ch, x0 and the sources of %lld steps to %s (%s, %.1f s)\n", (long long)N, out, bin ? "binary sources" : "text", now() - t0);
+}
 
 /* ---- validation / timing callbacks ---- */
 typedef struct { const csi *slot; csi n, steps; double *xu; uint64_t *hash; double *err; double *xmax; int compare; } vctx;
@@ -254,6 +297,7 @@ int main(int argc, char **argv)
     for (csi k = 1; k <= N; k++) free(sk[k]);
     printf("# sources: %lld nodes (%.1f%%) carry a nonzero value in some step; %lld two-terminal capacitors (cpair.txt)\n",
            (long long)nsrc, 100.0 * (double)nsrc / (double)n, (long long)npair);
+    if ((e = getenv("TR_SAVE")) && *e) save_inputs(e, n, N, c, npair, pa, pb, pv, nsrc, src, sv, xsim[0], src_name, tol);
 
     t0 = now();
     vsdlss_m3_factor *F = NULL;
