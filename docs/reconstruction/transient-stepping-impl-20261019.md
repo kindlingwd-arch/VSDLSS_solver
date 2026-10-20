@@ -1,6 +1,6 @@
 # 2026-10-19 求解器接管时间步进：P1 与 P3/P4 实现
 
-设计见 [transient-stepping-design-20261018](transient-stepping-design-20261018.md)（前提和接口按 PR #61 修订后的版本）。本文记录实现、正确性验证和本机实测。
+设计见 [transient-stepping-design-20261018](transient-stepping-design-20261018.md)（前提和接口按 PR #61 修订后的版本）。本文记录实现、正确性验证和本机实测。 融合的原理和规则的完整说明见 [cross-step-fusion-principle-20261020](cross-step-fusion-principle-20261020.md)。
 
 ## 结论
 
