@@ -1014,6 +1014,24 @@ static int perm2_bkt_on(void)
     if(on<0) { const char *e=getenv("VSDLSS_PERM2_BUCKETS"); on=!(e && e[0]=='0'); }
     return on;
 }
+/* VSDLSS_PERM_THREADS=n: threads of the two-pass gather and write-back
+ * (default: the solve's).  They only move values -- the same bits at any
+ * count -- and on the 61M-node case they kept getting faster past the 32
+ * threads at which the replays and the core stop (64 threads: gather 30 ->
+ * 24 ms, write-back 27 -> 25 ms), so they may take more threads than the
+ * rest of the solve.  At most VSDLSS_PERM_PLAN_SLOTS - 1. */
+int vsdlss_perm2_threads = -1;          /* -1: VSDLSS_PERM_THREADS, 0: the solve's */
+static int perm2_threads(int T)
+{
+    int v=__atomic_load_n(&vsdlss_perm2_threads,__ATOMIC_RELAXED);
+    if(v<0) { const char *e=getenv("VSDLSS_PERM_THREADS"); v=e && atoi(e)>0?atoi(e):0; __atomic_store_n(&vsdlss_perm2_threads,v,__ATOMIC_RELAXED); }
+    if(v<=0 || T<=1) return T;
+#ifdef _OPENMP
+    if(omp_in_parallel()) return T;     /* called from a parallel region: keep its budget */
+#endif
+    return v<VSDLSS_PERM_PLAN_SLOTS?v:VSDLSS_PERM_PLAN_SLOTS-1;
+}
+
 /* VSDLSS_PERM2_NT=0/1 forces plain / non-temporal stores. */
 static int perm2_nt(csi n)
 {
@@ -1308,7 +1326,7 @@ static vsdlss_status solve_common(const vsdlss_m3_factor *factor,
     if(inverse && !factor->disk_mode && factor->n>=PERM_MIN && perm2_on()) {
         /* Two-pass gather here, two-pass write-back below (plan, scratch
          * vector and queues permitting; otherwise the direct loops). */
-        int T=vsdlss_parallel_width((double)factor->n*4);
+        int T=perm2_threads(vsdlss_parallel_width((double)factor->n*4));
         pl=perm_plan_get(factor,T);
         if(pl) pq=(csi*)malloc((size_t)pl->T*(size_t)pl->B*sizeof(csi));
         if(pl && pq) pbuf=pbuf_acquire(factor,perm_scratch_len(pl));

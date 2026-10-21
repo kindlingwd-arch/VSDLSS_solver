@@ -346,7 +346,8 @@ static int internal_order_solve(void)
 /* Two-pass gather/write-back (vsdlss_perm2_min lowered so this small system
  * takes it: several buckets, many small components, blocks straddling
  * components) against the direct loops: the same bits for every thread
- * count, both inverse-map widths, plain and non-temporal stores, cached plans, aliasing; a non-finite
+ * count, both inverse-map widths, plain and non-temporal stores, cached plans, aliasing, a
+ * gather / write-back team of its own size (vsdlss_perm2_threads); a non-finite
  * RHS fails and leaves the output untouched. */
 static int two_pass_permutation(void)
 {
@@ -372,6 +373,12 @@ static int two_pass_permutation(void)
             CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
             CHECK(memcmp(x,ref,(size_t)n*8)==0);
         }
+        for(int pt=2;pt<=7;pt+=5){                  /* more (or other) gather / write-back threads than the solve's */
+            vsdlss_perm2_threads=pt;
+            CHECK(vsdlss_m3_solve(f,b,x)==VSDLSS_OK);
+            CHECK(memcmp(x,ref,(size_t)n*8)==0);
+        }
+        vsdlss_perm2_threads=0;
         memcpy(x,b,(size_t)n*8); CHECK(vsdlss_m3_solve(f,x,x)==VSDLSS_OK);   /* aliasing */
         CHECK(memcmp(x,ref,(size_t)n*8)==0);
         memcpy(bb,b,(size_t)n*8); bb[n/3]=NAN;

@@ -281,6 +281,7 @@ extern csi vsdlss_reduce_tail_windows; /* window schedule K (default 64), 0 = le
 extern csi vsdlss_reduce_prefetch;   /* replay software prefetch distance: -1 = VSDLSS_PREFETCH (default 0, off) (tests: set it) */
 extern int vsdlss_reduce_tail_lpt;      /* window schedule: chunks largest first: -1 = VSDLSS_TAIL_LPT (default 0, off) (tests: set it) */
 extern int vsdlss_reduce_tail_ilp;      /* window schedule: 2 = two chunks per thread, interleaved; -1 = VSDLSS_TAIL_ILP (default 1) (tests: set it) */
+extern int vsdlss_perm2_threads;        /* threads of the two-pass gather / write-back: -1 = VSDLSS_PERM_THREADS, 0 = the solve's (tests: set it) */
 extern int vsdlss_m3_pipe_bwd;      /* backward pipeline: -1 = VSDLSS_PIPE_BWD (default off), 0 / 1 (tests: set it) */
 extern long vsdlss_reduce_bwd_pipe_runs; /* tests: calls of vsdlss_reduce_core_bwd_pipelined */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
