@@ -37,9 +37,12 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < n; i++) { a[i] = 1.0 + (double)(i & 7); b[i] = 2.0; c[i] = 0.5; }
         double best[3] = {1e300, 1e300, 1e300};
         for (int r = 0; r < reps; r++) {
+            /* eight independent sums: one running sum is a chain of dependent adds
+             * (about 4 cycles each), which caps the read loop below the memory */
             double s = 0, t0 = now();
             #pragma omp parallel for num_threads(T) schedule(static) reduction(+:s)
-            for (size_t i = 0; i < n; i++) s += a[i];
+            for (size_t i = 0; i < n / 8 * 8; i += 8)
+                s += ((a[i] + a[i + 1]) + (a[i + 2] + a[i + 3])) + ((a[i + 4] + a[i + 5]) + (a[i + 6] + a[i + 7]));
             double t1 = now();
             sink += s;
             #pragma omp parallel for num_threads(T) schedule(static)
