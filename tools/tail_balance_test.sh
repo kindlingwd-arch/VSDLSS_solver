@@ -2,7 +2,8 @@
 # Load balance of the tail replay (window schedule), and the core's thread scaling:
 #   1. build bench_phase (METIS, MKL as tools/ab_test.sh)
 #   2. bench_phase on the largest component, chunks in index order
-#      (VSDLSS_TAIL_LPT=0) and largest first (=1), VSDLSS_TAIL_STATS=1:
+#      (VSDLSS_TAIL_LPT=0), largest first (=1), and largest first with two
+#      chunks per thread interleaved (VSDLSS_TAIL_ILP=2), VSDLSS_TAIL_STATS=1:
 #      per tail replay the wall time, the threads' time inside chunks, the
 #      utilization busy / (threads x wall), the busiest thread and the longest
 #      chunk -- medians per direction and thread count
@@ -11,9 +12,10 @@
 #   cd <data directory with diag.txt data.txt>
 #   bash <source>/tools/tail_balance_test.sh <source directory> ["threads" = "16 32"] [reps = 15]
 #
-# Results are bitwise the same with and without VSDLSS_TAIL_LPT (bench_phase
+# Results are bitwise the same with and without VSDLSS_TAIL_LPT / VSDLSS_TAIL_ILP (bench_phase
 # compares across thread counts; tests/test_m3 across the switch).  For the
-# per-step effect in production run tools/ab_test.sh with "VSDLSS_TAIL_LPT=1".
+# per-step effect in production run tools/ab_test.sh with "VSDLSS_TAIL_LPT=1"
+# and "VSDLSS_TAIL_LPT=1 VSDLSS_TAIL_ILP=2".
 # Output: tail_balance_<time>/  (logs, summary.txt = the result to send back)
 set -u
 SRC=$(cd "${1:?usage: bash tail_balance_test.sh <source directory> [threads] [reps]}" && pwd)
@@ -28,7 +30,7 @@ say() { echo "$*" | tee -a "$S"; }
   lscpu | grep -E "Model name|^CPU\(s\)|Socket|NUMA node\(s\)"
   echo "source: $SRC ($(git -C "$SRC" log -1 --format='%h %s' 2>/dev/null || echo 'no git'))  threads: $TH  reps: $REPS  load: $(cut -d' ' -f1-3 /proc/loadavg)"
 } | tee "$S"
-grep -q VSDLSS_TAIL_LPT "$SRC/src/vsdlss_reduction.c" || { say "this source has no VSDLSS_TAIL_LPT: update src/vsdlss_reduction.c, src/vsdlss_m3_internal.h"; exit 1; }
+grep -q VSDLSS_TAIL_ILP "$SRC/src/vsdlss_reduction.c" || { say "this source has no VSDLSS_TAIL_ILP: update src/vsdlss_reduction.c, src/vsdlss_m3_internal.h"; exit 1; }
 
 if [ -z "${BUILD+x}" ]; then        # as tools/ab_test.sh: METIS, and MKL when found
     BUILD="METIS=1"; MKLRT=""
@@ -61,13 +63,17 @@ summ() {   # summ <stats file>: medians per direction and thread count
                    p[1], p[2], med(w,k,n[k]), med(b,k,n[k]), med(u,k,n[k]), med(m,k,n[k]), med(l,k,n[k]), n[k] } }' "$1" | sort
 }
 
-for lpt in 0 1; do
-    echo; say "=== 2.$((lpt+1)). tail replay, chunks $([ $lpt = 1 ] && echo 'largest first' || echo 'in index order') (VSDLSS_TAIL_LPT=$lpt), threads $TH"
+n=0
+for mode in "0 1" "1 1" "1 2"; do
+    set -- $mode; lpt=$1; ilp=$2; n=$((n+1))
+    desc="chunks $([ $lpt = 1 ] && echo 'largest first' || echo 'in index order')$([ $ilp = 2 ] && echo ', two per thread interleaved')"
+    echo; say "=== 2.$n. tail replay, $desc (VSDLSS_TAIL_LPT=$lpt VSDLSS_TAIL_ILP=$ilp), threads $TH"
     t0=$(date +%s)
-    env VSDLSS_INTERLEAVE=1 VSDLSS_TAIL_STATS=1 VSDLSS_TAIL_LPT=$lpt "$SRC/bench_phase" text:. 6 "$TH" "$REPS" > "$OUT/phase_lpt$lpt.log" 2> "$OUT/stats_lpt$lpt.log"
+    env VSDLSS_INTERLEAVE=1 VSDLSS_TAIL_STATS=1 VSDLSS_TAIL_LPT=$lpt VSDLSS_TAIL_ILP=$ilp "$SRC/bench_phase" text:. 6 "$TH" "$REPS" \
+        > "$OUT/phase_$n.log" 2> "$OUT/stats_$n.log"
     say "    ($(($(date +%s) - t0)) s)"
-    grep -aE "^T=|^# results" "$OUT/phase_lpt$lpt.log" | sed 's/^/    /' | tee -a "$S"
-    if grep -q "^vsdlss tail stats:" "$OUT/stats_lpt$lpt.log"; then summ "$OUT/stats_lpt$lpt.log" | tee -a "$S"
+    grep -aE "^T=|^# results" "$OUT/phase_$n.log" | sed 's/^/    /' | tee -a "$S"
+    if grep -q "^vsdlss tail stats:" "$OUT/stats_$n.log"; then summ "$OUT/stats_$n.log" | tee -a "$S"
     else say "    no tail stats: this case's tail is not window-scheduled (too small), nothing to balance"; fi
 done
 say "    (wall: one tail replay; busy: the threads' time inside chunks, summed; utilization = busy / (threads x wall);"
