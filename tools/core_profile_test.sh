@@ -59,10 +59,11 @@ grep -aE "^# [^ ]+: n |^# core|^T=|^# results" "$OUT/phase.log" | sed 's/^/    /
 N=$(grep -a "vsdlss solve profile" "$OUT/profile.log" | sed -E 's/.*n=([0-9]+).*/\1/' | sort -n | tail -n 1)
 grep -a "vsdlss solve profile: n=$N " "$OUT/profile.log" | head -n 1 | sed -E 's/.*(top (in order|by branches)[^|]*\|.*)/    structure: \1/' | tee -a "$S"
 grep -a "vsdlss solve profile: n=$N " "$OUT/profile.log" | awk '{
-    for (i = 1; i <= NF; i++) {
+    gf = gb = 0
+    for (i = 1; i <= NF; i++) {        # the first "fwd sub" / "bwd top" only ("top by branches: fwd bwd" follows)
         if ($i ~ /^nt_top=/) { split($i, kv, "="); k = kv[2] }
-        if ($i == "fwd") { fs = $(i+2); ft = $(i+4) }
-        if ($i == "bwd") { bt = $(i+2); bs = $(i+4) }
+        if ($i == "fwd" && $(i+1) == "sub" && !gf) { fs = $(i+2); ft = $(i+4); gf = 1 }
+        if ($i == "bwd" && $(i+1) == "top" && !gb) { bt = $(i+2); bs = $(i+4); gb = 1 }
     }
     n[k]++; FS_[k, n[k]] = fs; FT[k, n[k]] = ft; BT[k, n[k]] = bt; BS[k, n[k]] = bs }
   function med(a, k, c,   i, j, t, v) { for (i = 1; i <= c; i++) v[i] = a[k, i] + 0
