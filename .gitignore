@@ -70,3 +70,4 @@ bench_tr_replay
 gen_tr_dump
 test_transient
 test_modify
+transient_driver
