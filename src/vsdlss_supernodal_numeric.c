@@ -1557,11 +1557,23 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
             double s = w * (w + 1) / 2 + w * e;
             all += s; if (!in_sub[d]) top += s;
         }
+        /* the split subtrees' sizes: the largest bounds the subtree phase */
+        double smax = 0;
+        for (csi i = 0; i < nsub; ++i) {
+            double s = 0;
+            for (csi k = t->first[sub[i]]; k <= sub_end[i]; ++k) {
+                const csi d = t->order[k];
+                const double w = (double)(f->column_start[d + 1] - f->column_start[d]), e = (double)(f->row_ptr[d + 1] - f->row_ptr[d]);
+                s += w * (w + 1) / 2 + w * e;
+            }
+            if (s > smax) smax = s;
+        }
         /* By branches the backward pass has no separate subtree phase: its
          * whole time is under "top". */
-        fprintf(stderr, "vsdlss solve profile: n=%lld nt=%d subtrees=%lld | fwd sub %.4f top %.4f | bwd top %.4f sub %.4f s | top %s%s%s | top share of L %.1f%%\n",
-                (long long)f->n, nt, (long long)nsub, tp[1] - tp[0], tp[2] - tp[1], tp[3] - tp[2], tp[4] - tp[3],
-                branches ? "by branches:" : "in order", branches & 1 ? " fwd" : "", branches & 2 ? " bwd" : "", 100 * top / all);
+        fprintf(stderr, "vsdlss solve profile: n=%lld nt=%d nt_top=%d subtrees=%lld | fwd sub %.4f top %.4f | bwd top %.4f sub %.4f s | top %s%s%s | top share of L %.1f%% | largest subtree %.1f%% of L (subtrees / nt %.1f%%)\n",
+                (long long)f->n, nt, nt_top, (long long)nsub, tp[1] - tp[0], tp[2] - tp[1], tp[3] - tp[2], tp[4] - tp[3],
+                branches ? "by branches:" : "in order", branches & 1 ? " fwd" : "", branches & 2 ? " bwd" : "", 100 * top / all,
+                100 * smax / all, nt > 0 ? 100 * (all - top) / all / nt : 0.0);
     }
 #endif
     atomic_fetch_add_explicit(&tree_solves[0], 1, memory_order_relaxed);
