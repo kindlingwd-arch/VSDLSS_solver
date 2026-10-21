@@ -684,6 +684,77 @@ static void tail_stats_print(const char *dir, int nt, double wall, const double 
             dir,nt,tail_lpt_on(),1e3*wall,1e3*sum,wall>0?100*sum/((double)nt*wall):0.0,1e3*busiest,1e3*longest);
 }
 
+/* VSDLSS_TAIL_ILP=2: a thread takes two chunks of a window at a time and
+ * replays them interleaved, a record of one, then a record of the other.  A
+ * chunk's records mostly depend on the record just before (its value is
+ * read or updated next), so one chunk alone leaves the core waiting on that
+ * chain (about 8 ns a record on the 61M case, single thread); two independent
+ * chains give the out-of-order core work to overlap.  Each chunk's records
+ * keep their order and the chunks share nothing, so the bits do not change.
+ * Relabelled segments only (1-byte degrees, pivot of record i at k0 + i);
+ * otherwise, and with the replay prefetch, one chunk at a time. */
+int vsdlss_reduce_tail_ilp = -1;       /* -1: VSDLSS_TAIL_ILP (default 1) */
+static int tail_ilp(void)
+{
+    int v=__atomic_load_n(&vsdlss_reduce_tail_ilp,__ATOMIC_RELAXED);
+    if(v<0) { const char *e=getenv("VSDLSS_TAIL_ILP"); v=e && atoi(e)>=2?2:1; __atomic_store_n(&vsdlss_reduce_tail_ilp,v,__ATOMIC_RELAXED); }
+    return v;
+}
+
+/* One chunk's cursor in the forward replay (relabelled segment). */
+typedef struct { csi i, end, o; const uint32_t *slot; } tail_fcur;
+static inline void tail_fwd_rec(const vsdlss_pk_seg *g, tail_fcur *c, double *restrict work, double *restrict saved,
+                                const uint64_t *restrict bit, double *restrict buf)
+{
+    const csi i=c->i, d=g->deg[i];
+    const double s=work[g->k0+i];
+    if(saved) saved[i]=s;
+    const double *restrict val=g->val; const uint32_t *restrict nb=g->nb;
+    csi o=c->o;
+    for(csi j=0;j<d;j++,o++) {
+        double update=val[o]*s;
+        if((bit[o>>6]>>(o&63))&1) buf[*c->slot++]=update; else work[nb[o]]-=update;
+    }
+    c->o=o; c->i=i+1;
+}
+/* forward_range_defer of two chunks, interleaved record by record */
+static void forward_pair_defer(const vsdlss_reduction *r, const vsdlss_pk_seg *g, csi ca, csi cb,
+                               double *restrict work, double *restrict saved, double *restrict buf)
+{
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb, *cc=r->tail_chunk_core;
+    const uint64_t *bit=r->tail_core_bit;
+    tail_fcur a={cr[ca],cr[ca+1],cn[ca],r->tail_core_slot+cc[ca]}, b={cr[cb],cr[cb+1],cn[cb],r->tail_core_slot+cc[cb]};
+    while(a.i<a.end && b.i<b.end) { tail_fwd_rec(g,&a,work,saved,bit,buf); tail_fwd_rec(g,&b,work,saved,bit,buf); }
+    while(a.i<a.end) tail_fwd_rec(g,&a,work,saved,bit,buf);
+    while(b.i<b.end) tail_fwd_rec(g,&b,work,saved,bit,buf);
+}
+
+/* One chunk's cursor in the backward replay (relabelled segment): records
+ * [i0, i) still to do, from i - 1 down; o the neighbour offset of record i. */
+typedef struct { csi i, i0, o; int ok; } tail_bcur;
+static inline void tail_bwd_rec(const vsdlss_pk_seg *g, tail_bcur *c, const double *restrict saved, double *restrict x)
+{
+    const csi i=c->i-1, d=g->deg[i], v_=g->k0+i;
+    const csi o=c->o-d;
+    const double *restrict v=g->val+o; const uint32_t *restrict w=g->nb+o;
+    double value=(saved?saved[i]:x[v_])/g->piv[i];
+    for(csi j=0;j<d;j++) { double update=v[j]*x[w[j]]; value-=update; }
+    c->ok&=isfinite(value)!=0;
+    x[v_]=value;
+    c->o=o; c->i=i;
+}
+/* backward_range of two chunks, interleaved record by record */
+static int backward_pair(const vsdlss_reduction *r, const vsdlss_pk_seg *g, csi ca, csi cb,
+                         const double *restrict saved, double *restrict x)
+{
+    const csi *cr=r->tail_chunk_rec, *cn=r->tail_chunk_nb;
+    tail_bcur a={cr[ca+1],cr[ca],cn[ca+1],1}, b={cr[cb+1],cr[cb],cn[cb+1],1};
+    while(a.i>a.i0 && b.i>b.i0) { tail_bwd_rec(g,&a,saved,x); tail_bwd_rec(g,&b,saved,x); }
+    while(a.i>a.i0) tail_bwd_rec(g,&a,saved,x);
+    while(b.i>b.i0) tail_bwd_rec(g,&b,saved,x);
+    return a.ok & b.ok;
+}
+
 /* The level-scheduled tail (segment g; see vsdlss_reduction): levels in
  * order, the chunks of a level concurrently.  Every entry sees the
  * operations of the serial replay in the same order. */
@@ -704,6 +775,7 @@ static int forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doubl
         if(!buf) return 1;
         const uint64_t *bit=r->tail_core_bit; const csi *cc=r->tail_chunk_core;
         const uint32_t *ord=tail_lpt_on()?r->tail_chunk_order:NULL;
+        const int pair=tail_ilp()==2 && !g->head && !prefetch_dist();
         double *tb=tail_stats_on()?(double *)calloc((size_t)2*(size_t)(nt>1?nt:1),sizeof(double)):NULL;
         const double tw=tb?tail_now():0;
         VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1))
@@ -711,6 +783,18 @@ static int forward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, doubl
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
         for(csi l=0;l<r->tail_levels;l++) {
+            if(pair) {                    /* two chunks per task: consecutive in the hand-out order */
+                const csi k0=lp[l], np=(lp[l+1]-lp[l]+1)/2;
+                VSDLSS_OMP(omp for schedule(dynamic,1))
+                for(csi p=0;p<np;p++) {
+                    const csi k=k0+2*p, ca=ord?(csi)ord[k]:k;
+                    const double t0=tb?tail_now():0;
+                    if(k+1<lp[l+1]) forward_pair_defer(r,g,ca,ord?(csi)ord[k+1]:k+1,work,saved,buf);
+                    else forward_range_defer(g,cr[ca],cr[ca+1],cn[ca],work,saved,bit,r->tail_core_slot+cc[ca],buf);
+                    tail_stats_add(tb,t0);
+                }
+                continue;
+            }
             VSDLSS_OMP(omp for schedule(dynamic,1))
             for(csi k=lp[l];k<lp[l+1];k++) {
                 const csi c=ord?(csi)ord[k]:k;
@@ -781,6 +865,7 @@ static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, cons
     (void)nt;
     if(r->tail_windows) {
         const uint32_t *ord=tail_lpt_on()?r->tail_chunk_order:NULL;
+        const int pair=tail_ilp()==2 && !g->head && !prefetch_dist();
         double *tb=tail_stats_on()?(double *)calloc((size_t)2*(size_t)(nt>1?nt:1),sizeof(double)):NULL;
         const double tw=tb?tail_now():0;
         VSDLSS_OMP(omp parallel num_threads(nt) if(nt>1) reduction(&:ok))
@@ -788,6 +873,18 @@ static int backward_tail(const vsdlss_reduction *r, const vsdlss_pk_seg *g, cons
         VSDLSS_OMP(omp master)
         vsdlss_parallel_observe();
         for(csi l=r->tail_levels;l>0;l--) {
+            if(pair) {
+                const csi k0=lp[l-1], np=(lp[l]-lp[l-1]+1)/2;
+                VSDLSS_OMP(omp for schedule(dynamic,1))
+                for(csi p=0;p<np;p++) {
+                    const csi k=k0+2*p, ca=ord?(csi)ord[k]:k;
+                    const double t0=tb?tail_now():0;
+                    if(k+1<lp[l]) ok&=backward_pair(r,g,ca,ord?(csi)ord[k+1]:k+1,saved,x);
+                    else ok&=backward_range(g,cr[ca],cr[ca+1],cn[ca+1],saved,x);
+                    tail_stats_add(tb,t0);
+                }
+                continue;
+            }
             VSDLSS_OMP(omp for schedule(dynamic,1))
             for(csi k=lp[l-1];k<lp[l];k++) {
                 const csi c=ord?(csi)ord[k]:k;
