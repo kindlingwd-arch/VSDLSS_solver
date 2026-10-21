@@ -1044,6 +1044,7 @@ static int test_pipe_bwd(void)
     const csi saved_blk=vsdlss_reduce_block, saved_win=vsdlss_reduce_tail_windows, saved_min=vsdlss_reduce_tail_min;
     const int saved_relabel=vsdlss_m3_relabel, saved_pipe=vsdlss_m3_pipe_bwd, saved_br=vsdlss_top_branches;
     const csi saved_pf=vsdlss_reduce_prefetch;
+    const int saved_lpt=vsdlss_reduce_tail_lpt;
     const csi G=150, S=3;
     test_edge *edge=malloc((size_t)(2*G*(G-1)*(S+1))*sizeof(*edge)); csi e=0, n=G*G;
     CHECK(edge);
@@ -1069,8 +1070,8 @@ static int test_pipe_bwd(void)
         int ok=0;
         for(csi c=0;c<f->count;c++) ok|=f->component[c].core_contig && vsdlss_reduce_bwd_pipe_ok(f->component[c].reduction,f->component[c].numeric);
         CHECK(ok);
-        for(int pipe=0;pipe<4;pipe++) {             /* 2, 3: with the replay prefetch */
-            vsdlss_m3_pipe_bwd=pipe&1; vsdlss_reduce_prefetch=pipe&2?24:0;
+        for(int pipe=0;pipe<8;pipe++) {             /* 2, 3: with the replay prefetch; 4-7: chunks largest first */
+            vsdlss_m3_pipe_bwd=pipe&1; vsdlss_reduce_prefetch=pipe&2?24:0; vsdlss_reduce_tail_lpt=(pipe&4)!=0;
             for(int rep=0;rep<2;rep++) {                /* the second solve reuses the cached structure */
                 CHECK(vsdlss_m3_solve_many(f,2,b,n,first?ref:x,n)==VSDLSS_OK);
                 if(first) { CHECK(vsdlss_backward_error(A,ref,b,&eta)==VSDLSS_OK && eta<1e-13); first=0; }
@@ -1083,10 +1084,10 @@ static int test_pipe_bwd(void)
     CHECK(vsdlss_reduce_bwd_pipe_runs>runs0);
     vsdlss_reduce_block=saved_blk; vsdlss_reduce_tail_windows=saved_win; vsdlss_reduce_tail_min=saved_min;
     vsdlss_m3_relabel=saved_relabel; vsdlss_m3_pipe_bwd=saved_pipe; vsdlss_top_branches=saved_br;
-    vsdlss_reduce_prefetch=saved_pf;
+    vsdlss_reduce_prefetch=saved_pf; vsdlss_reduce_tail_lpt=saved_lpt;
     CHECK(vsdlss_set_num_threads(1)==VSDLSS_OK);
     free(b); free(ref); free(x); vsdlss_spfree(A);
-    printf("backward pipeline, replay prefetch: same bits as the plain solve (1/2/4 threads, top in order / by branches)\n");
+    printf("backward pipeline, replay prefetch, chunks largest first: same bits as the plain solve (1/2/4 threads, top in order / by branches)\n");
     return 0;
 }
 
