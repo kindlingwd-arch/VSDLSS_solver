@@ -178,6 +178,50 @@ out:
     free(owner); free(la); free(lf); free(lev_a); free(lev_f); free(lev_b); free(core); free(nbo);
 }
 
+/* The core's critical path: per supernode the bytes of its panel (packed
+ * diagonal block w(w+1)/2 and external block w x e, doubles), the heaviest
+ * root-to-leaf chain of the supernodal tree, and the largest panels on it.
+ * However many threads, one solve direction reads at least this chain one
+ * panel after the other, so it bounds the parallel core solve from below;
+ * diagonal vs external shows whether the triangular solves (dtpsv) or the
+ * products (dgemv) make it up. */
+static void core_path(const vsdlss_sn_factor *f)
+{
+    const csi m = f->count;
+    if (m < 1) return;
+    double *own = malloc((size_t)m * 8), *path = malloc((size_t)m * 8), *cm = calloc((size_t)m, 8);
+    csi *best = malloc((size_t)m * sizeof(csi));
+    if (!own || !path || !cm || !best) { free(own); free(path); free(cm); free(best); return; }
+    double total = 0, tdiag = 0;
+    for (csi s = 0; s < m; s++) {
+        const double w = (double)(f->column_start[s + 1] - f->column_start[s]), e = (double)(f->row_ptr[s + 1] - f->row_ptr[s]);
+        own[s] = 8 * (w * (w + 1) / 2 + w * e); total += own[s]; tdiag += 8 * w * (w + 1) / 2; best[s] = -1;
+    }
+    csi root = -1;
+    for (csi s = 0; s < m; s++) {                    /* children before parents */
+        path[s] = own[s] + cm[s];
+        const csi p = f->sn_parent[s];
+        if (p >= 0 && p < m) { if (path[s] > cm[p]) { cm[p] = path[s]; best[p] = s; } }
+        else if (root < 0 || path[s] > path[root]) root = s;
+    }
+    double pd = 0, pe = 0; csi len = 0;
+    printf("# core critical path: L %.0f MB (diagonal blocks %.0f MB), heaviest chain %.1f MB (%.1f%% of L)",
+           total / 1e6, tdiag / 1e6, root >= 0 ? path[root] / 1e6 : 0, root >= 0 ? 100 * path[root] / total : 0);
+    for (csi s = root; s >= 0; s = best[s]) {
+        const double w = (double)(f->column_start[s + 1] - f->column_start[s]);
+        pd += 8 * w * (w + 1) / 2; pe += own[s] - 8 * w * (w + 1) / 2; len++;
+    }
+    printf(": %lld panels, diagonal %.1f MB, external %.1f MB\n", (long long)len, pd / 1e6, pe / 1e6);
+    printf("# core critical path, from the root (width w, external rows e, MB):");
+    int k = 0;
+    for (csi s = root; s >= 0 && k < 12; s = best[s], k++) {
+        const csi w = f->column_start[s + 1] - f->column_start[s], e = f->row_ptr[s + 1] - f->row_ptr[s];
+        printf(" | w %lld e %lld %.2f", (long long)w, (long long)e, own[s] / 1e6);
+    }
+    printf("\n");
+    free(own); free(path); free(cm); free(best);
+}
+
 /* A view of the reduction with only the block segments (part 1) or only the
  * tail (part 2) non-empty; the shape checks still pass. */
 static vsdlss_reduction view(const vsdlss_reduction *r, int part, vsdlss_pk_seg *seg, csi *bp)
@@ -234,6 +278,7 @@ int main(int argc, char **argv)
                    100.0 * (double)F->component[c].reduction->count / (double)F->component[c].n,
                    (long long)F->component[c].reduction->core_n);
     tail_levels(r);
+    if (sf) core_path(sf);
     if (getenv("BENCH_TAIL_DEPS") && !r->tail_windows) tail_deps(r);
     fflush(stdout);
 

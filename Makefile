@@ -304,6 +304,10 @@ bench_tail: test/bench_tail.c $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal
 bench_phase: test/bench_phase.c test/bench_input.h $(LIBSRCS) include/vsdlss.h src/vsdlss_m3_internal.h
 	$(CC) $(CFLAGS) $(PARFLAGS) -o $@ test/bench_phase.c $(LIBSRCS) $(LDLIBS)
 
+# Machine memory bandwidth (STREAM-like read / copy / triad), thread sweep.
+bench_stream: test/bench_stream.c
+	$(CC) $(CFLAGS) -fopenmp -o $@ test/bench_stream.c -lm
+
 # Feasibility of decoupling the low-degree replays from the core solve:
 # structure of the interface response H, core solve and replays alone and
 # at the same time, cost of H^T b and z - H x (see test/bench_overlap.c).

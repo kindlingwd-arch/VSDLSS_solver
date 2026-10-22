@@ -96,6 +96,10 @@ typedef struct vsdlss_reduction {
     uint32_t *tail_core_slot, *tail_core_upd;
     double *tail_core_buf;       /* the deferred updates (one solve at a time: tail_core_busy) */
     int tail_core_busy;
+    /* Window schedule: each window's chunks by record count, largest first
+     * (ties by index), the order they are handed out in (VSDLSS_TAIL_LPT,
+     * default on).  NULL: in index order. */
+    uint32_t *tail_chunk_order;
     /* Backward pipeline (VSDLSS_PIPE_BWD, vsdlss_reduce_core_bwd_pipelined):
      * the core supernodes each tail chunk reads, built on first use. */
     struct vsdlss_bwd_pipe *bwd_pipe;
@@ -275,6 +279,10 @@ extern csi vsdlss_reduce_tail_grain; /* records per thread per level of the sche
 extern csi vsdlss_reduce_tail_order_grain; /* same, for building the level order (tests: lower it) */
 extern csi vsdlss_reduce_tail_windows; /* window schedule K (default 64), 0 = levels (tests: set it) */
 extern csi vsdlss_reduce_prefetch;   /* replay software prefetch distance: -1 = VSDLSS_PREFETCH (default 0, off) (tests: set it) */
+extern int vsdlss_reduce_tail_lpt;      /* window schedule: chunks largest first: -1 = VSDLSS_TAIL_LPT (default 1, on) (tests: set it) */
+extern int vsdlss_reduce_tail_ilp;      /* window schedule: 2 = two chunks per thread, interleaved; -1 = VSDLSS_TAIL_ILP (default 1) (tests: set it) */
+extern int vsdlss_perm2_threads;        /* threads of the two-pass gather / write-back: -1 = VSDLSS_PERM_THREADS, 0 = the solve's (tests: set it) */
+extern int vsdlss_sn_core_threads;      /* at most this many threads per core solve: -1 = VSDLSS_CORE_THREADS, 0 = no cap (tests: set it) */
 extern int vsdlss_m3_pipe_bwd;      /* backward pipeline: -1 = VSDLSS_PIPE_BWD (default off), 0 / 1 (tests: set it) */
 extern long vsdlss_reduce_bwd_pipe_runs; /* tests: calls of vsdlss_reduce_core_bwd_pipelined */
 extern csi vsdlss_reorder_min;    /* min component size for BFS renumbering */
