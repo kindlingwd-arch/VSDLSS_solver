@@ -1587,10 +1587,28 @@ static vsdlss_status solve_tree(const vsdlss_sn_factor *f, double *x, int nt, co
 vsdlss_status vsdlss_sn_solve_inplace(const vsdlss_sn_factor *f, double *x)
 { return vsdlss_sn_solve_inplace_hooked(f, x, NULL); }
 
+/* VSDLSS_CORE_THREADS=n: at most n threads for a core solve (default: all
+ * the caller's).  The core stops getting faster at about 8 threads (61M-node
+ * case: 1 / 8 / 16 / 32 threads 108 / 19 / 18 / 18 ms, 32 per net 31-39 ms)
+ * while the replays and the gather / write-back keep gaining, so the solve
+ * can run with more threads and cap the core.  The tree solve gives the same
+ * bits at every thread count. */
+int vsdlss_sn_core_threads = -1;        /* -1: VSDLSS_CORE_THREADS, 0: no cap */
+static int core_threads(int nt)
+{
+    int v = __atomic_load_n(&vsdlss_sn_core_threads, __ATOMIC_RELAXED);
+    if (v < 0) {
+        const char *e = getenv("VSDLSS_CORE_THREADS");
+        v = e && atoi(e) > 0 ? atoi(e) : 0;
+        __atomic_store_n(&vsdlss_sn_core_threads, v, __ATOMIC_RELAXED);
+    }
+    return v > 0 && nt > v ? v : nt;
+}
+
 vsdlss_status vsdlss_sn_solve_inplace_hooked(const vsdlss_sn_factor *f, double *x, const vsdlss_sn_bwd_hook *hook)
 {
     if (!f || !x || f->n < 1) return VSDLSS_ERR_INVALID;
-    int nt = vsdlss_parallel_width((double)f->l_nnz * 2);
+    int nt = core_threads(vsdlss_parallel_width((double)f->l_nnz * 2));
     const blas_fwd *bf = NULL;
 #ifdef VSDLSS_BLAS
     /* BLAS solves keep the tree schedule: its forward pass applies each wide
