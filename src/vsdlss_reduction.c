@@ -631,20 +631,23 @@ static int backward_seg(const vsdlss_pk_seg *g, const double *restrict saved, do
 { return backward_range(g,0,g->count,g->nbn,saved,x); }
 
 /* Window schedule options (environment, read once):
- *   VSDLSS_TAIL_LPT=1    hand a window's chunks out largest first
+ *   VSDLSS_TAIL_LPT      1 (default): hand a window's chunks out largest first
  *                        (tail_chunk_order): the largest components start
- *                        first instead of whenever their index comes up.  The
+ *                        first instead of whenever their index comes up; 0: in
+ *                        index order.  61M-node case: utilization of the tail
+ *                        replays 83-87% -> 94-98% at 16 threads, 3-8% faster
+ *                        per step (docs/reconstruction/solve-tuning-20261022.md).  The
  *                        chunks of a window share no tail vertex and their
  *                        deferred core updates go to fixed slots, so the bits
  *                        do not change.
  *   VSDLSS_TAIL_STATS=1  per replay, to stderr: wall time, the threads' time
  *                        inside chunks (sum, busiest thread), the utilization
  *                        sum / (threads x wall), and the longest chunk. */
-int vsdlss_reduce_tail_lpt = -1;       /* -1: VSDLSS_TAIL_LPT */
+int vsdlss_reduce_tail_lpt = -1;       /* -1: VSDLSS_TAIL_LPT (default 1) */
 static int tail_lpt_on(void)
 {
     int on=__atomic_load_n(&vsdlss_reduce_tail_lpt,__ATOMIC_RELAXED);
-    if(on<0) { const char *e=getenv("VSDLSS_TAIL_LPT"); on=e && atoi(e)!=0; __atomic_store_n(&vsdlss_reduce_tail_lpt,on,__ATOMIC_RELAXED); }
+    if(on<0) { const char *e=getenv("VSDLSS_TAIL_LPT"); on=!(e && *e && atoi(e)==0); __atomic_store_n(&vsdlss_reduce_tail_lpt,on,__ATOMIC_RELAXED); }
     return on;
 }
 static int tail_stats_on(void)
